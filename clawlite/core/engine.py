@@ -163,6 +163,15 @@ class AgentEngine:
         "xhigh": "high",
         "extrahigh": "high",
     }
+    _QUOTA_429_SIGNALS: tuple[str, ...] = (
+        "insufficient_quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "exceeded your current quota",
+        "billing hard limit",
+        "out of credits",
+        "billing exhausted",
+    )
 
     def __init__(
         self,
@@ -386,6 +395,13 @@ class AgentEngine:
         return ProviderUnknownError(reason or exc.__class__.__name__)
 
     @staticmethod
+    def _is_quota_429_detail(detail: str) -> bool:
+        lowered = str(detail or "").strip().lower()
+        if not lowered:
+            return False
+        return any(token in lowered for token in AgentEngine._QUOTA_429_SIGNALS)
+
+    @staticmethod
     def _provider_error_message(error: AgentLoopError) -> str:
         if isinstance(error, ProviderAuthError):
             provider = str(error) or "provider"
@@ -400,6 +416,11 @@ class AgentEngine:
                     "Check that your API key matches the selected model/provider."
                 )
             if error.status_code == 429:
+                if AgentEngine._is_quota_429_detail(error.detail):
+                    return (
+                        "Sorry, the model provider quota is exhausted right now. "
+                        "Please top up billing or switch to a provider/model with available quota."
+                    )
                 return "Sorry, the model is rate-limited right now. Please try again in a moment."
             if error.status_code == 400:
                 return "Sorry, the model request was rejected (400). Check model/provider configuration and try again."

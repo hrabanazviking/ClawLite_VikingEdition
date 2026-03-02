@@ -56,6 +56,10 @@ def _colorize(text: str, color: str | None, *, enable_color: bool) -> str:
     return f"{color}{text}{_ANSI_RESET}"
 
 
+def _escape_braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
+
+
 def _stderr_supports_color() -> bool:
     force_color = os.getenv("FORCE_COLOR", "").strip()
     if force_color and force_color != "0":
@@ -77,7 +81,12 @@ def _make_text_formatter(*, enable_color: bool):
         message = str(record.get("message", ""))
         exception = record.get("exception")
         exception_text = f"\n{exception}" if exception else ""
-        return f"{timestamp} | {level} | {colored_event} | {module} | {message}{exception_text}\n"
+        safe_level = _escape_braces(level)
+        safe_event = _escape_braces(colored_event)
+        safe_module = _escape_braces(module)
+        safe_message = _escape_braces(message)
+        safe_exception = _escape_braces(exception_text)
+        return f"{timestamp} | {safe_level} | {safe_event} | {safe_module} | {safe_message}{safe_exception}\n"
 
     return _formatter
 

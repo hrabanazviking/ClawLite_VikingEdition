@@ -252,6 +252,20 @@ def test_engine_handles_typed_provider_errors() -> None:
     asyncio.run(_scenario())
 
 
+def test_engine_returns_quota_specific_message_for_quota_429() -> None:
+    async def _scenario() -> None:
+        engine = AgentEngine(
+            provider=FakeErrorProvider("provider_http_error:429:insufficient_quota: billing exhausted"),
+            tools=FakeTools(),
+        )
+        out = await engine.run(session_id="cli:error-quota", user_text="hello")
+        text = out.text.lower()
+        assert "quota" in text
+        assert "billing" in text or "provider" in text
+
+    asyncio.run(_scenario())
+
+
 def test_engine_reasoning_effort_uses_config_default() -> None:
     async def _scenario() -> None:
         provider = FakeProviderWithReasoningCapture()

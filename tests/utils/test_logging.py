@@ -94,3 +94,22 @@ def test_text_formatter_applies_level_and_event_colors() -> None:
     line = formatter(record)
     assert "\x1b[32mINFO\x1b[0m" in line
     assert "\x1b[36magent.loop\x1b[0m" in line
+
+
+def test_text_formatter_handles_braces_in_message_and_exception(monkeypatch) -> None:
+    _reset_logging_state()
+    monkeypatch.setenv("CLAWLITE_LOG_STDERR", "0")
+    logging_utils.setup_logging(level="INFO")
+
+    rows: list[str] = []
+    sink_id = logger.add(rows.append, format=logging_utils._text_format)
+    logger.info("provider detail payload={\"error\":\"quota\"} trailing={")
+    try:
+        raise RuntimeError("quota exhausted {insufficient_quota")
+    except RuntimeError:
+        logger.exception("provider exception with json={\"code\":\"insufficient_quota\"}")
+    logger.remove(sink_id)
+
+    joined = "\n".join(rows)
+    assert "payload={\"error\":\"quota\"} trailing={" in joined
+    assert "quota exhausted {insufficient_quota" in joined

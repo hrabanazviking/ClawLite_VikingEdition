@@ -12,6 +12,19 @@ from clawlite.providers.base import LLMProvider, LLMResult, ToolCall
 
 
 class LiteLLMProvider(LLMProvider):
+    _HARD_QUOTA_SIGNALS = (
+        "insufficient_quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "exceeded your current quota",
+        "billing hard limit",
+        "billing_hard_limit",
+        "credit balance is too low",
+        "out of credits",
+        "payment required",
+        "billing exhausted",
+    )
+
     def __init__(
         self,
         *,
@@ -63,6 +76,59 @@ class LiteLLMProvider(LLMProvider):
                     parts.append(text.strip())
             return "\n".join(parts).strip()
         return str(content or "").strip()
+
+    @staticmethod
+    def _error_payload(resp: httpx.Response | None) -> dict[str, Any] | None:
+        if resp is None:
+            return None
+        try:
+            payload = resp.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _error_detail(cls, resp: httpx.Response | None) -> str:
+        if resp is None:
+            return ""
+        detail = ""
+        payload = cls._error_payload(resp)
+
+        if isinstance(payload, dict):
+            if isinstance(payload.get("error"), dict):
+                detail = str(payload["error"].get("message", "")).strip()
+            if not detail:
+                detail = str(payload.get("message", "") or payload.get("detail", "")).strip()
+
+        if not detail:
+            detail = (resp.text or "").strip()
+
+        detail = " ".join(detail.split())
+        return detail[:300]
+
+    @classmethod
+    def _is_hard_quota_429(cls, *, detail: str, resp: httpx.Response | None) -> bool:
+        pieces: list[str] = []
+        if detail:
+            pieces.append(detail)
+
+        payload = cls._error_payload(resp)
+        if isinstance(payload, dict):
+            error_obj = payload.get("error")
+            if isinstance(error_obj, dict):
+                for key in ("code", "type", "message"):
+                    value = error_obj.get(key)
+                    if value is not None:
+                        pieces.append(str(value))
+            for key in ("message", "detail", "code", "type"):
+                value = payload.get(key)
+                if value is not None:
+                    pieces.append(str(value))
+
+        haystack = " ".join(pieces).lower()
+        if not haystack:
+            return False
+        return any(signal in haystack for signal in cls._HARD_QUOTA_SIGNALS)
 
     @staticmethod
     def _parse_arguments(raw: Any) -> dict[str, Any]:
@@ -262,9 +328,12 @@ class LiteLLMProvider(LLMProvider):
                 )
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None
-                if status == 429 and attempt < attempts:
+                detail = self._error_detail(exc.response)
+                if status == 429 and attempt < attempts and not self._is_hard_quota_429(detail=detail, resp=exc.response):
                     await asyncio.sleep(wait_seconds)
                     continue
+                if detail:
+                    raise RuntimeError(f"provider_http_error:{status}:{detail}") from exc
                 raise RuntimeError(f"provider_http_error:{status}") from exc
             except httpx.RequestError as exc:
                 raise RuntimeError(f"provider_network_error:{exc}") from exc
@@ -323,27 +392,6 @@ class LiteLLMProvider(LLMProvider):
         attempts = self._max_attempts()
         wait_seconds = self._wait_seconds()
 
-        def _error_detail(resp: httpx.Response | None) -> str:
-            if resp is None:
-                return ""
-            detail = ""
-            try:
-                payload = resp.json()
-            except Exception:
-                payload = None
-
-            if isinstance(payload, dict):
-                if isinstance(payload.get("error"), dict):
-                    detail = str(payload["error"].get("message", "")).strip()
-                if not detail:
-                    detail = str(payload.get("message", "") or payload.get("detail", "")).strip()
-
-            if not detail:
-                detail = (resp.text or "").strip()
-
-            detail = " ".join(detail.split())
-            return detail[:300]
-
         for attempt in range(1, attempts + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -356,10 +404,10 @@ class LiteLLMProvider(LLMProvider):
                 return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "litellm"})
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None
-                if status == 429 and attempt < attempts:
+                detail = self._error_detail(exc.response)
+                if status == 429 and attempt < attempts and not self._is_hard_quota_429(detail=detail, resp=exc.response):
                     await asyncio.sleep(wait_seconds)
                     continue
-                detail = _error_detail(exc.response)
                 if detail:
                     raise RuntimeError(f"provider_http_error:{status}:{detail}") from exc
                 raise RuntimeError(f"provider_http_error:{status}") from exc

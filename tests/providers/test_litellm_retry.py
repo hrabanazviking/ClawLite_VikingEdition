@@ -17,7 +17,7 @@ class _FakeResponse:
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             request = httpx.Request("POST", "https://api.example/v1/chat/completions")
-            response = httpx.Response(self.status_code, request=request)
+            response = httpx.Response(self.status_code, request=request, json=self._payload)
             raise httpx.HTTPStatusError("err", request=request, response=response)
 
     def json(self) -> dict:
@@ -31,8 +31,8 @@ def test_litellm_provider_retries_429_then_success(monkeypatch) -> None:
         monkeypatch.setenv("CLAWLITE_PROVIDER_429_WAIT_SECONDS", "0")
 
         responses = [
-            _FakeResponse(429, {}),
-            _FakeResponse(429, {}),
+            _FakeResponse(429, {"error": {"message": "Rate limit reached, try again"}}),
+            _FakeResponse(429, {"error": {"message": "Rate limit reached, try again"}}),
             _FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
         ]
 
@@ -42,6 +42,42 @@ def test_litellm_provider_retries_429_then_success(monkeypatch) -> None:
 
         assert out.text == "ok"
         assert post_mock.call_count == 3
+
+    asyncio.run(_scenario())
+
+
+def test_litellm_provider_quota_429_fails_fast_without_retry(monkeypatch) -> None:
+    async def _scenario() -> None:
+        provider = LiteLLMProvider(base_url="https://api.example/v1", api_key="k", model="gpt-test")
+        monkeypatch.setenv("CLAWLITE_PROVIDER_429_MAX_ATTEMPTS", "5")
+        monkeypatch.setenv("CLAWLITE_PROVIDER_429_WAIT_SECONDS", "60")
+
+        responses = [
+            _FakeResponse(
+                429,
+                {
+                    "error": {
+                        "message": "You exceeded your current quota, please check your plan and billing details.",
+                        "code": "insufficient_quota",
+                    }
+                },
+            )
+        ]
+
+        post_mock = AsyncMock(side_effect=responses)
+        sleep_mock = AsyncMock()
+        with patch("httpx.AsyncClient.post", new=post_mock), patch("asyncio.sleep", new=sleep_mock):
+            try:
+                await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+            except RuntimeError as exc:
+                message = str(exc)
+                assert message.startswith("provider_http_error:429:")
+                assert "quota" in message.lower()
+            else:
+                raise AssertionError("expected provider error")
+
+        assert post_mock.call_count == 1
+        sleep_mock.assert_not_called()
 
     asyncio.run(_scenario())
 
