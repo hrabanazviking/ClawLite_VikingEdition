@@ -22,3 +22,51 @@ def test_prompt_builder_reads_workspace_files(tmp_path: Path) -> None:
     assert "fact A" in out.memory_section
     assert out.history_messages == [{"role": "user", "content": "old"}]
     assert "[Runtime Context" in out.runtime_context
+    assert "<untrusted_runtime_context>" in out.runtime_context
+    assert "</untrusted_runtime_context>" in out.runtime_context
+
+
+def test_prompt_builder_keeps_stable_section_order_and_sorted_skills(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("I am Claw", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=["zeta", "alpha"],
+    )
+
+    identity_pos = out.system_prompt.find("## IDENTITY.md")
+    skills_pos = out.system_prompt.find("[Skills]")
+    assert identity_pos >= 0
+    assert skills_pos > identity_pos
+    assert "- alpha\n- zeta" in out.system_prompt
+
+
+def test_prompt_builder_applies_token_budget_shaping_deterministically(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("I am Claw " * 120, encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path, context_token_budget=180)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=["memory-one " * 40, "memory-two " * 40],
+        history=[
+            {"role": "user", "content": "old-message " * 50},
+            {"role": "assistant", "content": "recent-message " * 50},
+        ],
+        skills_for_prompt=["s1"],
+        skills_context="skill-context " * 200,
+        channel="telegram",
+        chat_id="42",
+    )
+
+    assert "[truncated to fit token budget]" in out.system_prompt
+    assert "[truncated to fit token budget]" in out.skills_context
+    assert "memory-one" in out.memory_section
+    assert "memory-two" not in out.memory_section
+    assert len(out.history_messages) == 1
+    assert "recent-message" in out.history_messages[0]["content"]
+    assert "old-message" not in out.history_messages[0]["content"]

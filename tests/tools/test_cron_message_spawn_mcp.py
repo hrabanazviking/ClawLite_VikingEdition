@@ -102,3 +102,32 @@ def test_spawn_tool() -> None:
         assert run_id
 
     asyncio.run(_scenario())
+
+
+def test_spawn_tool_surfaces_queue_limits(tmp_path) -> None:
+    async def _scenario() -> None:
+        gate = asyncio.Event()
+
+        async def _slow_runner(_session_id: str, task: str) -> str:
+            await gate.wait()
+            return task
+
+        manager = SubagentManager(
+            state_path=tmp_path / "state",
+            max_concurrent_runs=1,
+            max_queued_runs=0,
+            per_session_quota=2,
+        )
+        tool = SpawnTool(manager, _slow_runner)
+        await tool.run({"task": "first"}, ToolContext(session_id="s1"))
+
+        try:
+            await tool.run({"task": "second"}, ToolContext(session_id="s2"))
+            raise AssertionError("expected ValueError for queue limit")
+        except ValueError as exc:
+            assert "queue limit" in str(exc)
+
+        gate.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(_scenario())

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from clawlite.core.subagent import SubagentManager
+from clawlite.core.subagent import SubagentLimitError, SubagentManager
 
 
 async def _runner(_session_id: str, task: str) -> str:
@@ -17,5 +18,84 @@ def test_subagent_manager_spawn_and_list() -> None:
         runs = mgr.list_runs(session_id="s1")
         assert runs
         assert runs[0].run_id == run.run_id
+
+    asyncio.run(_scenario())
+
+
+def test_subagent_manager_queue_limits_and_session_quota(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        gate = asyncio.Event()
+
+        async def _slow_runner(_session_id: str, task: str) -> str:
+            await gate.wait()
+            return f"done:{task}"
+
+        mgr = SubagentManager(
+            state_path=tmp_path / "state",
+            max_concurrent_runs=1,
+            max_queued_runs=1,
+            per_session_quota=2,
+        )
+
+        first = await mgr.spawn(session_id="s1", task="t1", runner=_slow_runner)
+        second = await mgr.spawn(session_id="s1", task="t2", runner=_slow_runner)
+
+        assert first.status == "running"
+        assert second.status == "queued"
+
+        try:
+            await mgr.spawn(session_id="s1", task="t3", runner=_slow_runner)
+            raise AssertionError("expected SubagentLimitError for per-session quota")
+        except SubagentLimitError:
+            pass
+
+        try:
+            await mgr.spawn(session_id="s2", task="t4", runner=_slow_runner)
+            raise AssertionError("expected SubagentLimitError for queue cap")
+        except SubagentLimitError:
+            pass
+
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        runs = {row.task: row.status for row in mgr.list_runs(session_id="s1")}
+        assert runs["t1"] == "done"
+        assert runs["t2"] == "done"
+
+    asyncio.run(_scenario())
+
+
+def test_subagent_manager_restores_resumable_state(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        blocker = asyncio.Event()
+
+        async def _blocking_runner(_session_id: str, task: str) -> str:
+            await blocker.wait()
+            return f"done:{task}"
+
+        state_path = tmp_path / "state"
+        mgr = SubagentManager(state_path=state_path, max_concurrent_runs=1)
+        run = await mgr.spawn(session_id="s1", task="long", runner=_blocking_runner)
+
+        restored_mgr = SubagentManager(state_path=state_path, max_concurrent_runs=1)
+        restored = restored_mgr.list_runs(session_id="s1")[0]
+        assert restored.run_id == run.run_id
+        assert restored.status == "interrupted"
+        assert restored.metadata.get("resumable") is True
+
+        assert mgr.cancel(run.run_id) is True
+        await asyncio.sleep(0)
+
+        async def _resume_runner(_session_id: str, task: str) -> str:
+            return f"resumed:{task}"
+
+        resumed = await restored_mgr.resume(run_id=run.run_id, runner=_resume_runner)
+        assert resumed.status in {"running", "queued"}
+        await asyncio.sleep(0)
+
+        final = restored_mgr.list_runs(session_id="s1")[0]
+        assert final.status == "done"
+        assert final.result == "resumed:long"
+        assert int(final.metadata.get("resume_attempts", 0)) >= 1
 
     asyncio.run(_scenario())

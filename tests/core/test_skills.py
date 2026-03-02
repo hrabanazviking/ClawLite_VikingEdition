@@ -83,7 +83,10 @@ def test_skills_loader_can_load_body_and_render_prompt(tmp_path: Path) -> None:
     assert "Use alpha." in content
 
     prompt_rows = loader.render_for_prompt()
-    assert any("alpha:" in row for row in prompt_rows)
+    assert len(prompt_rows) == 1
+    assert "<available_skills>" in prompt_rows[0]
+    assert "<name>alpha</name>" in prompt_rows[0]
+    assert "<location>" in prompt_rows[0]
 
 
 def test_skills_loader_marks_invalid_execution_contract(tmp_path: Path) -> None:
@@ -106,3 +109,79 @@ def test_skills_loader_marks_invalid_execution_contract(tmp_path: Path) -> None:
     assert rows[0].available is False
     assert rows[0].execution_kind == "invalid"
     assert "contract:command_and_script_are_mutually_exclusive" in rows[0].contract_issues
+
+
+def test_skills_loader_duplicate_policy_prefers_workspace_over_builtin(tmp_path: Path, monkeypatch) -> None:
+    builtin = tmp_path / "builtin"
+    workspace = tmp_path / ".clawlite" / "workspace" / "skills"
+    marketplace = tmp_path / ".clawlite" / "marketplace" / "skills"
+
+    (builtin / "dup").mkdir(parents=True, exist_ok=True)
+    (workspace / "dup").mkdir(parents=True, exist_ok=True)
+    (marketplace / "dup").mkdir(parents=True, exist_ok=True)
+
+    (builtin / "dup" / "SKILL.md").write_text(
+        "---\nname: dup\ndescription: from builtin\n---\n",
+        encoding="utf-8",
+    )
+    (workspace / "dup" / "SKILL.md").write_text(
+        "---\nname: dup\ndescription: from workspace\n---\n",
+        encoding="utf-8",
+    )
+    (marketplace / "dup" / "SKILL.md").write_text(
+        "---\nname: dup\ndescription: from marketplace\n---\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loader = SkillsLoader(builtin_root=builtin)
+    row = loader.get("dup")
+    assert row is not None
+    assert row.source == "workspace"
+    assert row.description == "from workspace"
+
+
+def test_skills_loader_parses_multiline_metadata_json(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "meta"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: meta\n"
+        "description: metadata parser\n"
+        "metadata: {\n"
+        '  "clawlite": {\n'
+        '    "requires": {"env": ["TEST_MULTI_ENV"]}\n'
+        "  }\n"
+        "}\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("meta")
+    assert row is not None
+    assert "env:TEST_MULTI_ENV" in row.missing
+
+
+def test_skills_loader_normalizes_requirement_schema_and_reports_invalid_env_names(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "schema"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: schema\n"
+        "description: requirement schema\n"
+        'requirements: {"bins": ["python3"], "env": ["GOOD_ENV", "bad-env"], "os": ["Linux"]}\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("schema")
+    assert row is not None
+    assert row.requirements["os"] == ["linux"]
+    assert "python3" in row.requirements["bins"]
+    assert "GOOD_ENV" in row.requirements["env"]
+    assert any(issue.startswith("requirements:invalid_env_name:bad-env") for issue in row.contract_issues)
+    assert row.available is False

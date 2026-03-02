@@ -220,6 +220,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         memory=memory,
         prompt_builder=prompt,
         skills_loader=skills,
+        subagent_state_path=Path(config.state_path) / "subagents",
         max_iterations=config.agents.defaults.max_tool_iterations,
         max_tokens=config.agents.defaults.max_tokens,
         temperature=config.agents.defaults.temperature,

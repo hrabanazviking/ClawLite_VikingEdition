@@ -13,8 +13,23 @@ ClawLite usa skills em markdown (`SKILL.md`) com discovery automático.
 - `name`
 - `description`
 - `always`
-- `requires`
+- `requires` (legado, lista CSV de binários)
+- `requirements` (novo formato JSON com `bins`, `env`, `os`)
 - `command` / `script` (metadado para execução)
+
+Também é aceito `metadata` JSON com namespace `clawlite`/`nanobot`/`openclaw`, por exemplo:
+
+```yaml
+metadata: {"clawlite":{"requires":{"bins":["gh"],"env":["GITHUB_TOKEN"]},"os":["linux","darwin"]}}
+```
+
+## Política de duplicidade
+
+Quando duas skills possuem o mesmo `name`, a resolução é determinística:
+
+1. `workspace` vence `marketplace`
+2. `marketplace` vence `builtin`
+3. empate na mesma origem: menor caminho lexicográfico (`path`) vence
 
 ## Builtins atuais
 
@@ -53,3 +68,17 @@ Fluxo:
 1. resolve skill por nome
 2. valida disponibilidade (`bins/env/os`)
 3. executa `command` ou `script` mapeado
+
+## Formato de resumo em runtime
+
+`render_for_prompt()` usa contrato XML compatível com a tool de skills:
+
+```xml
+<available_skills>
+<skill>
+<name>github</name>
+<description>Interact with GitHub using gh CLI for PRs, issues, runs and API queries.</description>
+<location>/path/to/SKILL.md</location>
+</skill>
+</available_skills>
+```

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from clawlite.core.subagent import SubagentManager
+from clawlite.core.subagent import SubagentLimitError, SubagentManager
 from clawlite.tools.base import Tool, ToolContext
 
 
@@ -25,5 +25,8 @@ class SpawnTool(Tool):
         task = str(arguments.get("task", "")).strip()
         if not task:
             raise ValueError("task is required")
-        run = await self.manager.spawn(session_id=ctx.session_id, task=task, runner=self.runner)
+        try:
+            run = await self.manager.spawn(session_id=ctx.session_id, task=task, runner=self.runner)
+        except SubagentLimitError as exc:
+            raise ValueError(str(exc)) from exc
         return run.run_id

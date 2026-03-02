@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import asyncio
 from typing import Any
 
-from clawlite.core.engine import AgentEngine, ProviderResult, ToolCall
+from clawlite.core.engine import AgentEngine, ProviderResult, ToolCall, TurnBudget
 
 
 class FakeProvider:
@@ -62,6 +62,52 @@ class FakeProviderWithSamplingCapture:
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
 
+class FakeLongToolProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        self.calls += 1
+        self.snapshots.append(messages)
+        if self.calls == 1:
+            return ProviderResult(
+                text="calling tool",
+                tool_calls=[ToolCall(name="echo", arguments={"text": ""})],
+                model="fake/model",
+            )
+        return ProviderResult(text="done", tool_calls=[], model="fake/model")
+
+
+class FakeBurstToolProvider:
+    async def complete(self, *, messages, tools):
+        return ProviderResult(
+            text="needs many tools",
+            tool_calls=[
+                ToolCall(name="echo", arguments={"text": "one"}),
+                ToolCall(name="echo", arguments={"text": "two"}),
+            ],
+            model="fake/model",
+        )
+
+
+class FakeNeverCalledProvider:
+    def __init__(self) -> None:
+        self.called = False
+
+    async def complete(self, *, messages, tools):
+        self.called = True
+        return ProviderResult(text="unexpected", tool_calls=[], model="fake/model")
+
+
+class FakeErrorProvider:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    async def complete(self, *, messages, tools):
+        raise RuntimeError(self.message)
+
+
 def test_engine_runs_tool_roundtrip() -> None:
     async def _scenario() -> None:
         engine = AgentEngine(
@@ -102,5 +148,83 @@ def test_engine_passes_max_tokens_and_temperature_when_supported() -> None:
         assert out.text == "ok"
         assert provider.last_max_tokens == 2048
         assert provider.last_temperature == 0.25
+
+    asyncio.run(_scenario())
+
+
+def test_engine_respects_stop_event_before_provider_call() -> None:
+    async def _scenario() -> None:
+        provider = FakeNeverCalledProvider()
+        engine = AgentEngine(provider=provider, tools=FakeTools())
+        stop_event = asyncio.Event()
+        stop_event.set()
+        out = await engine.run(session_id="cli:stop", user_text="hello", stop_event=stop_event)
+        assert out.model == "engine/stop"
+        assert "stopped" in out.text.lower()
+        assert provider.called is False
+
+    asyncio.run(_scenario())
+
+
+def test_engine_truncates_tool_result_payload() -> None:
+    async def _scenario() -> None:
+        provider = FakeLongToolProvider()
+        tools = FakeTools()
+        async def _long_execute(name, arguments, *, session_id: str) -> str:
+            return "x" * 200
+
+        tools.execute = _long_execute  # type: ignore[method-assign]
+        engine = AgentEngine(provider=provider, tools=tools, max_tool_result_chars=32)
+        await engine.run(session_id="cli:truncate", user_text="hello")
+        assert provider.calls == 2
+        tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
+        assert len(tool_rows) == 1
+        content = str(tool_rows[0].get("content", ""))
+        assert len(content) <= 32
+        assert "truncated" in content.lower()
+
+    asyncio.run(_scenario())
+
+
+def test_engine_enforces_per_turn_tool_budget() -> None:
+    async def _scenario() -> None:
+        engine = AgentEngine(provider=FakeBurstToolProvider(), tools=FakeTools())
+        out = await engine.run(
+            session_id="cli:budget",
+            user_text="run",
+            turn_budget=TurnBudget(max_tool_calls=1),
+        )
+        assert "tool-call budget" in out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_emits_progress_events() -> None:
+    async def _scenario() -> None:
+        provider = FakeLongToolProvider()
+        engine = AgentEngine(provider=provider, tools=FakeTools())
+        stages: list[str] = []
+
+        def _hook(event) -> None:
+            stages.append(event.stage)
+
+        out = await engine.run(session_id="cli:progress", user_text="run", progress_hook=_hook)
+        assert out.text == "done"
+        assert "turn_started" in stages
+        assert "llm_request" in stages
+        assert "tool_call" in stages
+        assert "tool_result" in stages
+        assert "turn_completed" in stages
+
+    asyncio.run(_scenario())
+
+
+def test_engine_handles_typed_provider_errors() -> None:
+    async def _scenario() -> None:
+        engine = AgentEngine(provider=FakeErrorProvider("provider_network_error:timeout"), tools=FakeTools())
+        out = await engine.run(session_id="cli:error", user_text="hello")
+        text = out.text.lower()
+        assert "sorry" in text
+        assert "network" in text
 
     asyncio.run(_scenario())

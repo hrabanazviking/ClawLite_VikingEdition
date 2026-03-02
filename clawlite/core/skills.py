@@ -6,35 +6,110 @@ import platform
 import re
 import shlex
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 
-def _to_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+_KEY_VALUE_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.*)$")
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_SOURCE_PRIORITY = {"builtin": 10, "marketplace": 20, "workspace": 30}
 
 
-def _extract_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _to_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_inline_value(raw: str) -> object:
+    value = raw.strip()
+    if not value:
+        return ""
+    if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+        return value[1:-1]
+    low = value.lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    if value[0] in "[{":
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _serialize_frontmatter_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _extract_frontmatter_block(text: str) -> tuple[str, str] | None:
+    raw = text[1:] if text.startswith("\ufeff") else text
+    lines = raw.splitlines()
+    if not lines:
+        return None
+    if lines[0].strip() != "---":
+        return None
+
+    end_idx = -1
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            end_idx = idx
+            break
+    if end_idx == -1:
+        return None
+
+    front = "\n".join(lines[1:end_idx])
+    body = "\n".join(lines[end_idx + 1 :])
+    return front, body
+
+
+def _extract_frontmatter(text: str) -> tuple[dict[str, object], str]:
     """
     Parse markdown frontmatter without requiring PyYAML.
     Returns: (metadata, body_without_frontmatter)
     """
-    data: dict[str, str] = {}
-    body = text
-    if not text.startswith("---\n"):
-        return data, body
-    marker = "\n---\n"
-    end = text.find(marker, 4)
-    if end == -1:
-        return data, body
-    front = text[4:end]
-    body = text[end + len(marker) :]
-    for line in front.splitlines():
-        if ":" not in line:
+    data: dict[str, object] = {}
+    split = _extract_frontmatter_block(text)
+    if split is None:
+        return data, text
+    front, body = split
+
+    current_key = ""
+    current_value: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_key, current_value
+        if not current_key:
+            return
+        joined = "\n".join(current_value).rstrip()
+        data[current_key] = _parse_inline_value(joined)
+        current_key = ""
+        current_value = []
+
+    for raw_line in front.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        key, value = line.split(":", 1)
-        data[key.strip()] = value.strip().strip("'").strip('"')
+        match = _KEY_VALUE_RE.match(line)
+        if match and line[: len(line) - len(line.lstrip())] == "":
+            flush()
+            current_key = match.group("key").strip()
+            current_value = [match.group("value")]
+            continue
+        if current_key and line.startswith((" ", "\t")):
+            current_value.append(line.lstrip())
+            continue
+        if current_key and not match:
+            current_value.append(line)
+    flush()
     return data, body
 
 
@@ -49,33 +124,117 @@ def _normalize_os_name(name: str) -> str:
     return raw
 
 
-def _extract_requirement_map(meta: dict[str, str]) -> dict[str, list[str]]:
-    out = {"bins": [], "env": [], "os": []}
+def _coerce_list(value: object, *, normalize_os: bool = False) -> tuple[list[str], list[str]]:
+    if value is None:
+        return [], []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return [], []
+        if raw.startswith("["):
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = [item.strip() for item in raw.split(",") if item.strip()]
+            value = decoded
+        else:
+            value = [item.strip() for item in raw.split(",") if item.strip()]
 
-    raw_requires = meta.get("requires", "")
-    if raw_requires:
-        out["bins"].extend([item.strip() for item in raw_requires.split(",") if item.strip()])
+    if not isinstance(value, list):
+        return [], ["requirements:expected_list"]
 
-    raw_metadata = meta.get("metadata", "")
-    if raw_metadata:
+    out: list[str] = []
+    issues: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        out.append(_normalize_os_name(text) if normalize_os else text)
+    return out, issues
+
+
+def _extract_runtime_metadata(meta: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+    raw = meta.get("metadata")
+    if raw is None:
+        return {}, []
+    if isinstance(raw, Mapping):
+        payload = dict(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}, []
         try:
-            payload = json.loads(raw_metadata)
+            decoded = json.loads(text)
         except json.JSONDecodeError:
-            payload = {}
-        if isinstance(payload, dict):
-            nested = payload.get("nanobot") or payload.get("openclaw") or payload.get("clawlite") or {}
-            if isinstance(nested, dict):
-                requires = nested.get("requires", {})
-                if isinstance(requires, dict):
-                    bins = requires.get("bins", [])
-                    env = requires.get("env", [])
-                    if isinstance(bins, list):
-                        out["bins"].extend(str(item).strip() for item in bins if str(item).strip())
-                    if isinstance(env, list):
-                        out["env"].extend(str(item).strip() for item in env if str(item).strip())
-                os_list = nested.get("os", [])
-                if isinstance(os_list, list):
-                    out["os"].extend(_normalize_os_name(str(item)) for item in os_list if str(item).strip())
+            return {}, ["metadata:invalid_json"]
+        payload = decoded if isinstance(decoded, dict) else {}
+    else:
+        return {}, ["metadata:invalid_type"]
+
+    nested = payload.get("clawlite") or payload.get("nanobot") or payload.get("openclaw") or {}
+    if isinstance(nested, Mapping):
+        return dict(nested), []
+    if nested:
+        return {}, ["metadata:runtime_namespace_invalid_type"]
+    return {}, []
+
+
+def _extract_requirement_map(meta: dict[str, object]) -> tuple[dict[str, list[str]], list[str]]:
+    out = {"bins": [], "env": [], "os": []}
+    issues: list[str] = []
+
+    legacy_bins, legacy_issues = _coerce_list(meta.get("requires"))
+    out["bins"].extend(legacy_bins)
+    issues.extend(legacy_issues)
+
+    metadata_runtime, metadata_issues = _extract_runtime_metadata(meta)
+    issues.extend(metadata_issues)
+    if metadata_runtime:
+        runtime_requires = metadata_runtime.get("requires", {})
+        if isinstance(runtime_requires, Mapping):
+            bins, bins_issues = _coerce_list(runtime_requires.get("bins"))
+            env, env_issues = _coerce_list(runtime_requires.get("env"))
+            os_items, os_issues = _coerce_list(runtime_requires.get("os"), normalize_os=True)
+            out["bins"].extend(bins)
+            out["env"].extend(env)
+            out["os"].extend(os_items)
+            issues.extend(bins_issues)
+            issues.extend(env_issues)
+            issues.extend(os_issues)
+        elif runtime_requires:
+            issues.append("requirements:metadata_requires_invalid_type")
+
+        runtime_os, runtime_os_issues = _coerce_list(metadata_runtime.get("os"), normalize_os=True)
+        out["os"].extend(runtime_os)
+        issues.extend(runtime_os_issues)
+
+    explicit_requirements = meta.get("requirements")
+    if explicit_requirements is not None:
+        decoded = explicit_requirements
+        if isinstance(decoded, str):
+            try:
+                decoded = json.loads(decoded)
+            except json.JSONDecodeError:
+                issues.append("requirements:invalid_json")
+                decoded = None
+        if isinstance(decoded, Mapping):
+            bins, bins_issues = _coerce_list(decoded.get("bins"))
+            env, env_issues = _coerce_list(decoded.get("env"))
+            os_items, os_issues = _coerce_list(decoded.get("os"), normalize_os=True)
+            out["bins"].extend(bins)
+            out["env"].extend(env)
+            out["os"].extend(os_items)
+            issues.extend(bins_issues)
+            issues.extend(env_issues)
+            issues.extend(os_issues)
+        elif decoded is not None:
+            issues.append("requirements:invalid_type")
+
+    env_issue = "requirements:invalid_env_name"
+    for item in list(out["env"]):
+        if _ENV_NAME_RE.fullmatch(item):
+            continue
+        issues.append(f"{env_issue}:{item}")
 
     for key in out:
         dedupe: list[str] = []
@@ -86,7 +245,14 @@ def _extract_requirement_map(meta: dict[str, str]) -> dict[str, list[str]]:
             seen.add(item)
             dedupe.append(item)
         out[key] = dedupe
-    return out
+    unique_issues: list[str] = []
+    seen_issues: set[str] = set()
+    for issue in issues:
+        if issue in seen_issues:
+            continue
+        seen_issues.add(issue)
+        unique_issues.append(issue)
+    return out, unique_issues
 
 
 def _missing_requirements(requirements: dict[str, list[str]]) -> list[str]:
@@ -105,15 +271,19 @@ def _missing_requirements(requirements: dict[str, list[str]]) -> list[str]:
     return missing
 
 
-def _build_execution_contract(meta: dict[str, str]) -> tuple[str, str, list[str], list[str]]:
+def _escape_xml(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _build_execution_contract(meta: Mapping[str, object]) -> tuple[str, str, list[str], list[str]]:
     """
     Build a deterministic execution contract from frontmatter.
 
     Returns: (kind, target, argv, issues)
     - kind: none | command | script | invalid
     """
-    command = meta.get("command", "").strip()
-    script = meta.get("script", "").strip()
+    command = str(meta.get("command", "")).strip()
+    script = str(meta.get("script", "")).strip()
     issues: list[str] = []
 
     if command and script:
@@ -158,6 +328,7 @@ class SkillSpec:
     metadata: dict[str, str]
     available: bool
     missing: list[str]
+    requirements: dict[str, list[str]]
     execution_kind: str
     execution_target: str
     execution_argv: list[str]
@@ -187,20 +358,21 @@ class SkillsLoader:
     def _parse_header(path: Path, *, source: str) -> SkillSpec | None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         meta, body = _extract_frontmatter(text)
-        name = meta.get("name", "").strip() or path.parent.name
-        description = meta.get("description", "").strip()
+        name = str(meta.get("name", "")).strip() or path.parent.name
+        description = str(meta.get("description", "")).strip()
         always = _to_bool(meta.get("always", "false"))
-        requires = [item.strip() for item in meta.get("requires", "").split(",") if item.strip()]
-        command = meta.get("command", "").strip()
-        script = meta.get("script", "").strip()
-        homepage = meta.get("homepage", "").strip()
+        requires, _ = _coerce_list(meta.get("requires"))
+        command = str(meta.get("command", "")).strip()
+        script = str(meta.get("script", "")).strip()
+        homepage = str(meta.get("homepage", "")).strip()
 
         if not name:
             return None
 
-        req_map = _extract_requirement_map(meta)
+        req_map, req_issues = _extract_requirement_map(meta)
         missing = _missing_requirements(req_map)
         execution_kind, execution_target, execution_argv, contract_issues = _build_execution_contract(meta)
+        metadata_as_text = {key: _serialize_frontmatter_value(value) for key, value in meta.items()}
 
         return SkillSpec(
             name=name,
@@ -213,14 +385,23 @@ class SkillsLoader:
             script=script,
             homepage=homepage,
             body=body.strip(),
-            metadata=meta,
-            available=(not missing) and (not contract_issues),
+            metadata=metadata_as_text,
+            available=(not missing) and (not contract_issues) and (not req_issues),
             missing=missing,
+            requirements=req_map,
             execution_kind=execution_kind,
             execution_target=execution_target,
             execution_argv=execution_argv,
-            contract_issues=contract_issues,
+            contract_issues=[*req_issues, *contract_issues],
         )
+
+    @staticmethod
+    def _is_preferred_candidate(candidate: SkillSpec, current: SkillSpec) -> bool:
+        candidate_priority = _SOURCE_PRIORITY.get(candidate.source, 0)
+        current_priority = _SOURCE_PRIORITY.get(current.source, 0)
+        if candidate_priority != current_priority:
+            return candidate_priority > current_priority
+        return str(candidate.path) < str(current.path)
 
     def discover(self, *, include_unavailable: bool = True) -> list[SkillSpec]:
         found: dict[str, SkillSpec] = {}
@@ -232,7 +413,9 @@ class SkillsLoader:
                 spec = self._parse_header(path, source=source)
                 if spec is None:
                     continue
-                found[spec.name] = spec
+                current = found.get(spec.name)
+                if current is None or self._is_preferred_candidate(spec, current):
+                    found[spec.name] = spec
         rows = sorted(found.values(), key=lambda item: item.name.lower())
         if include_unavailable:
             return rows
@@ -266,19 +449,19 @@ class SkillsLoader:
 
     def render_for_prompt(self, selected: Iterable[str] | None = None, *, include_unavailable: bool = False) -> list[str]:
         selected_set = {item.strip() for item in (selected or []) if item.strip()}
-        rows: list[str] = []
+        lines = ["<available_skills>"]
         for skill in self.discover(include_unavailable=include_unavailable):
             if not skill.available and not include_unavailable:
                 continue
             if selected_set and skill.name not in selected_set and not skill.always:
                 continue
-            desc = skill.description or "no description"
-            unavailable_reasons = [*skill.missing, *skill.contract_issues]
-            availability = "available" if skill.available else f"unavailable({'; '.join(unavailable_reasons)})"
-            command = ""
-            if skill.execution_kind == "command":
-                command = f", command={skill.execution_target}"
-            elif skill.execution_kind == "script":
-                command = f", script={skill.execution_target}"
-            rows.append(f"{skill.name}: {desc} [{availability}, source={skill.source}{command}]")
-        return rows
+            lines.append("<skill>")
+            lines.append(f"<name>{_escape_xml(skill.name)}</name>")
+            lines.append(f"<description>{_escape_xml(skill.description or 'no description')}</description>")
+            lines.append(f"<location>{_escape_xml(str(skill.path))}</location>")
+            if include_unavailable and not skill.available:
+                missing = ", ".join([*skill.missing, *skill.contract_issues])
+                lines.append(f"<requires>{_escape_xml(missing)}</requires>")
+            lines.append("</skill>")
+        lines.append("</available_skills>")
+        return ["\n".join(lines)]

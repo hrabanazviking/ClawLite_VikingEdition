@@ -14,6 +14,7 @@ class MessageQueue:
         self._inbound: asyncio.Queue[InboundEvent] = asyncio.Queue(maxsize=maxsize)
         self._outbound: asyncio.Queue[OutboundEvent] = asyncio.Queue(maxsize=maxsize)
         self._topics: dict[str, list[asyncio.Queue[InboundEvent]]] = defaultdict(list)
+        self._stop_events: dict[str, asyncio.Event] = {}
 
     async def publish_inbound(self, event: InboundEvent) -> None:
         await self._inbound.put(event)
@@ -38,9 +39,37 @@ class MessageQueue:
         finally:
             self._topics[channel].remove(queue)
 
+    def stop_event(self, session_id: str) -> asyncio.Event:
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return asyncio.Event()
+        event = self._stop_events.get(normalized)
+        if event is None:
+            event = asyncio.Event()
+            self._stop_events[normalized] = event
+        return event
+
+    def request_stop(self, session_id: str) -> bool:
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return False
+        self.stop_event(normalized).set()
+        return True
+
+    def clear_stop(self, session_id: str) -> None:
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return
+        event = self._stop_events.get(normalized)
+        if event is not None:
+            event.clear()
+            if not event.is_set():
+                self._stop_events.pop(normalized, None)
+
     def stats(self) -> dict[str, int]:
         return {
             "inbound_size": self._inbound.qsize(),
             "outbound_size": self._outbound.qsize(),
             "topics": sum(len(v) for v in self._topics.values()),
+            "stop_sessions": len(self._stop_events),
         }

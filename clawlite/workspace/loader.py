@@ -136,6 +136,6 @@ class WorkspaceLoader:
             files.append("BOOTSTRAP.md")
 
         docs = self.read(files)
-        docs = self.read(files)
-        parts = [f"## {name}\n{text}" for name, text in docs.items()]
+        ordered_files = [name for name in files if name in docs]
+        parts = [f"## {name}\n{docs[name]}" for name in ordered_files]
         return "\n\n".join(parts).strip()

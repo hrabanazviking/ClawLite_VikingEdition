@@ -15,8 +15,20 @@ class _Result:
 
 
 class FakeEngine:
-    async def run(self, *, session_id: str, user_text: str, channel: str | None = None, chat_id: str | None = None):
+    async def run(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        progress_hook=None,
+        stop_event=None,
+    ):
         return _Result(text=f"reply:{session_id}:{user_text}")
+
+    def request_stop(self, session_id: str) -> bool:
+        return True
 
 
 class FakeChannel(BaseChannel):
