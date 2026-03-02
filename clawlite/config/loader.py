@@ -41,11 +41,12 @@ def _read_file(path: Path) -> dict[str, Any]:
     return dict(loaded)
 
 
-def _env_overrides() -> dict[str, Any]:
+def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    model = os.getenv("CLAWLITE_MODEL", "").strip()
-    if model:
-        out["provider"] = {"model": model}
+    if include_model:
+        model = os.getenv("CLAWLITE_MODEL", "").strip()
+        if model:
+            out["provider"] = {"model": model}
     workspace = os.getenv("CLAWLITE_WORKSPACE", "").strip()
     if workspace:
         out["workspace_path"] = workspace
@@ -72,7 +73,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     file_cfg = _read_file(target)
     defaults = AppConfig().to_dict()
     merged = _deep_merge(defaults, file_cfg)
-    merged = _deep_merge(merged, _env_overrides())
+    merged = _deep_merge(merged, _env_overrides(include_model=path is None))
     return AppConfig.from_dict(merged)
 
 
