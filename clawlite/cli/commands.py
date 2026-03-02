@@ -6,6 +6,11 @@ import json
 from typing import Any
 
 from clawlite import __version__
+from clawlite.cli.ops import channels_validation
+from clawlite.cli.ops import diagnostics_snapshot
+from clawlite.cli.ops import fetch_gateway_diagnostics
+from clawlite.cli.ops import onboarding_validation
+from clawlite.cli.ops import provider_validation
 from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
 from clawlite.core.skills import SkillsLoader
@@ -41,6 +46,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             "channels_enabled": channels_enabled,
             "cron_jobs_count": jobs_count,
             "heartbeat_interval_seconds": cfg.gateway.heartbeat.interval_s,
+            "gateway_auth_mode": cfg.gateway.auth.mode,
+            "gateway_auth_token_configured": bool(cfg.gateway.auth.token),
+            "gateway_diagnostics_enabled": cfg.gateway.diagnostics.enabled,
         }
     )
     return 0
@@ -90,6 +98,47 @@ def cmd_onboard(args: argparse.Namespace) -> int:
         },
     )
     _print_json({"workspace": cfg.workspace_path, "created_files": [str(path) for path in created]})
+    return 0
+
+
+def cmd_validate_provider(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = provider_validation(cfg)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_validate_channels(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = channels_validation(cfg)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_validate_onboarding(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = onboarding_validation(cfg, fix=bool(args.fix))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_diagnostics(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    config_path = str(args.config) if args.config else str(DEFAULT_CONFIG_PATH)
+    payload: dict[str, Any] = {
+        "local": diagnostics_snapshot(
+            cfg,
+            config_path=config_path,
+            include_validation=not bool(args.no_validation),
+        )
+    }
+    if args.gateway_url:
+        payload["gateway"] = fetch_gateway_diagnostics(
+            gateway_url=args.gateway_url,
+            timeout=float(args.timeout),
+            token=str(args.token or ""),
+        )
+    _print_json(payload)
     return 0
 
 
@@ -267,6 +316,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_onboard.add_argument("--user-preferences", default="Clear answers, direct actions, concise updates")
     p_onboard.add_argument("--overwrite", action="store_true")
     p_onboard.set_defaults(handler=cmd_onboard)
+
+    p_validate = sub.add_parser("validate", help="Validate provider/channel/onboarding readiness")
+    validate_sub = p_validate.add_subparsers(dest="validate_command", required=True)
+
+    p_validate_provider = validate_sub.add_parser("provider", help="Validate active provider/model configuration")
+    p_validate_provider.set_defaults(handler=cmd_validate_provider)
+
+    p_validate_channels = validate_sub.add_parser("channels", help="Validate enabled channel configuration")
+    p_validate_channels.set_defaults(handler=cmd_validate_channels)
+
+    p_validate_onboarding = validate_sub.add_parser("onboarding", help="Validate workspace onboarding templates")
+    p_validate_onboarding.add_argument("--fix", action="store_true", help="Generate missing workspace templates")
+    p_validate_onboarding.set_defaults(handler=cmd_validate_onboarding)
+
+    p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
+    p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")
+    p_diagnostics.add_argument("--token", default="", help="Bearer token for protected gateway diagnostics endpoints")
+    p_diagnostics.add_argument("--timeout", type=float, default=3.0, help="Gateway probe timeout in seconds")
+    p_diagnostics.add_argument("--no-validation", action="store_true", help="Skip local provider/channel/onboarding validations")
+    p_diagnostics.set_defaults(handler=cmd_diagnostics)
 
     p_cron = sub.add_parser("cron", help="Manage scheduled jobs")
     cron_sub = p_cron.add_subparsers(dest="cron_command", required=True)

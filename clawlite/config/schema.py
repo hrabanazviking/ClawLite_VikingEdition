@@ -20,10 +20,55 @@ class GatewayHeartbeatConfig:
 
 
 @dataclass(slots=True)
+class GatewayAuthConfig:
+    mode: str = "off"
+    token: str = ""
+    allow_loopback_without_auth: bool = True
+    header_name: str = "Authorization"
+    query_param: str = "token"
+    protect_health: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAuthConfig:
+        data = dict(raw or {})
+        mode = str(data.get("mode", "off") or "off").strip().lower()
+        if mode not in {"off", "optional", "required"}:
+            mode = "off"
+        header_name = str(data.get("header_name", data.get("headerName", "Authorization")) or "Authorization").strip()
+        query_param = str(data.get("query_param", data.get("queryParam", "token")) or "token").strip()
+        return cls(
+            mode=mode,
+            token=str(data.get("token", "") or "").strip(),
+            allow_loopback_without_auth=bool(data.get("allow_loopback_without_auth", data.get("allowLoopbackWithoutAuth", True))),
+            header_name=header_name or "Authorization",
+            query_param=query_param or "token",
+            protect_health=bool(data.get("protect_health", data.get("protectHealth", False))),
+        )
+
+
+@dataclass(slots=True)
+class GatewayDiagnosticsConfig:
+    enabled: bool = True
+    require_auth: bool = True
+    include_config: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayDiagnosticsConfig:
+        data = dict(raw or {})
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            require_auth=bool(data.get("require_auth", data.get("requireAuth", True))),
+            include_config=bool(data.get("include_config", data.get("includeConfig", False))),
+        )
+
+
+@dataclass(slots=True)
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     heartbeat: GatewayHeartbeatConfig = field(default_factory=GatewayHeartbeatConfig)
+    auth: GatewayAuthConfig = field(default_factory=GatewayAuthConfig)
+    diagnostics: GatewayDiagnosticsConfig = field(default_factory=GatewayDiagnosticsConfig)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayConfig:
@@ -32,6 +77,8 @@ class GatewayConfig:
             host=str(data.get("host", "127.0.0.1") or "127.0.0.1"),
             port=int(data.get("port", 8787) or 8787),
             heartbeat=GatewayHeartbeatConfig.from_dict(dict(data.get("heartbeat") or {})),
+            auth=GatewayAuthConfig.from_dict(dict(data.get("auth") or {})),
+            diagnostics=GatewayDiagnosticsConfig.from_dict(dict(data.get("diagnostics") or {})),
         )
 
 

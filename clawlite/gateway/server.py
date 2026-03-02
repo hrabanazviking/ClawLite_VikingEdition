@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -21,7 +22,7 @@ from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
 from clawlite.scheduler.cron import CronService
-from clawlite.scheduler.heartbeat import HeartbeatService
+from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
 from clawlite.session.store import SessionStore
 from clawlite.tools.cron import CronTool
 from clawlite.tools.exec import ExecTool
@@ -55,6 +56,23 @@ class CronAddRequest(BaseModel):
     name: str = ""
 
 
+class ControlPlaneResponse(BaseModel):
+    ready: bool
+    phase: str
+    components: dict[str, Any]
+    auth: dict[str, Any]
+
+
+class DiagnosticsResponse(BaseModel):
+    schema_version: str
+    control_plane: ControlPlaneResponse
+    queue: dict[str, int]
+    channels: dict[str, Any]
+    cron: dict[str, Any]
+    heartbeat: dict[str, Any]
+    environment: dict[str, Any] = {}
+
+
 @dataclass(slots=True)
 class RuntimeContainer:
     config: AppConfig
@@ -64,6 +82,117 @@ class RuntimeContainer:
     cron: CronService
     heartbeat: HeartbeatService
     workspace: WorkspaceLoader
+
+
+@dataclass(slots=True)
+class GatewayLifecycleState:
+    phase: str = "created"
+    ready: bool = False
+    startup_error: str = ""
+    components: dict[str, dict[str, Any]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.components is None:
+            self.components = {
+                "channels": {"enabled": True, "running": False, "last_error": ""},
+                "cron": {"enabled": True, "running": False, "last_error": ""},
+                "heartbeat": {"enabled": True, "running": False, "last_error": ""},
+                "engine": {"enabled": True, "running": True, "last_error": ""},
+            }
+
+    def mark_component(self, name: str, *, running: bool, error: str = "") -> None:
+        row = self.components.setdefault(name, {"enabled": True, "running": False, "last_error": ""})
+        row["running"] = running
+        row["last_error"] = str(error or "")
+
+
+@dataclass(slots=True)
+class GatewayAuthGuard:
+    mode: str
+    token: str
+    allow_loopback_without_auth: bool
+    header_name: str
+    query_param: str
+    protect_health: bool
+
+    @classmethod
+    def from_config(cls, config: AppConfig) -> GatewayAuthGuard:
+        auth_cfg = config.gateway.auth
+        mode = str(auth_cfg.mode or "off").strip().lower()
+        if mode not in {"off", "optional", "required"}:
+            mode = "off"
+        return cls(
+            mode=mode,
+            token=str(auth_cfg.token or "").strip(),
+            allow_loopback_without_auth=bool(auth_cfg.allow_loopback_without_auth),
+            header_name=str(auth_cfg.header_name or "Authorization").strip() or "Authorization",
+            query_param=str(auth_cfg.query_param or "token").strip() or "token",
+            protect_health=bool(auth_cfg.protect_health),
+        )
+
+    def posture(self) -> str:
+        if self.mode == "required":
+            return "strict"
+        if self.mode == "optional":
+            return "optional"
+        return "open"
+
+    @staticmethod
+    def _is_loopback(host: str | None) -> bool:
+        value = str(host or "").strip().lower()
+        if not value:
+            return False
+        if value in {"127.0.0.1", "::1", "localhost"}:
+            return True
+        return value.startswith("127.")
+
+    def _extract_token(self, *, header_value: str, query_value: str) -> str:
+        if query_value:
+            return query_value.strip()
+        value = header_value.strip()
+        if not value:
+            return ""
+        if value.lower().startswith("bearer "):
+            return value[7:].strip()
+        return value
+
+    def _require_for_scope(self, *, scope: str, host: str | None, diagnostics_auth: bool) -> bool:
+        if self.mode == "off":
+            return False
+        if scope == "health":
+            return self.protect_health and self.mode == "required"
+        if scope == "diagnostics":
+            return diagnostics_auth and self.mode == "required"
+        if self.mode != "required":
+            return False
+        if self.allow_loopback_without_auth and self._is_loopback(host):
+            return False
+        return True
+
+    def check_http(self, *, request: Request, scope: str, diagnostics_auth: bool) -> None:
+        client_host = request.client.host if request.client is not None else None
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
+        header_value = str(request.headers.get(self.header_name, "") or "")
+        query_value = str(request.query_params.get(self.query_param, "") or "")
+        supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
+        if should_require and (not self.token or supplied_token != self.token):
+            raise HTTPException(status_code=401, detail="gateway_auth_required")
+        if self.mode == "optional" and supplied_token and self.token and supplied_token != self.token:
+            raise HTTPException(status_code=401, detail="gateway_auth_invalid")
+
+    async def check_ws(self, *, socket: WebSocket, scope: str, diagnostics_auth: bool) -> bool:
+        client_host = socket.client.host if socket.client is not None else None
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
+        header_value = str(socket.headers.get(self.header_name, "") or "")
+        query_value = str(socket.query_params.get(self.query_param, "") or "")
+        supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
+        if should_require and (not self.token or supplied_token != self.token):
+            await socket.close(code=4401, reason="gateway_auth_required")
+            return False
+        if self.mode == "optional" and supplied_token and self.token and supplied_token != self.token:
+            await socket.close(code=4401, reason="gateway_auth_invalid")
+            return False
+        return True
 
 
 class _CronAPI:
@@ -173,7 +302,10 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         store_path=Path(config.state_path) / "cron_jobs.json",
         default_timezone=config.scheduler.timezone,
     )
-    heartbeat = HeartbeatService(interval_seconds=config.gateway.heartbeat.interval_s)
+    heartbeat = HeartbeatService(
+        interval_seconds=config.gateway.heartbeat.interval_s,
+        state_path=workspace_path / "memory" / "heartbeat-state.json",
+    )
 
     tools = ToolRegistry()
     tools.register(
@@ -263,39 +395,134 @@ async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
     return result.text
 
 
-async def _run_heartbeat(runtime: RuntimeContainer) -> str | None:
-    heartbeat_prompt = "heartbeat: check pending tasks and send proactive updates when needed"
+async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
+    heartbeat_prompt = (
+        "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. "
+        "Do not infer or repeat old tasks from prior chats. "
+        "If nothing needs attention, reply HEARTBEAT_OK."
+    )
     session_id = "heartbeat:system"
     bind_event("heartbeat.tick", session="heartbeat:system").debug("heartbeat callback running")
     result = await runtime.engine.run(session_id=session_id, user_text=heartbeat_prompt)
     bind_event("heartbeat.tick", session="heartbeat:system").debug("heartbeat callback completed")
-    return result.text
+    return HeartbeatDecision.from_result(result.text)
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
     cfg = config or load_config()
     runtime = build_runtime(cfg)
+    auth_guard = GatewayAuthGuard.from_config(cfg)
+    if auth_guard.mode == "required" and not auth_guard.token:
+        raise RuntimeError("gateway_auth_required_but_token_missing")
+    if auth_guard.mode == "off" and not GatewayAuthGuard._is_loopback(cfg.gateway.host):
+        bind_event("gateway.auth").warning("gateway running on non-loopback host without auth host={}", cfg.gateway.host)
+    lifecycle = GatewayLifecycleState()
+    lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
+
+    def _control_plane_payload() -> ControlPlaneResponse:
+        return ControlPlaneResponse(
+            ready=bool(lifecycle.ready),
+            phase=str(lifecycle.phase),
+            components=dict(lifecycle.components),
+            auth={
+                "posture": auth_guard.posture(),
+                "mode": auth_guard.mode,
+                "allow_loopback_without_auth": auth_guard.allow_loopback_without_auth,
+                "protect_health": auth_guard.protect_health,
+                "token_configured": bool(auth_guard.token),
+                "header_name": auth_guard.header_name,
+                "query_param": auth_guard.query_param,
+            },
+        )
+
+    async def _start_subsystems() -> None:
+        started: list[tuple[str, Any]] = []
+        steps: list[tuple[str, Any, Any, bool]] = [
+            ("channels", runtime.channels.start, runtime.channels.stop, True),
+            ("cron", runtime.cron.start, runtime.cron.stop, True),
+            ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
+        ]
+
+        for name, start_fn, stop_fn, enabled in steps:
+            lifecycle.components.setdefault(name, {"enabled": enabled, "running": False, "last_error": ""})
+            lifecycle.components[name]["enabled"] = enabled
+            if not enabled:
+                lifecycle.mark_component(name, running=False, error="disabled")
+                continue
+            try:
+                if name == "channels":
+                    await start_fn(cfg.to_dict())
+                elif name == "cron":
+                    await start_fn(lambda job: _route_cron_job(runtime, job))
+                else:
+                    await start_fn(lambda: _run_heartbeat(runtime))
+                lifecycle.mark_component(name, running=True)
+                started.append((name, stop_fn))
+                bind_event("gateway.lifecycle").info("subsystem started name={}", name)
+            except Exception as exc:
+                lifecycle.mark_component(name, running=False, error=str(exc))
+                lifecycle.startup_error = str(exc)
+                bind_event("gateway.lifecycle").error("subsystem failed to start name={} error={}", name, exc)
+                for stop_name, stop in reversed(started):
+                    try:
+                        await stop()
+                        lifecycle.mark_component(stop_name, running=False)
+                        bind_event("gateway.lifecycle").info("subsystem rollback stopped name={}", stop_name)
+                    except Exception as stop_exc:
+                        lifecycle.mark_component(stop_name, running=False, error=str(stop_exc))
+                        bind_event("gateway.lifecycle").error("subsystem rollback failed name={} error={}", stop_name, stop_exc)
+                raise RuntimeError(f"gateway_startup_failed:{name}") from exc
+
+    async def _stop_subsystems() -> None:
+        steps: list[tuple[str, Any, bool]] = [
+            ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
+            ("cron", runtime.cron.stop, True),
+            ("channels", runtime.channels.stop, True),
+        ]
+        for name, stop_fn, enabled in steps:
+            if not enabled:
+                lifecycle.mark_component(name, running=False, error="disabled")
+                continue
+            try:
+                await stop_fn()
+                lifecycle.mark_component(name, running=False)
+                bind_event("gateway.lifecycle").info("subsystem stopped name={}", name)
+            except Exception as exc:
+                lifecycle.mark_component(name, running=False, error=str(exc))
+                bind_event("gateway.lifecycle").error("subsystem stop failed name={} error={}", name, exc)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        lifecycle.phase = "starting"
+        lifecycle.ready = False
         bind_event("gateway.lifecycle").info("gateway startup begin host={} port={}", cfg.gateway.host, cfg.gateway.port)
-        await runtime.channels.start(cfg.to_dict())
-        await runtime.cron.start(lambda job: _route_cron_job(runtime, job))
-        if cfg.gateway.heartbeat.enabled:
-            await runtime.heartbeat.start(lambda: _run_heartbeat(runtime))
+        await _start_subsystems()
+        lifecycle.phase = "running"
+        lifecycle.ready = True
         bind_event("gateway.lifecycle").info("gateway startup complete")
         try:
             yield
         finally:
+            lifecycle.phase = "stopping"
+            lifecycle.ready = False
             bind_event("gateway.lifecycle").info("gateway shutdown begin")
-            if cfg.gateway.heartbeat.enabled:
-                await runtime.heartbeat.stop()
-            await runtime.cron.stop()
-            await runtime.channels.stop()
+            await _stop_subsystems()
+            lifecycle.phase = "stopped"
             bind_event("gateway.lifecycle").info("gateway shutdown complete")
 
     app = FastAPI(title="ClawLite Gateway", version="1.0.0", lifespan=lifespan)
     app.state.runtime = runtime
+    app.state.lifecycle = lifecycle
+    app.state.auth_guard = auth_guard
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+        detail = exc.detail
+        if isinstance(detail, str):
+            payload: dict[str, Any] = {"error": detail, "status": exc.status_code}
+        else:
+            payload = {"error": "http_error", "status": exc.status_code, "detail": detail}
+        return JSONResponse(status_code=exc.status_code, content=payload)
 
     def _provider_error_payload(exc: RuntimeError) -> tuple[int, str]:
         message = str(exc)
@@ -349,15 +576,61 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return (500, "Falha interna ao processar a solicitacao.")
 
     @app.get("/health")
-    async def health() -> dict[str, Any]:
+    async def health(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="health", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         return {
             "ok": True,
+            "ready": lifecycle.ready,
+            "phase": lifecycle.phase,
             "channels": runtime.channels.status(),
             "queue": runtime.bus.stats(),
         }
 
+    @app.get("/v1/status", response_model=ControlPlaneResponse)
+    async def status(request: Request) -> ControlPlaneResponse:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        return _control_plane_payload()
+
+    @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
+    async def diagnostics(request: Request) -> DiagnosticsResponse:
+        if not cfg.gateway.diagnostics.enabled:
+            raise HTTPException(status_code=404, detail="diagnostics_disabled")
+        auth_guard.check_http(request=request, scope="diagnostics", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        environment: dict[str, Any] = {}
+        if cfg.gateway.diagnostics.include_config:
+            environment = {
+                "workspace_path": cfg.workspace_path,
+                "state_path": cfg.state_path,
+                "provider_model": cfg.agents.defaults.model,
+            }
+        return DiagnosticsResponse(
+            schema_version="2026-03-02",
+            control_plane=_control_plane_payload(),
+            queue=runtime.bus.stats(),
+            channels=runtime.channels.status(),
+            cron=runtime.cron.status(),
+            heartbeat=runtime.heartbeat.status(),
+            environment=environment,
+        )
+
+    @app.post("/v1/control/heartbeat/trigger")
+    async def trigger_heartbeat(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        if not cfg.gateway.heartbeat.enabled:
+            raise HTTPException(status_code=409, detail="heartbeat_disabled")
+        decision = await runtime.heartbeat.trigger_now(lambda: _run_heartbeat(runtime))
+        return {
+            "ok": True,
+            "decision": {
+                "action": decision.action,
+                "reason": decision.reason,
+                "text": decision.text,
+            },
+        }
+
     @app.post("/v1/chat", response_model=ChatResponse)
-    async def chat(req: ChatRequest) -> ChatResponse:
+    async def chat(req: ChatRequest, request: Request) -> ChatResponse:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         if not req.session_id.strip() or not req.text.strip():
             raise HTTPException(status_code=400, detail="session_id and text are required")
         logger.debug("chat request received session={} chars={}", req.session_id, len(req.text))
@@ -371,25 +644,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return ChatResponse(text=out.text, model=out.model)
 
     @app.post("/v1/cron/add")
-    async def cron_add(req: CronAddRequest) -> dict[str, str]:
+    async def cron_add(req: CronAddRequest, request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         job_id = await runtime.cron.add_job(
             session_id=req.session_id,
             expression=req.expression,
             prompt=req.prompt,
             name=req.name,
         )
-        return {"id": job_id}
+        return {"ok": True, "status": "created", "id": job_id}
 
     @app.get("/v1/cron/list")
-    async def cron_list(session_id: str) -> dict[str, Any]:
+    async def cron_list(session_id: str, request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         return {"jobs": runtime.cron.list_jobs(session_id=session_id)}
 
     @app.delete("/v1/cron/{job_id}")
-    async def cron_remove(job_id: str) -> dict[str, bool]:
-        return {"ok": runtime.cron.remove_job(job_id)}
+    async def cron_remove(job_id: str, request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        removed = runtime.cron.remove_job(job_id)
+        return {"ok": removed, "status": "removed" if removed else "not_found"}
 
     @app.websocket("/v1/ws")
     async def ws_chat(socket: WebSocket) -> None:
+        if not await auth_guard.check_ws(socket=socket, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth):
+            return
         await socket.accept()
         bind_event("gateway.ws", channel="ws").info("websocket client connected path=/v1/ws")
         try:

@@ -209,3 +209,19 @@ def test_load_config_migrates_legacy_gateway_token(tmp_path: Path) -> None:
     cfg = load_config(path, strict=True)
     assert cfg.gateway.host == "127.0.0.1"
     assert cfg.gateway.port == 8787
+    assert cfg.gateway.auth.mode == "required"
+    assert cfg.gateway.auth.token == "legacy"
+
+
+def test_load_config_gateway_auth_and_diagnostics_env_overrides(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"gateway": {"auth": {"mode": "off"}}}), encoding="utf-8")
+    monkeypatch.setenv("CLAWLITE_GATEWAY_AUTH_MODE", "required")
+    monkeypatch.setenv("CLAWLITE_GATEWAY_AUTH_TOKEN", "secret-token")
+    monkeypatch.setenv("CLAWLITE_GATEWAY_DIAGNOSTICS_ENABLED", "false")
+    monkeypatch.setenv("CLAWLITE_GATEWAY_DIAGNOSTICS_REQUIRE_AUTH", "false")
+    cfg = load_config(path)
+    assert cfg.gateway.auth.mode == "required"
+    assert cfg.gateway.auth.token == "secret-token"
+    assert cfg.gateway.diagnostics.enabled is False
+    assert cfg.gateway.diagnostics.require_auth is False

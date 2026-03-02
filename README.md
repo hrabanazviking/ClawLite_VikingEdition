@@ -128,6 +128,8 @@ Environment overrides supported:
 | `clawlite start [--host --port --config]` | Start FastAPI + WebSocket gateway |
 | `clawlite run "<prompt>" [--session-id]` | Run one prompt through the engine |
 | `clawlite onboard [--overwrite ...]` | Generate workspace identity templates |
+| `clawlite validate provider|channels|onboarding [--fix]` | Validate operator readiness for provider/channel/workspace |
+| `clawlite diagnostics [--gateway-url --token --timeout]` | Emit local diagnostics and optional gateway probes |
 | `clawlite skills list [--all]` | List discovered skills |
 | `clawlite skills show <name>` | Show metadata/body of one skill |
 | `clawlite cron add --session-id --expression --prompt [--name]` | Create scheduled job |

@@ -26,4 +26,10 @@ class OutboundEvent:
     target: str
     text: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    attempt: int = 1
+    max_attempts: int = 1
+    retryable: bool = True
+    dead_lettered: bool = False
+    dead_letter_reason: str = ""
+    last_error: str = ""
     created_at: str = field(default_factory=_utc_now)

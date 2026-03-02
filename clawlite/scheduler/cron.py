@@ -130,6 +130,14 @@ class CronService:
         self._task = None
         bind_event("cron.lifecycle").info("cron service stopped")
 
+    def status(self) -> dict[str, Any]:
+        return {
+            "running": self._task is not None,
+            "jobs": len(self._jobs),
+            "store_path": str(self.path),
+            "default_timezone": self.default_timezone,
+        }
+
     async def _loop(self) -> None:
         while True:
             now = self._now()

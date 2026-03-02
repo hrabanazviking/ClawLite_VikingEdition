@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
-
-from loguru import logger
+from dataclasses import replace
+from typing import Any
 
 from clawlite.bus.events import InboundEvent, OutboundEvent
 from clawlite.bus.queue import MessageQueue
@@ -67,6 +66,15 @@ class ChannelManager:
         self._channels: dict[str, BaseChannel] = {}
         self._dispatcher_task: asyncio.Task[Any] | None = None
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._send_progress = True
+        self._send_tool_hints = False
+        self._dispatcher_max_concurrency = 4
+        self._dispatcher_max_per_session = 1
+        self._send_max_attempts = 3
+        self._send_retry_backoff_s = 0.5
+        self._send_retry_max_backoff_s = 4.0
+        self._dispatch_slots = asyncio.Semaphore(self._dispatcher_max_concurrency)
+        self._session_slots: dict[str, asyncio.Semaphore] = {}
 
     def register(self, name: str, channel_cls: type[BaseChannel]) -> None:
         self._registry[name] = channel_cls
@@ -97,19 +105,127 @@ class ChannelManager:
         if not group:
             store.pop(session_id, None)
 
+    def _reset_dispatch_controls(self) -> None:
+        self._dispatch_slots = asyncio.Semaphore(self._dispatcher_max_concurrency)
+        self._session_slots.clear()
+
+    def _session_semaphore(self, session_id: str) -> asyncio.Semaphore:
+        sem = self._session_slots.get(session_id)
+        if sem is None:
+            sem = asyncio.Semaphore(self._dispatcher_max_per_session)
+            self._session_slots[session_id] = sem
+        return sem
+
+    async def _acquire_dispatch_slot(self, session_id: str) -> None:
+        await self._dispatch_slots.acquire()
+        session_sem = self._session_semaphore(session_id)
+        try:
+            await session_sem.acquire()
+        except Exception:
+            self._dispatch_slots.release()
+            raise
+
+    def _release_dispatch_slot(self, session_id: str) -> None:
+        self._dispatch_slots.release()
+        session_sem = self._session_slots.get(session_id)
+        if session_sem is not None:
+            session_sem.release()
+
+    @staticmethod
+    def _is_progress_event(event: OutboundEvent) -> bool:
+        return bool(event.metadata.get("_progress", False))
+
+    @staticmethod
+    def _is_tool_hint_event(event: OutboundEvent) -> bool:
+        return bool(event.metadata.get("_tool_hint", False))
+
+    def _delivery_allowed(self, *, channel: BaseChannel, event: OutboundEvent) -> bool:
+        if not self._is_progress_event(event):
+            return True
+        if self._is_tool_hint_event(event):
+            return self._send_tool_hints and channel.capabilities.supports_tool_hints
+        return self._send_progress and channel.capabilities.supports_progress
+
+    async def _retry_send(self, *, channel: BaseChannel, event: OutboundEvent) -> OutboundEvent | None:
+        max_attempts = max(1, self._send_max_attempts)
+        last_error = ""
+        backoff = self._send_retry_backoff_s
+        for attempt in range(1, max_attempts + 1):
+            attempt_event = replace(
+                event,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                retryable=channel.capabilities.supports_retry,
+                dead_lettered=False,
+                dead_letter_reason="",
+                last_error=last_error,
+            )
+            await self.bus.publish_outbound(attempt_event)
+            try:
+                await channel.send(target=event.target, text=event.text, metadata=event.metadata)
+                bind_event("channel.send", session=event.session_id, channel=event.channel).info(
+                    "dispatch sent target={} attempt={}/{}",
+                    event.target,
+                    attempt,
+                    max_attempts,
+                )
+                return attempt_event
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = str(exc)
+                bind_event("channel.send", session=event.session_id, channel=event.channel).error(
+                    "dispatch send failed target={} attempt={}/{} error={}",
+                    event.target,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if attempt >= max_attempts or not channel.capabilities.supports_retry:
+                    break
+                await asyncio.sleep(min(backoff, self._send_retry_max_backoff_s))
+                backoff = min(max(backoff * 2, self._send_retry_backoff_s), self._send_retry_max_backoff_s)
+
+        dead = replace(
+            event,
+            attempt=max_attempts,
+            max_attempts=max_attempts,
+            retryable=channel.capabilities.supports_retry,
+            dead_lettered=True,
+            dead_letter_reason="send_failed",
+            last_error=last_error,
+        )
+        await self.bus.publish_dead_letter(dead)
+        bind_event("channel.send", session=event.session_id, channel=event.channel).error(
+            "dispatch dead-letter target={} attempts={} error={}",
+            event.target,
+            max_attempts,
+            last_error,
+        )
+        return None
+
     async def _publish_and_send(self, *, event: OutboundEvent) -> None:
-        await self.bus.publish_outbound(event)
         channel = self._channels.get(event.channel)
         if channel is None:
             bind_event("channel.dispatch", session=event.session_id, channel=event.channel).error("channel unavailable")
+            dead = replace(
+                event,
+                attempt=1,
+                max_attempts=1,
+                retryable=False,
+                dead_lettered=True,
+                dead_letter_reason="channel_unavailable",
+                last_error="channel unavailable",
+            )
+            await self.bus.publish_dead_letter(dead)
             return
-        try:
-            await channel.send(target=event.target, text=event.text, metadata=event.metadata)
-            bind_event("channel.send", session=event.session_id, channel=event.channel).info("dispatch sent target={}", event.target)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            bind_event("channel.send", session=event.session_id, channel=event.channel).error("dispatch send failed target={} error={}", event.target, exc)
+        if not self._delivery_allowed(channel=channel, event=event):
+            bind_event("channel.send", session=event.session_id, channel=event.channel).debug(
+                "dispatch dropped by delivery policy target={}",
+                event.target,
+            )
+            return
+        await self._retry_send(channel=channel, event=event)
 
     async def _handle_stop(self, event: InboundEvent) -> None:
         session_id = event.session_id
@@ -160,6 +276,7 @@ class ChannelManager:
             tool_name = str(getattr(progress, "tool_name", "") or "").strip()
             if tool_name:
                 metadata["tool"] = tool_name
+                metadata["_tool_hint"] = True
             extra = getattr(progress, "metadata", None)
             if isinstance(extra, dict):
                 metadata.update(extra)
@@ -207,13 +324,40 @@ class ChannelManager:
                 await self._handle_stop(event)
                 continue
 
+            await self._acquire_dispatch_slot(event.session_id)
             task = asyncio.create_task(self._dispatch_event(event))
             bucket = self._active_tasks.setdefault(event.session_id, set())
             bucket.add(task)
-            task.add_done_callback(lambda done, sid=event.session_id: self._safe_remove_task(self._active_tasks, sid, done))
+
+            def _on_done(done: asyncio.Task[Any], sid: str = event.session_id) -> None:
+                self._safe_remove_task(self._active_tasks, sid, done)
+                self._release_dispatch_slot(sid)
+
+            task.add_done_callback(_on_done)
 
     async def start(self, config: dict[str, Any]) -> None:
         channels_cfg = config.get("channels", {}) if isinstance(config, dict) else {}
+        self._send_progress = bool(channels_cfg.get("send_progress", channels_cfg.get("sendProgress", True)))
+        self._send_tool_hints = bool(channels_cfg.get("send_tool_hints", channels_cfg.get("sendToolHints", False)))
+        self._dispatcher_max_concurrency = max(
+            1,
+            int(channels_cfg.get("dispatcher_max_concurrency", channels_cfg.get("dispatcherMaxConcurrency", 4)) or 4),
+        )
+        self._dispatcher_max_per_session = max(
+            1,
+            int(channels_cfg.get("dispatcher_max_per_session", channels_cfg.get("dispatcherMaxPerSession", 1)) or 1),
+        )
+        self._send_max_attempts = max(1, int(channels_cfg.get("send_max_attempts", channels_cfg.get("sendMaxAttempts", 3)) or 3))
+        self._send_retry_backoff_s = max(
+            0.0,
+            float(channels_cfg.get("send_retry_backoff_s", channels_cfg.get("sendRetryBackoffS", 0.5)) or 0.5),
+        )
+        self._send_retry_max_backoff_s = max(
+            self._send_retry_backoff_s,
+            float(channels_cfg.get("send_retry_max_backoff_s", channels_cfg.get("sendRetryMaxBackoffS", 4.0)) or 4.0),
+        )
+        self._reset_dispatch_controls()
+
         for name, row in channels_cfg.items():
             if not isinstance(row, dict):
                 continue

@@ -77,6 +77,9 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     assert payload["provider_model"] == "openai/gpt-4o-mini"
     assert payload["heartbeat_interval_seconds"] == 1234
     assert payload["channels_enabled"] == ["telegram"]
+    assert payload["gateway_auth_mode"] == "off"
+    assert payload["gateway_auth_token_configured"] is False
+    assert payload["gateway_diagnostics_enabled"] is True
 
     rc_ver = main(["--version"])
     assert rc_ver == 0
@@ -139,4 +142,95 @@ def test_cli_help_version_status_do_not_import_gateway(tmp_path: Path, capsys) -
     sys.modules.pop("clawlite.gateway.server", None)
     rc_status = main(["--config", str(config_path), "status"])
     assert rc_status == 0
+    assert "clawlite.gateway.server" not in sys.modules
+
+
+def test_cli_validate_provider_and_channels(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "channels": {
+                    "telegram": {"enabled": True, "token": ""},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_provider = main(["--config", str(config_path), "validate", "provider"])
+    assert rc_provider == 2
+    provider_payload = json.loads(capsys.readouterr().out)
+    assert provider_payload["ok"] is False
+    assert provider_payload["provider"] == "openai"
+
+    rc_channels = main(["--config", str(config_path), "validate", "channels"])
+    assert rc_channels == 2
+    channels_payload = json.loads(capsys.readouterr().out)
+    assert channels_payload["ok"] is False
+    assert channels_payload["enabled"] == ["telegram"]
+
+
+def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_path = tmp_path / "workspace"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "gemini/gemini-2.5-flash"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_validate = main(["--config", str(config_path), "validate", "onboarding"])
+    assert rc_validate == 2
+    payload_before = json.loads(capsys.readouterr().out)
+    assert payload_before["ok"] is False
+    assert "IDENTITY.md" in payload_before["missing"]
+
+    rc_fix = main(["--config", str(config_path), "validate", "onboarding", "--fix"])
+    assert rc_fix == 0
+    payload_after = json.loads(capsys.readouterr().out)
+    assert payload_after["ok"] is True
+    assert (workspace_path / "IDENTITY.md").exists()
+
+    rc_diag = main(["--config", str(config_path), "diagnostics", "--no-validation"])
+    assert rc_diag == 0
+    diagnostics = json.loads(capsys.readouterr().out)
+    assert diagnostics["local"]["gateway"]["diagnostics_enabled"] is True
+    assert "validation" not in diagnostics["local"]
+
+
+def test_cli_non_runtime_validate_and_diagnostics_do_not_import_gateway(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "gemini/gemini-2.5-flash"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_validate = main(["--config", str(config_path), "validate", "onboarding"])
+    assert rc_validate == 2
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_diag = main(["--config", str(config_path), "diagnostics", "--no-validation"])
+    assert rc_diag == 0
     assert "clawlite.gateway.server" not in sys.modules

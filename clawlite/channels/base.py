@@ -14,11 +14,27 @@ class ChannelHealth:
     last_error: str
 
 
+@dataclass(slots=True, frozen=True)
+class ChannelCapabilities:
+    supports_progress: bool = True
+    supports_tool_hints: bool = True
+    supports_metadata: bool = True
+    supports_retry: bool = True
+
+
 class BaseChannel(ABC):
-    def __init__(self, *, name: str, config: dict[str, Any], on_message: InboundHandler | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        config: dict[str, Any],
+        on_message: InboundHandler | None = None,
+        capabilities: ChannelCapabilities | None = None,
+    ) -> None:
         self.name = name
         self.config = config
         self.on_message = on_message
+        self._capabilities = capabilities or ChannelCapabilities()
         self._running = False
         self._last_error = ""
 
@@ -28,6 +44,10 @@ class BaseChannel(ABC):
 
     def health(self) -> ChannelHealth:
         return ChannelHealth(running=self._running, last_error=self._last_error)
+
+    @property
+    def capabilities(self) -> ChannelCapabilities:
+        return self._capabilities
 
     async def emit(self, *, session_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
         if self.on_message is None:

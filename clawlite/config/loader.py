@@ -54,7 +54,14 @@ def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
     gateway = cfg.get("gateway")
     if isinstance(gateway, dict):
         gateway = dict(gateway)
-        gateway.pop("token", None)
+        legacy_token = str(gateway.pop("token", "") or "").strip()
+        if legacy_token:
+            auth = dict(gateway.get("auth") or {})
+            if not str(auth.get("token", "") or "").strip():
+                auth["token"] = legacy_token
+            if str(auth.get("mode", "") or "").strip().lower() not in {"required", "optional"}:
+                auth["mode"] = "required"
+            gateway["auth"] = auth
         cfg["gateway"] = gateway
 
     scheduler = cfg.get("scheduler")
@@ -135,6 +142,38 @@ def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
             out.setdefault("gateway", {})["port"] = int(port)
         except ValueError:
             pass
+
+    auth_mode = os.getenv("CLAWLITE_GATEWAY_AUTH_MODE", "").strip().lower()
+    if auth_mode in {"off", "optional", "required"}:
+        out.setdefault("gateway", {}).setdefault("auth", {})["mode"] = auth_mode
+    auth_token = os.getenv("CLAWLITE_GATEWAY_AUTH_TOKEN", "").strip()
+    if auth_token:
+        out.setdefault("gateway", {}).setdefault("auth", {})["token"] = auth_token
+    auth_allow_loopback = os.getenv("CLAWLITE_GATEWAY_AUTH_ALLOW_LOOPBACK", "").strip().lower()
+    if auth_allow_loopback in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        out.setdefault("gateway", {}).setdefault("auth", {})["allow_loopback_without_auth"] = auth_allow_loopback in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    diag_enabled = os.getenv("CLAWLITE_GATEWAY_DIAGNOSTICS_ENABLED", "").strip().lower()
+    if diag_enabled in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        out.setdefault("gateway", {}).setdefault("diagnostics", {})["enabled"] = diag_enabled in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    diag_auth = os.getenv("CLAWLITE_GATEWAY_DIAGNOSTICS_REQUIRE_AUTH", "").strip().lower()
+    if diag_auth in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        out.setdefault("gateway", {}).setdefault("diagnostics", {})["require_auth"] = diag_auth in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     return out
 
 

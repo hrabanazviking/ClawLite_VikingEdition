@@ -41,3 +41,23 @@ def test_message_queue_subscription() -> None:
         assert got == "hello"
 
     asyncio.run(_scenario())
+
+
+def test_message_queue_dead_letter_roundtrip() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        dead = OutboundEvent(
+            channel="telegram",
+            session_id="s1",
+            target="u1",
+            text="failed",
+            dead_lettered=True,
+            dead_letter_reason="send_failed",
+        )
+        await bus.publish_dead_letter(dead)
+        got = await bus.next_dead_letter()
+        assert got.dead_lettered is True
+        assert got.dead_letter_reason == "send_failed"
+        assert bus.stats()["dead_letter_size"] == 0
+
+    asyncio.run(_scenario())
