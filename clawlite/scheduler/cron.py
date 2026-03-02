@@ -190,6 +190,43 @@ class CronService:
             logger.info("cron job removed id={}", job_id)
         return existed
 
+    def enable_job(self, job_id: str, *, enabled: bool) -> bool:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job.enabled = enabled
+        if enabled and not job.next_run_iso:
+            next_dt = self._compute_next(job.schedule, self._now())
+            job.next_run_iso = next_dt.isoformat() if next_dt else ""
+        self._save()
+        logger.info("cron job updated id={} enabled={}", job_id, enabled)
+        return True
+
+    def get_job(self, job_id: str) -> CronJob | None:
+        return self._jobs.get(job_id)
+
+    async def run_job(self, job_id: str, *, on_job: JobCallback | None = None, force: bool = False) -> str | None:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if not job.enabled and not force:
+            raise RuntimeError("cron_job_disabled")
+        callback = on_job or self._on_job
+        if callback is None:
+            raise RuntimeError("cron_job_callback_missing")
+        out = await callback(job)
+        now = self._now()
+        job.last_run_iso = now.isoformat()
+        after = self._compute_next(job.schedule, now)
+        if job.schedule.kind == "at":
+            job.enabled = False
+            job.next_run_iso = ""
+        else:
+            job.next_run_iso = after.isoformat() if after else ""
+        self._save()
+        logger.info("cron job manually executed id={} enabled={}", job.id, job.enabled)
+        return out
+
     @staticmethod
     def _parse_expression(expression: str) -> CronSchedule:
         expr = expression.strip()

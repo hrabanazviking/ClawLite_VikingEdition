@@ -50,3 +50,60 @@ def test_cli_skills_list_and_show(capsys) -> None:
     one = json.loads(out_show)
     assert one.get("name") == "cron"
     assert "Schedule" in one.get("description", "")
+
+
+def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    state_path = tmp_path / "state"
+    workspace_path = tmp_path / "workspace"
+    state_path.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(state_path),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "channels": {"telegram": {"enabled": True}, "discord": {"enabled": False}},
+                "scheduler": {"heartbeat_interval_seconds": 1234},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "status"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider_model"] == "openai/gpt-4o-mini"
+    assert payload["heartbeat_interval_seconds"] == 1234
+    assert payload["channels_enabled"] == ["telegram"]
+
+    rc_ver = main(["--version"])
+    assert rc_ver == 0
+    ver_out = capsys.readouterr().out.strip()
+    assert ver_out
+
+
+def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    called = {"ok": False}
+
+    def _fake_run_gateway(*, host, port):
+        called["ok"] = True
+        assert host == "127.0.0.1"
+        assert port == 8787
+
+    monkeypatch.setattr("clawlite.cli.commands.run_gateway", _fake_run_gateway)
+    rc = main(["--config", str(config_path), "gateway"])
+    assert rc == 0
+    assert called["ok"] is True
