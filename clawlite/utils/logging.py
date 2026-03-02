@@ -7,6 +7,7 @@ from pathlib import Path
 from loguru import logger
 
 _LOGGING_CONFIGURED = False
+_DEFAULT_EXTRA = {"event": "-", "session": "-", "channel": "-", "tool": "-", "run": "-"}
 
 
 def _truthy(value: str | None, *, default: bool = False) -> bool:
@@ -33,12 +34,13 @@ def setup_logging(level: str | None = None) -> None:
         return
 
     logger.remove()
+    logger.configure(extra=_DEFAULT_EXTRA)
     resolved_level = (level or os.getenv("CLAWLITE_LOG_LEVEL", "INFO")).upper()
     log_format = os.getenv("CLAWLITE_LOG_FORMAT", "text").strip().lower()
     stderr_enabled = _truthy(os.getenv("CLAWLITE_LOG_STDERR"), default=True)
     file_path = os.getenv("CLAWLITE_LOG_FILE", "").strip()
 
-    base_logger = logger.bind(event="-", session="-", channel="-", tool="-", run="-")
+    base_logger = logger
 
     if stderr_enabled:
         base_logger.add(
