@@ -94,6 +94,10 @@ class GatewayAutonomyConfig:
     timeout_s: float = 45.0
     max_queue_backlog: int = 200
     session_id: str = "autonomy:system"
+    max_actions_per_run: int = 1
+    action_cooldown_s: float = 120.0
+    action_rate_limit_per_hour: int = 20
+    max_replay_limit: int = 50
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
@@ -118,6 +122,22 @@ class GatewayAutonomyConfig:
             session_raw = data.get("sessionId")
         else:
             session_raw = data.get("session_id", "autonomy:system")
+        if "maxActionsPerRun" in data:
+            max_actions_raw = data.get("maxActionsPerRun")
+        else:
+            max_actions_raw = data.get("max_actions_per_run", 1)
+        if "actionCooldownS" in data:
+            action_cooldown_raw = data.get("actionCooldownS")
+        else:
+            action_cooldown_raw = data.get("action_cooldown_s", 120.0)
+        if "actionRateLimitPerHour" in data:
+            action_rate_limit_raw = data.get("actionRateLimitPerHour")
+        else:
+            action_rate_limit_raw = data.get("action_rate_limit_per_hour", 20)
+        if "maxReplayLimit" in data:
+            max_replay_limit_raw = data.get("maxReplayLimit")
+        else:
+            max_replay_limit_raw = data.get("max_replay_limit", 50)
         return cls(
             enabled=bool(data.get("enabled", False)),
             interval_s=max(1, int(interval_raw or 900)),
@@ -125,6 +145,10 @@ class GatewayAutonomyConfig:
             timeout_s=max(0.1, float(timeout_raw or 45.0)),
             max_queue_backlog=max(0, int(max_backlog_raw or 200)),
             session_id=str(session_raw or "autonomy:system").strip() or "autonomy:system",
+            max_actions_per_run=max(1, int(max_actions_raw or 1)),
+            action_cooldown_s=max(0.0, float(action_cooldown_raw or 120.0)),
+            action_rate_limit_per_hour=max(1, int(action_rate_limit_raw or 20)),
+            max_replay_limit=max(1, int(max_replay_limit_raw or 50)),
         )
 
 

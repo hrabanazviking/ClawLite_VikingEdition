@@ -293,6 +293,10 @@ def test_load_config_gateway_autonomy_parses_snake_and_camel(tmp_path: Path) -> 
                         "timeoutS": 12.5,
                         "max_queue_backlog": 77,
                         "sessionId": "autonomy:test",
+                        "maxActionsPerRun": 2,
+                        "action_cooldown_s": 33.0,
+                        "actionRateLimitPerHour": 44,
+                        "max_replay_limit": 55,
                     }
                 }
             }
@@ -307,6 +311,10 @@ def test_load_config_gateway_autonomy_parses_snake_and_camel(tmp_path: Path) -> 
     assert cfg.gateway.autonomy.timeout_s == 12.5
     assert cfg.gateway.autonomy.max_queue_backlog == 77
     assert cfg.gateway.autonomy.session_id == "autonomy:test"
+    assert cfg.gateway.autonomy.max_actions_per_run == 2
+    assert cfg.gateway.autonomy.action_cooldown_s == 33.0
+    assert cfg.gateway.autonomy.action_rate_limit_per_hour == 44
+    assert cfg.gateway.autonomy.max_replay_limit == 55
 
 
 def test_load_config_tool_loop_detection_settings(tmp_path: Path) -> None:

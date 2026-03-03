@@ -87,6 +87,8 @@ Supervisor telemetry is additive under `supervisor` and may include: `ticks`, `i
 
 Autonomy telemetry is additive under `autonomy` and may include: `running`, `enabled`, `session_id`, `ticks`, `run_attempts`, `run_success`, `run_failures`, `skipped_backlog`, `skipped_cooldown`, `skipped_disabled`, `last_run_at`, `last_result_excerpt`, `last_error`, `consecutive_error_count`, `last_snapshot`, and `cooldown_remaining_s`.
 
+Autonomy action execution telemetry is additive under top-level `autonomy_actions` and may include: `totals` (`proposed`, `executed`, `succeeded`, `failed`, `blocked`, `parse_errors`, `rate_limited`, `cooldown_blocked`, `unknown_blocked`), `per_action`, `last_run`, and bounded `recent_audits`.
+
 Example response:
 
 ```json
@@ -118,6 +120,7 @@ Example response:
   "heartbeat": {},
   "supervisor": {},
   "autonomy": {},
+  "autonomy_actions": {},
   "environment": {}
 }
 ```
@@ -166,6 +169,13 @@ Example response:
     "run_attempts": 1,
     "run_success": 1,
     "run_failures": 0
+  },
+  "autonomy_actions": {
+    "totals": {
+      "proposed": 1,
+      "executed": 1,
+      "succeeded": 1
+    }
   }
 }
 ```

@@ -69,7 +69,11 @@ Note: provider-specific key variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `
       "cooldown_s": 300,
       "timeout_s": 45.0,
       "max_queue_backlog": 200,
-      "session_id": "autonomy:system"
+      "session_id": "autonomy:system",
+      "max_actions_per_run": 1,
+      "action_cooldown_s": 120.0,
+      "action_rate_limit_per_hour": 20,
+      "max_replay_limit": 50
     }
   }
 }
@@ -98,7 +102,11 @@ Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gate
 - `gateway.autonomy.timeout_s` bounds each autonomy turn with timeout containment.
 - `gateway.autonomy.max_queue_backlog` skips non-forced ticks when `outbound_size + dead_letter_size` is high.
 - `gateway.autonomy.session_id` defines the engine session used for autonomy turns.
-- Snake case and camelCase are accepted (`interval_s`/`intervalS`, `cooldown_s`/`cooldownS`, `timeout_s`/`timeoutS`, `max_queue_backlog`/`maxQueueBacklog`, `session_id`/`sessionId`).
+- `gateway.autonomy.max_actions_per_run` bounds autonomous action execution per run (default `1`).
+- `gateway.autonomy.action_cooldown_s` enforces per-action cooldown (default `120s`).
+- `gateway.autonomy.action_rate_limit_per_hour` enforces per-action hourly cap (default `20`).
+- `gateway.autonomy.max_replay_limit` clamps `dead_letter_replay_dry_run.limit` (default `50`).
+- Snake case and camelCase are accepted (`interval_s`/`intervalS`, `cooldown_s`/`cooldownS`, `timeout_s`/`timeoutS`, `max_queue_backlog`/`maxQueueBacklog`, `session_id`/`sessionId`, `max_actions_per_run`/`maxActionsPerRun`, `action_cooldown_s`/`actionCooldownS`, `action_rate_limit_per_hour`/`actionRateLimitPerHour`, `max_replay_limit`/`maxReplayLimit`).
 
 ## Automatic provider resolution
 

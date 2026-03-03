@@ -170,6 +170,14 @@ pytest -q tests
 - Failure signal: monitor `run_failures`, `consecutive_error_count`, and `last_error` for repeated autonomy turn faults.
 - Review `last_result_excerpt` and `last_snapshot` to confirm autonomy is reading current queue/supervisor/channel signals.
 
+## Runtime autonomy actions runbook checks
+
+- In `/v1/diagnostics.autonomy_actions`, verify control activity via `totals.proposed/executed/succeeded/failed/blocked`.
+- Parse safety: monitor `totals.parse_errors`; sustained growth means autonomy output is not producing valid action JSON or `AUTONOMY_IDLE`.
+- Guardrails: monitor `totals.rate_limited` and `totals.cooldown_blocked` to confirm anti-storm protections are active.
+- Allowlist enforcement: monitor `totals.unknown_blocked` and inspect `recent_audits` for blocked unknown/denylisted proposals.
+- Dead-letter action safety: `dead_letter_replay_dry_run` is always forced to `dry_run=true` and replay `limit` is clamped by `gateway.autonomy.max_replay_limit`.
+
 ## Delivery observability and dead-letter runbook checks
 
 - Queue telemetry (`/v1/diagnostics.queue`): monitor `outbound_enqueued` vs `outbound_dropped` and `dead_letter_enqueued` trends.

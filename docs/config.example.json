@@ -52,7 +52,11 @@
       "cooldown_s": 300,
       "timeout_s": 45.0,
       "max_queue_backlog": 200,
-      "session_id": "autonomy:system"
+      "session_id": "autonomy:system",
+      "max_actions_per_run": 1,
+      "action_cooldown_s": 120.0,
+      "action_rate_limit_per_hour": 20,
+      "max_replay_limit": 50
     }
   },
   "scheduler": {

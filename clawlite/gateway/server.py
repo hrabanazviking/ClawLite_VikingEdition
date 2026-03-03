@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from clawlite.bus.queue import MessageQueue
 from clawlite.channels.manager import ChannelManager
+from clawlite.cli.ops import channels_validation, diagnostics_snapshot, provider_validation
 from clawlite.config.loader import load_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.engine import AgentEngine, LoopDetectionSettings
@@ -22,6 +23,7 @@ from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
 from clawlite.runtime.autonomy import AutonomyService
+from clawlite.runtime.autonomy_actions import AutonomyActionController
 from clawlite.runtime.supervisor import RuntimeSupervisor, SupervisorIncident
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
@@ -75,6 +77,7 @@ class DiagnosticsResponse(BaseModel):
     heartbeat: dict[str, Any]
     supervisor: dict[str, Any] = Field(default_factory=dict)
     autonomy: dict[str, Any] = Field(default_factory=dict)
+    autonomy_actions: dict[str, Any] = Field(default_factory=dict)
     environment: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -101,6 +104,7 @@ class RuntimeContainer:
     workspace: WorkspaceLoader
     supervisor: RuntimeSupervisor | None = None
     autonomy: AutonomyService | None = None
+    autonomy_actions: AutonomyActionController | None = None
 
 
 @dataclass(slots=True)
@@ -446,6 +450,12 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
 def create_app(config: AppConfig | None = None) -> FastAPI:
     cfg = config or load_config()
     runtime = build_runtime(cfg)
+    runtime.autonomy_actions = AutonomyActionController(
+        max_actions_per_run=cfg.gateway.autonomy.max_actions_per_run,
+        action_cooldown_s=cfg.gateway.autonomy.action_cooldown_s,
+        action_rate_limit_per_hour=cfg.gateway.autonomy.action_rate_limit_per_hour,
+        max_replay_limit=cfg.gateway.autonomy.max_replay_limit,
+    )
     auth_guard = GatewayAuthGuard.from_config(cfg)
     if auth_guard.mode == "required" and not auth_guard.token:
         raise RuntimeError("gateway_auth_required_but_token_missing")
@@ -543,7 +553,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             f"channels(enabled={int(channels.get('enabled_count', 0) or 0)},running={int(channels.get('running_count', 0) or 0)})."
         )
         result = await runtime.engine.run(session_id=cfg.gateway.autonomy.session_id, user_text=prompt)
-        return result.text
+        controller = runtime.autonomy_actions
+        if controller is None:
+            return "autonomy_actions_unavailable"
+
+        executors = {
+            "validate_provider": lambda **_: provider_validation(cfg),
+            "validate_channels": lambda **_: channels_validation(cfg),
+            "diagnostics_snapshot": lambda **_: diagnostics_snapshot(cfg, config_path="<runtime>", include_validation=True),
+            "dead_letter_replay_dry_run": lambda **kwargs: runtime.channels.replay_dead_letters(
+                limit=int(kwargs.get("limit", cfg.gateway.autonomy.max_replay_limit) or cfg.gateway.autonomy.max_replay_limit),
+                channel=str(kwargs.get("channel", "") or ""),
+                reason=str(kwargs.get("reason", "") or ""),
+                session_id=str(kwargs.get("session_id", "") or ""),
+                dry_run=True,
+            ),
+        }
+        status = await controller.process(result.text, executors)
+        totals = status.get("totals", {}) if isinstance(status.get("totals"), dict) else {}
+        last_run = status.get("last_run", {}) if isinstance(status.get("last_run"), dict) else {}
+        return (
+            f"autonomy_actions proposed={int(last_run.get('proposed', 0) or 0)} "
+            f"executed={int(last_run.get('executed', 0) or 0)} "
+            f"succeeded={int(last_run.get('succeeded', 0) or 0)} "
+            f"blocked={int(last_run.get('blocked', 0) or 0)} "
+            f"total_executed={int(totals.get('executed', 0) or 0)}"
+        )
 
     runtime.supervisor = RuntimeSupervisor(
         interval_s=cfg.gateway.supervisor.interval_s,
@@ -767,6 +802,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
             autonomy=runtime.autonomy.status() if runtime.autonomy is not None else {},
+            autonomy_actions=runtime.autonomy_actions.status() if runtime.autonomy_actions is not None else {},
             environment=environment,
         )
 
@@ -802,13 +838,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         autonomy = runtime.autonomy
         if autonomy is None:
-            return {"ok": False, "error": "autonomy_unavailable", "autonomy": {}}
+            return {
+                "ok": False,
+                "error": "autonomy_unavailable",
+                "autonomy": {},
+                "autonomy_actions": runtime.autonomy_actions.status() if runtime.autonomy_actions is not None else {},
+            }
         force = True if req is None else bool(req.force)
         status = await autonomy.run_once(force=force)
         return {
             "ok": True,
             "forced": force,
             "autonomy": status,
+            "autonomy_actions": runtime.autonomy_actions.status() if runtime.autonomy_actions is not None else {},
         }
 
     @app.post("/v1/chat", response_model=ChatResponse)

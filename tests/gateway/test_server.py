@@ -30,6 +30,14 @@ class FailingProvider:
         raise RuntimeError(self.message)
 
 
+class ActionProvider:
+    async def complete(self, *, messages, tools):
+        return LLMResult(text='{"action":"validate_provider","args":{}}', model="fake/action", tool_calls=[], metadata={})
+
+    def diagnostics(self):
+        return {"requests": 1, "successes": 1}
+
+
 def test_gateway_chat_endpoint(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -182,6 +190,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "heartbeat" in payload
         assert "supervisor" in payload
         assert "autonomy" in payload
+        assert "autonomy_actions" in payload
         assert "ticks" in payload["supervisor"]
         assert "incident_count" in payload["supervisor"]
         assert "recovery_attempts" in payload["supervisor"]
@@ -189,6 +198,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "enabled" in payload["autonomy"]
         assert "run_attempts" in payload["autonomy"]
         assert "skipped_disabled" in payload["autonomy"]
+        assert "totals" in payload["autonomy_actions"]
         assert payload["environment"]["workspace_path"] == str(tmp_path / "workspace")
         assert "engine" in payload["environment"]
         assert "persistence" in payload["environment"]["engine"]
@@ -298,6 +308,39 @@ def test_gateway_autonomy_trigger_endpoint_auth_and_forced_run(tmp_path: Path) -
         assert payload["forced"] is True
         assert payload["autonomy"]["enabled"] is False
         assert payload["autonomy"]["run_attempts"] >= 1
+        assert "autonomy_actions" in payload
+        assert "totals" in payload["autonomy_actions"]
+
+
+def test_gateway_autonomy_trigger_executes_allowlisted_action_from_provider_text(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": "autonomy-action-token",
+                "allow_loopback_without_auth": False,
+            },
+            "heartbeat": {"enabled": False},
+            "autonomy": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = ActionProvider()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/control/autonomy/trigger",
+            headers={"Authorization": "Bearer autonomy-action-token"},
+            json={"force": True},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["autonomy_actions"]["totals"]["executed"] >= 1
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:
