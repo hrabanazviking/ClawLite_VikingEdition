@@ -4,9 +4,11 @@ import asyncio
 import html
 import hashlib
 import json
+import math
 import random
 import re
 import time
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -146,6 +148,73 @@ def _retry_delay_s(policy: TelegramRetryPolicy, attempt: int) -> float:
     return max(0.0, capped + jitter)
 
 
+def _coerce_retry_after_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    if hasattr(value, "total_seconds"):
+        try:
+            seconds = float(value.total_seconds())
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except (TypeError, ValueError):
+            pass
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            seconds = float(text)
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(text)
+            if when.tzinfo is None:
+                return None
+            seconds = when.timestamp() - time.time()
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except (TypeError, ValueError, IndexError):
+            return None
+    return None
+
+
+def _retry_after_delay_s(exc: Exception) -> float | None:
+    direct = _coerce_retry_after_seconds(getattr(exc, "retry_after", None))
+    if direct is not None:
+        return direct
+
+    parameters = getattr(exc, "parameters", None)
+    from_parameters = _coerce_retry_after_seconds(getattr(parameters, "retry_after", None))
+    if from_parameters is not None:
+        return from_parameters
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+
+    headers = getattr(response, "headers", None)
+    if headers is None and isinstance(response, dict):
+        headers = response.get("headers")
+    if headers is None:
+        return None
+
+    if hasattr(headers, "get"):
+        for key in ("retry-after", "Retry-After", "RETRY-AFTER"):
+            value = headers.get(key)
+            delay = _coerce_retry_after_seconds(value)
+            if delay is not None:
+                return delay
+    return None
+
+
 def split_message(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
     content = text or ""
     if len(content) <= max_len:
@@ -278,6 +347,12 @@ class TelegramChannel(BaseChannel):
         self._startup_drop_done = False
         self._message_signatures: dict[tuple[str, int], str] = {}
         self._signature_limit = 4096
+
+    def _remember_message_signature(self, *, msg_key: tuple[str, int], signature: str) -> None:
+        self._message_signatures[msg_key] = signature
+        if len(self._message_signatures) > self._signature_limit:
+            oldest_key = next(iter(self._message_signatures))
+            self._message_signatures.pop(oldest_key, None)
 
     async def _typing_loop(self, *, chat_id: str) -> None:
         started_at = time.monotonic()
@@ -475,19 +550,17 @@ class TelegramChannel(BaseChannel):
         if previous_signature == signature:
             logger.debug("telegram inbound duplicate skipped chat={} message_id={} is_edit={}", chat_id, message_id, is_edit)
             return True
-        self._message_signatures[msg_key] = signature
-        if len(self._message_signatures) > self._signature_limit:
-            oldest_key = next(iter(self._message_signatures))
-            self._message_signatures.pop(oldest_key, None)
 
         command, command_args = parse_command(text)
         is_command = bool(command)
         if is_command and self.handle_commands:
             if command == "start":
                 await self._send_start_message(chat_id=chat_id)
+                self._remember_message_signature(msg_key=msg_key, signature=signature)
                 return True
             if command == "help":
                 await self._send_help_message(chat_id=chat_id)
+                self._remember_message_signature(msg_key=msg_key, signature=signature)
                 return True
 
         session_id = f"telegram:{chat_id}"
@@ -514,6 +587,7 @@ class TelegramChannel(BaseChannel):
         except Exception:
             await self._stop_typing_keepalive(chat_id=chat_id)
             raise
+        self._remember_message_signature(msg_key=msg_key, signature=signature)
         return True
 
     def _build_metadata(
@@ -694,7 +768,9 @@ class TelegramChannel(BaseChannel):
                     if attempt >= policy.max_attempts or not _is_transient_failure(exc):
                         raise
 
-                    delay_s = _retry_delay_s(policy, attempt)
+                    delay_s = _retry_after_delay_s(exc)
+                    if delay_s is None:
+                        delay_s = _retry_delay_s(policy, attempt)
                     if delay_s > 0:
                         await asyncio.sleep(delay_s)
         logger.info("telegram outbound sent chat={} chunks={} chars={}", chat_id, len(chunks), len(text))

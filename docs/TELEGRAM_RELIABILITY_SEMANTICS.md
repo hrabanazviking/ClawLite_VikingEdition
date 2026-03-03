@@ -10,7 +10,9 @@ This note describes current/expected Telegram delivery behavior for operators.
 
 ## 2) Dedupe behavior
 - Duplicate updates (same Telegram update identity) are treated idempotently.
-- The worker should process at most once and drop subsequent duplicates.
+- Dedupe signature is recorded only after successful processing/send for that update.
+- Failed processing attempts do not mark dedupe state, so redelivery can reprocess and recover.
+- After success, the worker should process at most once and drop subsequent duplicates.
 - Dedupe protects against retries, restarts, and long-poll overlap windows.
 - Operator expectation: occasional "duplicate ignored" logs are healthy behavior.
 

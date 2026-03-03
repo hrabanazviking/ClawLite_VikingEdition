@@ -318,6 +318,51 @@ def test_telegram_send_retries_transient_failures() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_send_retries_with_retry_after_delay() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "send_retry_attempts": 3,
+                "send_backoff_base_s": 0.01,
+                "send_backoff_max_s": 0.01,
+                "send_backoff_jitter": 0.0,
+            }
+        )
+
+        class RetryAfterError(RuntimeError):
+            status_code = 429
+
+            def __init__(self, retry_after: float) -> None:
+                super().__init__("too many requests")
+                self.retry_after = retry_after
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def send_message(self, **kwargs):
+                del kwargs
+                self.calls += 1
+                if self.calls == 1:
+                    raise RetryAfterError(2.5)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        sleep_mock = AsyncMock()
+        with patch("clawlite.channels.telegram.asyncio.sleep", new=sleep_mock):
+            out = await channel.send(target="42", text="hello")
+
+        assert out == "telegram:sent:1"
+        assert bot.calls == 2
+        assert sleep_mock.await_count == 1
+        assert sleep_mock.await_args.args == (2.5,)
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_auth_circuit_breaker_opens() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(
@@ -453,6 +498,62 @@ def test_telegram_offset_not_committed_when_processing_fails() -> None:
 
         assert channel._offset == 0
         assert saved == []
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_redelivery_reprocesses_after_failed_emit_then_commits_offset() -> None:
+    async def _scenario() -> None:
+        emitted: list[str] = []
+        attempts = 0
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            del session_id, user_id, metadata
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("boom")
+            emitted.append(text)
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+        saved: list[int] = []
+        channel._save_offset = lambda: saved.append(channel._offset)  # type: ignore[method-assign]
+
+        user = SimpleNamespace(id=1, username="alice", first_name="Alice", language_code="en")
+        chat = SimpleNamespace(type="private")
+        message = SimpleNamespace(
+            text="hello",
+            caption=None,
+            chat_id=42,
+            from_user=user,
+            message_id=10,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        update = SimpleNamespace(update_id=100, message=message, edited_message=None, effective_message=message)
+
+        try:
+            await channel._handle_update(update)
+            raise AssertionError("expected first emit failure")
+        except RuntimeError:
+            pass
+
+        assert attempts == 1
+        assert emitted == []
+        assert channel._offset == 0
+        assert saved == []
+
+        processed_ok = await channel._handle_update(update)
+        assert processed_ok is True
+        channel._offset = max(channel._offset, int(update.update_id) + 1)
+        channel._save_offset()
+
+        assert attempts == 2
+        assert emitted == ["hello"]
+        assert channel._offset == 101
+        assert saved == [101]
 
     asyncio.run(_scenario())
 
