@@ -243,7 +243,7 @@ clawlite/
   - [ ] Future collaboration network: OpenClaw + nanobot + ClawLite working together in Telegram/Discord group workflows.
   - [ ] Codex 5.3 xhigh + agents/subagents applied to GitHub operations (posts, PRs, commits, releases, READMEs, docs, architecture notes, and continuous learning tasks).
   - [ ] Dashboard for transparent progress tracking, total time spent, and an agent reward system for delivered outcomes.
-  - [ ] PT-BR vision (concise): `objetivo final = autonomia real, melhoria continua e colaboracao entre agentes`.
+  - [ ] Vision (concise): `final objective = real autonomy, continuous improvement, and collaboration among agents`.
 
 See full plan in [`ROADMAP.md`](ROADMAP.md).
 

@@ -1,37 +1,37 @@
 # Skills
 
-ClawLite usa skills em markdown (`SKILL.md`) com discovery automático.
+ClawLite uses markdown skills (`SKILL.md`) with automatic discovery.
 
-## Fontes carregadas
+## Loaded sources
 
 1. Builtin (repo): `clawlite/skills/*/SKILL.md`
-2. Workspace do usuário: `~/.clawlite/workspace/skills/*/SKILL.md`
+2. User workspace: `~/.clawlite/workspace/skills/*/SKILL.md`
 3. Marketplace local: `~/.clawlite/marketplace/skills/*/SKILL.md`
 
-## Campos suportados no frontmatter
+## Supported frontmatter fields
 
 - `name`
 - `description`
 - `always`
-- `requires` (legado, lista CSV de binários)
-- `requirements` (novo formato JSON com `bins`, `env`, `os`)
-- `command` / `script` (metadado para execução)
+- `requires` (legacy, CSV list of binaries)
+- `requirements` (new JSON format with `bins`, `env`, `os`)
+- `command` / `script` (execution metadata)
 
-Também é aceito `metadata` JSON com namespace `clawlite`/`nanobot`/`openclaw`, por exemplo:
+`metadata` JSON with `clawlite`/`nanobot`/`openclaw` namespace is also accepted, for example:
 
 ```yaml
 metadata: {"clawlite":{"requires":{"bins":["gh"],"env":["GITHUB_TOKEN"]},"os":["linux","darwin"]}}
 ```
 
-## Política de duplicidade
+## Duplicate policy
 
-Quando duas skills possuem o mesmo `name`, a resolução é determinística:
+When two skills have the same `name`, resolution is deterministic:
 
-1. `workspace` vence `marketplace`
-2. `marketplace` vence `builtin`
-3. empate na mesma origem: menor caminho lexicográfico (`path`) vence
+1. `workspace` overrides `marketplace`
+2. `marketplace` overrides `builtin`
+3. tie in the same source: lower lexicographic path (`path`) wins
 
-## Builtins atuais
+## Current built-ins
 
 - `cron`
 - `memory`
@@ -44,7 +44,7 @@ Quando duas skills possuem o mesmo `name`, a resolução é determinística:
 - `hub`
 - `clawhub`
 
-## CLI de inspeção
+## Inspection CLI
 
 ```bash
 clawlite skills list
@@ -52,27 +52,27 @@ clawlite skills list --all
 clawlite skills show cron
 ```
 
-`skills list --all` inclui skills indisponíveis no ambiente atual e mostra os requisitos faltantes.
+`skills list --all` includes unavailable skills in the current environment and shows missing requirements.
 
-## Execução real de skill (tool)
+## Real skill execution (tool)
 
-O runtime expõe a tool `run_skill`.
+Runtime exposes the `run_skill` tool.
 
-Campos principais:
-- `name` (obrigatório)
-- `input` ou `args`
+Main fields:
+- `name` (required)
+- `input` or `args`
 - `timeout`
-- `query` (para `web-search`)
-- `location` (para `weather`)
+- `query` (for `web-search`)
+- `location` (for `weather`)
 
-Fluxo:
-1. resolve skill por nome
-2. valida disponibilidade (`bins/env/os`)
-3. executa `command` ou `script` mapeado
+Flow:
+1. resolve skill by name
+2. validate availability (`bins/env/os`)
+3. execute mapped `command` or `script`
 
-## Formato de resumo em runtime
+## Runtime summary format
 
-`render_for_prompt()` usa contrato XML compatível com a tool de skills:
+`render_for_prompt()` uses an XML contract compatible with the skills tool:
 
 ```xml
 <available_skills>

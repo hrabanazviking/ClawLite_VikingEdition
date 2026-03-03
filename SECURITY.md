@@ -1,43 +1,43 @@
 # Security Policy
 
-Este documento define como reportar vulnerabilidades no ClawLite e o baseline mínimo de operação segura.
+This document defines how to report vulnerabilities in ClawLite and the minimum baseline for secure operation.
 
-## Reporte de vulnerabilidade
+## Vulnerability reporting
 
-Não publique detalhes exploráveis em issue pública.
+Do not publish exploitable details in a public issue.
 
 Use:
 - https://github.com/eobarretooo/ClawLite/security/advisories/new
 
-Inclua:
-- descrição técnica
-- impacto prático
-- passos de reprodução
-- commit/versão afetada
-- evidências (logs, payloads, stacktrace)
+Include:
+- technical description
+- practical impact
+- reproduction steps
+- affected commit/version
+- evidence (logs, payloads, stacktrace)
 
-## Escopo coberto
+## Covered scope
 
 - CLI (`start`, `run`, `onboard`, `cron`, `skills`)
 - Gateway (`/health`, `/v1/chat`, `/v1/cron/*`, `/v1/ws`)
-- Providers e integração com APIs externas
-- Tools locais (exec/files/web/cron/message/spawn/mcp)
-- Canais e componentes de scheduler
+- Providers and external API integrations
+- Local tools (exec/files/web/cron/message/spawn/mcp)
+- Channels and scheduler components
 
-## Modelo de ameaça
+## Threat model
 
-- Entrada de usuário/canal é não confiável.
-- Tools com execução local são privilegiadas.
-- Chaves de provider são segredos críticos.
+- User/channel input is untrusted.
+- Tools with local execution are privileged.
+- Provider keys are critical secrets.
 
-## Hardening recomendado
+## Recommended hardening
 
-1. Definir token no gateway e proteger acesso de rede.
-2. Rodar com usuário sem privilégios administrativos.
-3. Restringir permissões de arquivo em `~/.clawlite/` (`700` ou `600` quando aplicável).
-4. Revisar skills com `command/script` antes de habilitar em produção.
-5. Aplicar rotação de chaves de provider periodicamente.
+1. Set a gateway token and protect network access.
+2. Run with a non-admin user.
+3. Restrict file permissions in `~/.clawlite/` (`700` or `600` where applicable).
+4. Review skills with `command/script` before enabling in production.
+5. Rotate provider keys periodically.
 
-## Disclosure responsável
+## Responsible disclosure
 
-Depois da correção, publique patch + orientação clara de atualização.
+After the fix, publish a patch and clear upgrade guidance.

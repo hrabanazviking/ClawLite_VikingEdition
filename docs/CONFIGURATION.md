@@ -1,19 +1,19 @@
 # Configuration
 
-Arquivo padrão: `~/.clawlite/config.json`
+Default file: `~/.clawlite/config.json`
 
-Campos principais (resumo):
+Main fields (summary):
 - `workspace_path`, `state_path`
-- `provider` e `providers` (modelo ativo, credenciais/base por provedor)
-- `agents.defaults` (modelo, limites, temperature)
+- `provider` and `providers` (active model, credentials/base per provider)
+- `agents.defaults` (model, limits, temperature)
 - `gateway.host`, `gateway.port`
-- `gateway.auth` (controle de auth da API)
-- `gateway.diagnostics` (exposição e proteção de `/v1/diagnostics`)
-- `gateway.heartbeat` (liga/desliga e intervalo do heartbeat do gateway)
-- `scheduler.timezone` (timezone para cron)
+- `gateway.auth` (API auth control)
+- `gateway.diagnostics` (exposure and protection of `/v1/diagnostics`)
+- `gateway.heartbeat` (enable/disable and interval for gateway heartbeat)
+- `scheduler.timezone` (timezone for cron)
 - `channels` (telegram/discord/slack/whatsapp + extras)
 
-## Variáveis de ambiente
+## Environment variables
 
 - `CLAWLITE_MODEL`
 - `CLAWLITE_WORKSPACE`
@@ -27,11 +27,11 @@ Campos principais (resumo):
 - `CLAWLITE_GATEWAY_DIAGNOSTICS_ENABLED` (`true/false`)
 - `CLAWLITE_GATEWAY_DIAGNOSTICS_REQUIRE_AUTH` (`true/false`)
 
-Obs.: variáveis de chave por provedor (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` etc.) continuam válidas para resolução de credenciais do provider.
+Note: provider-specific key variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, etc.) are still valid for provider credential resolution.
 
-## Gateway atual (schema)
+## Current gateway schema
 
-`gateway` não usa mais `gateway.token` como campo principal. O formato atual é:
+`gateway` no longer uses `gateway.token` as the main field. The current format is:
 
 ```json
 {
@@ -59,24 +59,24 @@ Obs.: variáveis de chave por provedor (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, 
 }
 ```
 
-Compatibilidade: se existir `gateway.token` legado, o loader migra para `gateway.auth.token` e define `gateway.auth.mode=required` quando necessário.
+Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gateway.auth.token` and sets `gateway.auth.mode=required` when needed.
 
-## Heartbeat (nota de compatibilidade)
+## Heartbeat (compatibility note)
 
-- Preferência atual: `gateway.heartbeat.interval_s`.
-- Campo legado: `scheduler.heartbeat_interval_seconds`.
-- Se `gateway.heartbeat.interval_s` não vier definido explicitamente, o loader usa o valor legado do `scheduler`.
+- Current preference: `gateway.heartbeat.interval_s`.
+- Legacy field: `scheduler.heartbeat_interval_seconds`.
+- If `gateway.heartbeat.interval_s` is not explicitly set, the loader uses the legacy value from `scheduler`.
 
-## Resolução automática do provedor
+## Automatic provider resolution
 
-- `provider.model` define o provedor preferencial (`gemini/...`, `openrouter/...`, `openai/...`, `groq/...`).
-- Se a chave não estiver em `provider.litellm_api_key`, o runtime tenta variáveis de ambiente específicas por provedor.
-- `provider.litellm_base_url` é opcional para provedores comuns: o runtime aplica base URL padrão por provedor.
+- `provider.model` defines the preferred provider (`gemini/...`, `openrouter/...`, `openai/...`, `groq/...`).
+- If the key is not in `provider.litellm_api_key`, the runtime tries provider-specific environment variables.
+- `provider.litellm_base_url` is optional for common providers: runtime applies provider default base URL.
 
-## Telegram (opções principais)
+## Telegram (main options)
 
-Em `channels.telegram`, além de `enabled` e `token`, os campos operacionais mais usados são:
-- `mode` (`polling` é o caminho de runtime ativo hoje; campos de webhook são mantidos por compatibilidade/integração futura)
+In `channels.telegram`, besides `enabled` and `token`, the most used operational fields are:
+- `mode` (`polling` is the active runtime path today; webhook fields are kept for compatibility/future integration)
 - `webhook_enabled`, `webhook_secret`, `webhook_path`
 - `poll_interval_s`, `poll_timeout_s`
 - `reconnect_initial_s`, `reconnect_max_s`
@@ -84,6 +84,6 @@ Em `channels.telegram`, além de `enabled` e `token`, os campos operacionais mai
 - `send_backoff_base_s`, `send_backoff_max_s`, `send_backoff_jitter`
 - `send_circuit_failure_threshold`, `send_circuit_cooldown_s`
 
-## Exemplo
+## Example
 
-Veja: [config.example.json](./config.example.json)
+See: [config.example.json](./config.example.json)

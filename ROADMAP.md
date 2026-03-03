@@ -1,26 +1,26 @@
 # ClawLite Roadmap
 
-## P0 — Estabilidade do núcleo
+## P0 — Core stability
 
-- Consolidar fluxo único de execução do agente (CLI + canais + gateway)
-- Expandir cobertura de testes de integração do scheduler (cron/heartbeat)
-- Endurecer validação de entrada em canais e tools com I/O externo
+- Consolidate a single agent execution flow (CLI + channels + gateway)
+- Expand scheduler integration test coverage (cron/heartbeat)
+- Harden input validation in channels and tools with external I/O
 
-## P1 — Autonomia operacional
+## P1 — Operational autonomy
 
-- Fechar operação 24/7 em Linux com supervisão e recuperação automática
-- Melhorar entrega proativa por canais com observabilidade mínima
-- Fortalecer memória de longo prazo e recuperação de contexto por sessão
+- Achieve 24/7 Linux operation with supervision and automatic recovery
+- Improve proactive delivery through channels with minimum observability
+- Strengthen long-term memory and per-session context recovery
 
-## P2 — Ecossistema
+## P2 — Ecosystem
 
-- Melhorar experiência de skills do usuário (discovery, execução, diagnóstico)
-- Evoluir integração MCP e providers especializados
-- Publicar guias de operação e release mais objetivos para deploy pessoal
+- Improve user skills experience (discovery, execution, diagnostics)
+- Evolve MCP integration and specialized providers
+- Publish more objective operations and release guides for personal deployment
 
-## Critério mínimo por release
+## Minimum release criteria
 
-1. `pytest -q` passando
-2. CLI principal sem regressão (`start`, `run`, `onboard`, `cron`, `skills`)
-3. API principal funcionando (`/health`, `/v1/chat`, `/v1/cron/*`)
-4. Documentação alinhada com o comportamento real
+1. `pytest -q` passing
+2. Main CLI without regression (`start`, `run`, `onboard`, `cron`, `skills`)
+3. Main API working (`/health`, `/v1/chat`, `/v1/cron/*`)
+4. Documentation aligned with real behavior

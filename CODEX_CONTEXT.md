@@ -1,34 +1,34 @@
 # CODEX_CONTEXT
 
-## Estado atual (2026-03-02)
+## Current state (2026-03-02)
 
 - Branch: `main`
-- Foco desta sessão: limpeza de repositório e padronização da base de testes
-- Testes: `48 passed` com `pytest -q tests`
+- Session focus: repository cleanup and test base standardization
+- Tests: `48 passed` with `pytest -q tests`
 
-## Mudanças aplicadas nesta limpeza
+## Changes applied in this cleanup
 
-1. `tests_next/` renomeado para `tests/`.
-2. `clawlite/core/__init__.py` criado.
-3. Removido do versionamento:
+1. `tests_next/` renamed to `tests/`.
+2. `clawlite/core/__init__.py` created.
+3. Removed from version control:
    - `docs-site/`
    - `hub/marketplace/`
    - `scripts/community_pack.py`
    - `scripts/sync_community_downloads.py`
    - `scripts/sync_openclaw_skills.py`
    - `scripts/templates/community/`
-4. `clawlite/tools/skill.py` documentado com docstring de módulo e classe.
-5. `.gitignore` corrigido: removida entrada inválida `~/.clawlite/`.
-6. Referências atualizadas para o novo diretório de testes:
+4. `clawlite/tools/skill.py` documented with module and class docstrings.
+5. `.gitignore` fixed: removed invalid `~/.clawlite/` entry.
+6. References updated for the new test directory:
    - `.github/workflows/ci.yml`
    - `docs/OPERATIONS.md`
    - `scripts/smoke_test.sh`
 
-## Nota técnica: tools/skill.py
+## Technical note: tools/skill.py
 
-- Arquivo **necessário** para execução real de skills descobertas por `SKILL.md`.
-- Ele conecta descoberta (`SkillsLoader`) com execução (`command:` / `script:`), evitando edição manual de `registry.py` para cada skill nova.
+- **Required** file for real execution of skills discovered via `SKILL.md`.
+- It connects discovery (`SkillsLoader`) with execution (`command:` / `script:`), avoiding manual `registry.py` edits for each new skill.
 
-## Próximo passo sugerido
+## Suggested next step
 
-- Revisar README/documentação para remover referências a `docs-site` e `hub/marketplace` se ainda existirem.
+- Review README/documentation to remove references to `docs-site` and `hub/marketplace` if they still exist.

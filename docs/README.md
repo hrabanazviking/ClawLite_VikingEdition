@@ -1,6 +1,6 @@
 # ClawLite Docs
 
-Documentação técnica do runtime novo do ClawLite.
+Technical documentation for the new ClawLite runtime.
 
 - [Quickstart](./QUICKSTART.md)
 - [Architecture](./ARCHITECTURE.md)

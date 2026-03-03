@@ -1,19 +1,19 @@
 # API (Gateway)
 
-Base URL padrão: `http://127.0.0.1:8787`
+Default base URL: `http://127.0.0.1:8787`
 
-## Auth (resumo)
+## Auth (summary)
 
-- `gateway.auth.mode=off`: sem autenticação.
-- `gateway.auth.mode=optional`: aceita sem token, mas token inválido retorna `401`.
-- `gateway.auth.mode=required`: exige token (com exceção de loopback se `allow_loopback_without_auth=true`).
-- Token pode ser enviado por header configurável (padrão `Authorization`, com ou sem prefixo `Bearer `) ou query param configurável (padrão `token`).
-- `/health` só exige auth quando `gateway.auth.protect_health=true` e modo `required`.
-- `/v1/diagnostics` depende de `gateway.diagnostics.enabled` e pode exigir auth com `gateway.diagnostics.require_auth=true`.
+- `gateway.auth.mode=off`: no authentication.
+- `gateway.auth.mode=optional`: accepts requests without token, but invalid token returns `401`.
+- `gateway.auth.mode=required`: requires token (except loopback when `allow_loopback_without_auth=true`).
+- Token can be sent via configurable header (default `Authorization`, with or without `Bearer ` prefix) or configurable query param (default `token`).
+- `/health` only requires auth when `gateway.auth.protect_health=true` and mode is `required`.
+- `/v1/diagnostics` depends on `gateway.diagnostics.enabled` and may require auth with `gateway.diagnostics.require_auth=true`.
 
 ## `GET /health`
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -34,7 +34,7 @@ Resposta exemplo:
 
 ## `GET /v1/status`
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -60,9 +60,9 @@ Resposta exemplo:
 
 ## `GET /v1/diagnostics`
 
-Se `gateway.diagnostics.enabled=false`, retorna `404` com `{"error":"diagnostics_disabled","status":404}`.
+If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostics_disabled","status":404}`.
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -85,9 +85,9 @@ Resposta exemplo:
 
 ## `POST /v1/control/heartbeat/trigger`
 
-Sem body.
+No body.
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -100,7 +100,7 @@ Resposta exemplo:
 }
 ```
 
-Se heartbeat estiver desligado (`gateway.heartbeat.enabled=false`), retorna `409` com `{"error":"heartbeat_disabled","status":409}`.
+If heartbeat is disabled (`gateway.heartbeat.enabled=false`), returns `409` with `{"error":"heartbeat_disabled","status":409}`.
 
 ## `POST /v1/chat`
 
@@ -109,7 +109,7 @@ Request:
 ```json
 {
   "session_id": "telegram:123",
-  "text": "me lembra de beber agua"
+  "text": "remind me to drink water"
 }
 ```
 
@@ -130,8 +130,8 @@ Request:
 {
   "session_id": "telegram:123",
   "expression": "every 120",
-  "prompt": "me lembra de alongar",
-  "name": "alongar"
+  "prompt": "remind me to stretch",
+  "name": "stretch"
 }
 ```
 
@@ -147,7 +147,7 @@ Response:
 
 ## `GET /v1/cron/list?session_id=...`
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -157,7 +157,7 @@ Resposta exemplo:
 
 ## `DELETE /v1/cron/{job_id}`
 
-Resposta exemplo:
+Example response:
 
 ```json
 {
@@ -168,15 +168,15 @@ Resposta exemplo:
 
 ## `WS /v1/ws`
 
-WebSocket para chat.
+WebSocket for chat.
 
-Mensagem de entrada:
+Input message:
 
 ```json
-{"session_id":"cli:ws","text":"oi"}
+{"session_id":"cli:ws","text":"hello"}
 ```
 
-Mensagem de saída:
+Output message:
 
 ```json
 {"text":"...","model":"gemini/gemini-2.5-flash"}

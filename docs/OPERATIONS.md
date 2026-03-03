@@ -6,13 +6,13 @@
 clawlite start --host 127.0.0.1 --port 8787
 ```
 
-Alias equivalente:
+Equivalent alias:
 
 ```bash
 clawlite gateway --host 127.0.0.1 --port 8787
 ```
 
-## Status e diagnósticos
+## Status and diagnostics
 
 ```bash
 clawlite status
@@ -20,7 +20,7 @@ clawlite diagnostics
 clawlite diagnostics --gateway-url http://127.0.0.1:8787 --token "$CLAWLITE_GATEWAY_AUTH_TOKEN"
 ```
 
-## Validações operacionais
+## Operational validations
 
 ```bash
 clawlite validate provider
@@ -28,7 +28,7 @@ clawlite validate channels
 clawlite validate onboarding
 ```
 
-Para gerar templates faltantes do onboarding:
+To generate missing onboarding templates:
 
 ```bash
 clawlite validate onboarding --fix
@@ -37,12 +37,12 @@ clawlite validate onboarding --fix
 ## Cron (CLI)
 
 ```bash
-clawlite cron add --session-id cli:ops --expression "every 300" --prompt "status rapido" --name "ops-check"
+clawlite cron add --session-id cli:ops --expression "every 300" --prompt "quick status" --name "ops-check"
 clawlite cron list --session-id cli:ops
 clawlite cron remove --job-id <job_id>
 ```
 
-Comandos adicionais úteis:
+Additional useful commands:
 
 ```bash
 clawlite cron enable <job_id>
@@ -50,7 +50,7 @@ clawlite cron disable <job_id>
 clawlite cron run <job_id>
 ```
 
-## Trigger manual de heartbeat via API
+## Manual heartbeat trigger via API
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/v1/control/heartbeat/trigger \
@@ -63,7 +63,7 @@ curl -sS -X POST http://127.0.0.1:8787/v1/control/heartbeat/trigger \
 bash scripts/smoke_test.sh
 ```
 
-## Testes
+## Tests
 
 ```bash
 pytest -q tests
@@ -71,7 +71,7 @@ pytest -q tests
 
 ## Incident checklist
 
-1. Confirmar gateway: `curl -sS http://127.0.0.1:8787/health` e `clawlite diagnostics --gateway-url http://127.0.0.1:8787`.
-2. Confirmar configuração mínima: `clawlite validate provider` e `clawlite validate channels`.
-3. Se houver falha no heartbeat, validar `gateway.heartbeat.enabled` e disparar trigger manual (`/v1/control/heartbeat/trigger`).
-4. Antes de hotfix/release: `bash scripts/smoke_test.sh` e `pytest -q tests`.
+1. Confirm gateway: `curl -sS http://127.0.0.1:8787/health` and `clawlite diagnostics --gateway-url http://127.0.0.1:8787`.
+2. Confirm minimum configuration: `clawlite validate provider` and `clawlite validate channels`.
+3. If heartbeat fails, validate `gateway.heartbeat.enabled` and trigger it manually (`/v1/control/heartbeat/trigger`).
+4. Before hotfix/release: `bash scripts/smoke_test.sh` and `pytest -q tests`.

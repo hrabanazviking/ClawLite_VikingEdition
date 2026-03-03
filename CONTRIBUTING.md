@@ -1,35 +1,35 @@
-# Contribuindo para o ClawLite
+# Contributing to ClawLite
 
-Obrigado por contribuir.
+Thanks for contributing.
 
-## Princípios do projeto
+## Project principles
 
-- Arquitetura simples e auditável
-- Comportamento previsível no runtime
-- Documentação alinhada com o código real
-- Segurança por padrão para uso pessoal
+- Simple and auditable architecture
+- Predictable runtime behavior
+- Documentation aligned with real code
+- Secure-by-default behavior for personal use
 
-## Fluxo recomendado
+## Recommended flow
 
-1. Abra issue (bug/proposta) antes de mudança grande.
-2. Crie branch focada (`feat/...`, `fix/...`, `docs/...`).
-3. Faça mudanças pequenas por módulo.
-4. Atualize testes quando houver mudança de comportamento.
-5. Rode validação local:
+1. Open an issue (bug/proposal) before large changes.
+2. Create a focused branch (`feat/...`, `fix/...`, `docs/...`).
+3. Make small changes per module.
+4. Update tests when behavior changes.
+5. Run local validation:
    - `pytest -q`
-   - smoke dos comandos alterados (`clawlite --help`, `clawlite start`, `clawlite run`)
-6. Abra PR com contexto, risco e evidência de teste.
+   - smoke tests for changed commands (`clawlite --help`, `clawlite start`, `clawlite run`)
+6. Open a PR with context, risk, and test evidence.
 
-## Padrões de qualidade
+## Quality standards
 
-- Não quebrar comandos base: `start`, `run`, `onboard`, `cron`, `skills`.
-- Não introduzir regressão de API em `/v1/chat` e `/v1/cron/*` sem migração documentada.
-- Nunca versionar segredo/token/chave privada.
-- Sempre atualizar docs se CLI/API/fluxo operacional mudar.
+- Do not break core commands: `start`, `run`, `onboard`, `cron`, `skills`.
+- Do not introduce API regressions in `/v1/chat` and `/v1/cron/*` without a documented migration.
+- Never commit secrets/tokens/private keys.
+- Always update docs if CLI/API/operational flow changes.
 
-## Checklist de PR
+## PR checklist
 
-- [ ] Escopo e objetivo claros
-- [ ] Testes executados e informados
-- [ ] Docs atualizadas
-- [ ] Sem credenciais no diff
+- [ ] Scope and goal are clear
+- [ ] Tests were run and reported
+- [ ] Docs updated
+- [ ] No credentials in the diff
