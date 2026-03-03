@@ -109,3 +109,10 @@ pytest -q tests
 - Cron service (`/v1/diagnostics.cron`): monitor `save_*` and `load_*` counters plus `last_save_error`/`last_load_error`; occasional retry is transient, continuous failures indicate filesystem/permission incident.
 - Cron execution health: track `job_success_count`, `job_failure_count`, and `schedule_error_count`; spikes in `schedule_error_count` usually indicate invalid schedules/timezone problems or compute regressions.
 - Cron per-job health (`/v1/cron/list`): use `last_status`, `last_error`, `consecutive_failures`, and `run_count`; incident signal is repeated failures without recovery on affected jobs.
+
+## Tool I/O reliability checks
+
+- In `/v1/diagnostics` with `gateway.diagnostics.include_config=true`, monitor `environment.engine.tools.total.failures`; sustained growth signals tool-layer instability.
+- Track `environment.engine.tools.total.unknown_tool`; spikes usually indicate prompt/schema drift or stale tool-call plans from provider output.
+- Use `environment.engine.tools.per_tool` to isolate noisy tools (`failures`, `last_error`) and validate recovery after mitigation.
+- Watch logs/output for deterministic MCP errors (`mcp_error:timeout:*`, `mcp_error:http_status:*`, `mcp_error:invalid_response:*`) and confirm they do not rise continuously under normal load.

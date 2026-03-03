@@ -276,6 +276,7 @@ class AgentEngine:
 
     def diagnostics(self) -> dict[str, Any]:
         session_store_diagnostics: dict[str, Any] = {}
+        tool_diagnostics: dict[str, Any] = {}
         diagnostics_fn = getattr(self.sessions, "diagnostics", None)
         if callable(diagnostics_fn):
             try:
@@ -284,6 +285,14 @@ class AgentEngine:
                     session_store_diagnostics = dict(raw)
             except Exception:
                 session_store_diagnostics = {}
+        tool_diagnostics_fn = getattr(self.tools, "diagnostics", None)
+        if callable(tool_diagnostics_fn):
+            try:
+                raw = tool_diagnostics_fn()
+                if isinstance(raw, dict):
+                    tool_diagnostics = dict(raw)
+            except Exception:
+                tool_diagnostics = {}
         operations: dict[str, Any] = {}
         for name, values in dict(self._persistence_diagnostics.get("operations", {})).items():
             if isinstance(values, dict):
@@ -293,7 +302,7 @@ class AgentEngine:
                     "failures": int(values.get("failures", 0)),
                     "success": int(values.get("success", 0)),
                 }
-        return {
+        payload = {
             "persistence": {
                 "attempts": int(self._persistence_diagnostics.get("attempts", 0)),
                 "retries": int(self._persistence_diagnostics.get("retries", 0)),
@@ -304,6 +313,9 @@ class AgentEngine:
             },
             "session_store": session_store_diagnostics,
         }
+        if callable(tool_diagnostics_fn):
+            payload["tools"] = tool_diagnostics
+        return payload
 
     async def _complete_provider(
         self,

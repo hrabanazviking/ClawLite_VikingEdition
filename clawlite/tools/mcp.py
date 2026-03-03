@@ -15,6 +15,8 @@ setup_logging()
 class MCPTool(Tool):
     name = "mcp"
     description = "Call configured MCP server tools via registry."
+    _TRANSIENT_RETRY_ATTEMPTS = 2
+    _TRANSIENT_RETRY_BACKOFF_S = 0.05
 
     def __init__(self, config: MCPToolConfig | None = None) -> None:
         cfg = config or MCPToolConfig()
@@ -62,23 +64,53 @@ class MCPTool(Tool):
             "params": {"name": resolved_tool, "arguments": payload_args},
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=timeout_s, headers=server.headers or None) as client:
-                response = await asyncio.wait_for(client.post(server.url, json=payload), timeout=timeout_s)
-                response.raise_for_status()
+        timeout_error: Exception | None = None
+        network_error: Exception | None = None
+        for attempt in range(1, self._TRANSIENT_RETRY_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=timeout_s, headers=server.headers or None) as client:
+                    response = await asyncio.wait_for(client.post(server.url, json=payload), timeout=timeout_s)
+            except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+                timeout_error = exc
+                if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
+                    await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
+                    continue
+                log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
+                return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
+            except (httpx.ConnectError, httpx.ReadError, httpx.NetworkError, httpx.TransportError) as exc:
+                network_error = exc
+                if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
+                    await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
+                    continue
+                log.warning("mcp network error server={} tool={} error={}", server_name, resolved_tool, exc)
+                return f"mcp_error:network:{server_name}:{resolved_tool}"
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status >= 400:
+                log.warning("mcp http status failure server={} tool={} status={}", server_name, resolved_tool, status)
+                return f"mcp_error:http_status:{server_name}:{resolved_tool}:{status}"
+            try:
                 data = response.json()
-        except asyncio.TimeoutError:
+            except Exception:
+                log.warning("mcp invalid json response server={} tool={}", server_name, resolved_tool)
+                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+
+            log.info("mcp call server={} tool={} method=tools/call", server_name, resolved_tool)
+
+            if not isinstance(data, dict):
+                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+            if data.get("error"):
+                return f"mcp_error:{data['error']}"
+            if "result" not in data:
+                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+            return str(data.get("result"))
+
+        if timeout_error is not None:
             log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
             return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
-        except httpx.TimeoutException:
-            log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
-            return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
-
-        log.info("mcp call server={} tool={} method=tools/call", server_name, resolved_tool)
-
-        if isinstance(data, dict) and data.get("error"):
-            return f"mcp_error:{data['error']}"
-        return str(data.get("result", data))
+        if network_error is not None:
+            log.warning("mcp network error server={} tool={} error={}", server_name, resolved_tool, network_error)
+            return f"mcp_error:network:{server_name}:{resolved_tool}"
+        return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
 
     def _resolve_target(self, *, arguments: dict, tool: str) -> tuple[str, str]:
         if not self.servers:

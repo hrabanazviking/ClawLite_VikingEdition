@@ -25,3 +25,30 @@ def test_tool_registry_execute() -> None:
         assert out == "ok"
 
     asyncio.run(_scenario())
+
+
+def test_tool_registry_diagnostics_tracks_success_and_unknown_tool() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(EchoTool())
+
+        out = await reg.execute("echo", {"text": "ok"}, session_id="s")
+        assert out == "ok"
+
+        try:
+            await reg.execute("missing", {}, session_id="s")
+            raise AssertionError("expected unknown tool error")
+        except KeyError:
+            pass
+
+        diag = reg.diagnostics()
+        assert diag["total"]["executions"] == 1
+        assert diag["total"]["successes"] == 1
+        assert diag["total"]["failures"] == 1
+        assert diag["total"]["unknown_tool"] == 1
+        assert "unknown tool: missing" in diag["total"]["last_error"]
+        assert diag["per_tool"]["echo"]["executions"] == 1
+        assert diag["per_tool"]["echo"]["successes"] == 1
+        assert diag["per_tool"]["echo"]["failures"] == 0
+
+    asyncio.run(_scenario())

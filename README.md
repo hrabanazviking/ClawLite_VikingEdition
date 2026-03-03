@@ -226,6 +226,7 @@ clawlite/
   - Telegram reliability test coverage now includes deterministic soak/recovery-style validation for repeated reconnect and outbound transient retry cycles, plus mixed-failure chaos/recovery matrix scenarios (chunking, formatting fallback, 429 retry-after, timeout, and multi-cycle polling recovery).
   - Core loop persistence is now fail-soft: response delivery is preserved when session append or memory consolidation fails, with degraded-mode logging for recovery visibility.
   - Gateway diagnostics now expose additive engine persistence telemetry and session-store durability/recovery counters when diagnostics config exposure is enabled.
+  - Tool I/O reliability hardening landed: additive tool execution telemetry in engine diagnostics, deterministic `exec` invalid-syntax/truncation safeguards, and safer MCP timeout/network/HTTP/invalid-response handling with bounded retry.
   - Scheduler is active with both Cron jobs and Heartbeat loop, plus CLI/API controls.
   - Scheduler reliability telemetry hardening landed: heartbeat/cron now expose additive durability counters, trigger/reason/job health signals, and isolate transient persistence/schedule/job failures without crashing runtime loops.
   - Provider routing is active for Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, and custom OpenAI-compatible endpoints.

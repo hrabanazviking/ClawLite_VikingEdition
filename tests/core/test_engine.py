@@ -30,6 +30,9 @@ class FakeTools:
     def schema(self):
         return [{"name": "echo", "description": "echo text", "arguments": {"text": "string"}}]
 
+    def diagnostics(self):
+        return {"total": {"executions": 0, "successes": 0, "failures": 0, "unknown_tool": 0, "last_error": ""}, "per_tool": {}}
+
 
 class FakeProviderWithMessageCapture:
     def __init__(self) -> None:
@@ -531,5 +534,7 @@ def test_engine_diagnostics_tracks_persistence_retries_and_failures() -> None:
 
         assert operations["memory_consolidate"]["attempts"] == 1
         assert operations["memory_consolidate"]["failures"] == 1
+        assert "tools" in diag
+        assert diag["tools"]["total"]["executions"] == 0
 
     asyncio.run(_scenario())
