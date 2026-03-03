@@ -137,6 +137,9 @@ class FakeOneShotProvider:
     async def complete(self, *, messages, tools):
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
+    def diagnostics(self):
+        return {"requests": 1, "successes": 1}
+
 
 class FakeSessionStore:
     def __init__(self, *, fail_role: str | None = None) -> None:
@@ -536,5 +539,18 @@ def test_engine_diagnostics_tracks_persistence_retries_and_failures() -> None:
         assert operations["memory_consolidate"]["failures"] == 1
         assert "tools" in diag
         assert diag["tools"]["total"]["executions"] == 0
+        assert "provider" in diag
+        assert diag["provider"]["successes"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_provider_circuit_open_maps_to_cooldown_message() -> None:
+    async def _scenario() -> None:
+        engine = AgentEngine(provider=FakeErrorProvider("provider_circuit_open:openai:30.0"), tools=FakeTools())
+        out = await engine.run(session_id="cli:error-circuit", user_text="hello")
+        text = out.text.lower()
+        assert "circuit breaker" in text
+        assert "cooldown" in text
 
     asyncio.run(_scenario())

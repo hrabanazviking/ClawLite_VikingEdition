@@ -4,7 +4,14 @@
   "provider": {
     "model": "gemini/gemini-2.5-flash",
     "litellm_base_url": "https://api.openai.com/v1",
-    "litellm_api_key": ""
+    "litellm_api_key": "",
+    "retry_max_attempts": 3,
+    "retry_initial_backoff_s": 0.5,
+    "retry_max_backoff_s": 8.0,
+    "retry_jitter_s": 0.2,
+    "circuit_failure_threshold": 3,
+    "circuit_cooldown_s": 30.0,
+    "fallback_model": ""
   },
   "agents": {
     "defaults": {

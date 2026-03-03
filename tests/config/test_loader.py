@@ -160,6 +160,36 @@ def test_load_config_provider_blocks(tmp_path: Path, monkeypatch) -> None:
     assert cfg.providers.custom.extra_headers == {"X-Test": "1"}
 
 
+def test_load_config_provider_reliability_fields_parse_snake_and_camel(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "model": "openai/gpt-4.1-mini",
+                    "retryMaxAttempts": 4,
+                    "retry_initial_backoff_s": 0.75,
+                    "retryMaxBackoffS": 9.5,
+                    "retry_jitter_s": 0.3,
+                    "circuitFailureThreshold": 5,
+                    "circuit_cooldown_s": 45.0,
+                    "fallbackModel": "openai/gpt-4o-mini",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.provider.retry_max_attempts == 4
+    assert cfg.provider.retry_initial_backoff_s == 0.75
+    assert cfg.provider.retry_max_backoff_s == 9.5
+    assert cfg.provider.retry_jitter_s == 0.3
+    assert cfg.provider.circuit_failure_threshold == 5
+    assert cfg.provider.circuit_cooldown_s == 45.0
+    assert cfg.provider.fallback_model == "openai/gpt-4o-mini"
+
+
 def test_load_config_channels_and_gateway_heartbeat_backward_compat(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(

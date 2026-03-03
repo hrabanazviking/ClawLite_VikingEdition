@@ -10,6 +10,7 @@
 - Telegram reliability hardening in progress: deterministic soak/recovery tests cover repeated polling reconnects, outbound transient retry cycles, and mixed-failure chaos/recovery matrix cases (chunking + formatting fallback + 429 retry-after + timeout before success); continue runtime tuning for near-100% stability.
 - P0 progress: scheduler durability telemetry hardening landed for heartbeat + cron (best-effort atomic state saves with retry, non-crashing loop containment for save/schedule/job failures, and additive runtime diagnostics/per-job health fields).
 - P0 progress: tool I/O reliability hardening landed with registry/engine tool telemetry, deterministic exec malformed-syntax and bounded-output behavior, plus MCP bounded transient retry and deterministic timeout/http/invalid-response errors.
+- P0 progress: provider reliability hardening landed with bounded retry/backoff+jitter, Retry-After support, per-provider circuit breaker, additive provider diagnostics, and optional fallback model failover on retryable failures.
 
 ## P1 — Operational autonomy
 

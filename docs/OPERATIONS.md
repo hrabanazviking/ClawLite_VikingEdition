@@ -116,3 +116,10 @@ pytest -q tests
 - Track `environment.engine.tools.total.unknown_tool`; spikes usually indicate prompt/schema drift or stale tool-call plans from provider output.
 - Use `environment.engine.tools.per_tool` to isolate noisy tools (`failures`, `last_error`) and validate recovery after mitigation.
 - Watch logs/output for deterministic MCP errors (`mcp_error:timeout:*`, `mcp_error:http_status:*`, `mcp_error:invalid_response:*`) and confirm they do not rise continuously under normal load.
+
+## Provider reliability checks
+
+- In `/v1/diagnostics` with `gateway.diagnostics.include_config=true`, monitor `environment.engine.provider` counters.
+- Retry pressure: investigate sustained growth in `retries`, especially when paired with `rate_limit_errors` or `server_errors`.
+- Circuit health: expected steady state is `circuit_open=false`; investigate recurring growth in `circuit_open_count` without matching recovery (`circuit_close_count`).
+- Fallback path (when configured) is reported under provider diagnostics with `fallback_attempts`, `fallback_success`, and `fallback_failures`.

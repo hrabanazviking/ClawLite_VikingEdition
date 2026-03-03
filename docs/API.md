@@ -70,7 +70,9 @@ If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostic
 
 `channels` entries are additive and may include channel-specific `signals` maps for operational counters/state.
 
-When `gateway.diagnostics.include_config=true`, `environment` may include additive engine persistence telemetry, nested session-store durability/recovery diagnostics, and tool execution telemetry under `environment.engine.tools` (`total` + `per_tool` counters).
+When `gateway.diagnostics.include_config=true`, `environment` may include additive engine persistence telemetry, nested session-store durability/recovery diagnostics, tool execution telemetry under `environment.engine.tools` (`total` + `per_tool` counters), and provider telemetry under `environment.engine.provider`.
+
+Provider telemetry keys are additive and may include: `requests`, `successes`, `retries`, `timeouts`, `network_errors`, `http_errors`, `auth_errors`, `rate_limit_errors`, `server_errors`, `circuit_open`, `circuit_open_count`, `circuit_close_count`, `consecutive_failures`, `last_error`, `last_status_code`.
 
 Example response:
 

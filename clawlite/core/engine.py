@@ -277,6 +277,7 @@ class AgentEngine:
     def diagnostics(self) -> dict[str, Any]:
         session_store_diagnostics: dict[str, Any] = {}
         tool_diagnostics: dict[str, Any] = {}
+        provider_diagnostics: dict[str, Any] = {}
         diagnostics_fn = getattr(self.sessions, "diagnostics", None)
         if callable(diagnostics_fn):
             try:
@@ -293,6 +294,14 @@ class AgentEngine:
                     tool_diagnostics = dict(raw)
             except Exception:
                 tool_diagnostics = {}
+        provider_diagnostics_fn = getattr(self.provider, "diagnostics", None)
+        if callable(provider_diagnostics_fn):
+            try:
+                raw = provider_diagnostics_fn()
+                if isinstance(raw, dict):
+                    provider_diagnostics = dict(raw)
+            except Exception:
+                provider_diagnostics = {}
         operations: dict[str, Any] = {}
         for name, values in dict(self._persistence_diagnostics.get("operations", {})).items():
             if isinstance(values, dict):
@@ -315,6 +324,8 @@ class AgentEngine:
         }
         if callable(tool_diagnostics_fn):
             payload["tools"] = tool_diagnostics
+        if provider_diagnostics:
+            payload["provider"] = provider_diagnostics
         return payload
 
     async def _complete_provider(
@@ -475,6 +486,8 @@ class AgentEngine:
             return ProviderHttpError(status_code=status_code, detail=detail)
         if reason.startswith("provider_network_error:"):
             return ProviderNetworkError(reason.partition(":")[-1].strip())
+        if reason.startswith("provider_circuit_open:"):
+            return ProviderNetworkError(reason)
         if reason.startswith("provider_config_error:"):
             return ProviderConfigError(reason.partition(":")[-1].strip())
         if reason.startswith("codex_http_error:"):
@@ -525,6 +538,8 @@ class AgentEngine:
         if isinstance(error, ProviderConfigError):
             return "Sorry, provider configuration is invalid. Check base URL/model settings and try again."
         if isinstance(error, ProviderNetworkError):
+            if str(error).startswith("provider_circuit_open:"):
+                return "Sorry, the model provider circuit breaker is open after repeated failures. Please retry after cooldown."
             return "Sorry, I could not reach the model provider due to a network error. Please try again shortly."
         return "Sorry, I encountered an error while calling the model. Please try again shortly."
 

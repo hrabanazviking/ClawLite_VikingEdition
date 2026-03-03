@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import random
+import time
 from typing import Any
 
 import httpx
 from json_repair import loads as json_repair_loads
 
 from clawlite.providers.base import LLMProvider, LLMResult, ToolCall
+from clawlite.providers.reliability import ReliabilitySettings, parse_retry_after_seconds
 
 
 class LiteLLMProvider(LLMProvider):
@@ -35,6 +37,12 @@ class LiteLLMProvider(LLMProvider):
         openai_compatible: bool = True,
         timeout: float = 30.0,
         extra_headers: dict[str, str] | None = None,
+        retry_max_attempts: int = 3,
+        retry_initial_backoff_s: float = 0.5,
+        retry_max_backoff_s: float = 8.0,
+        retry_jitter_s: float = 0.2,
+        circuit_failure_threshold: int = 3,
+        circuit_cooldown_s: float = 30.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -43,24 +51,87 @@ class LiteLLMProvider(LLMProvider):
         self.openai_compatible = openai_compatible
         self.timeout = timeout
         self.extra_headers = dict(extra_headers or {})
+        self.reliability = ReliabilitySettings(
+            retry_max_attempts=max(1, int(retry_max_attempts)),
+            retry_initial_backoff_s=max(0.0, float(retry_initial_backoff_s)),
+            retry_max_backoff_s=max(float(retry_initial_backoff_s), float(retry_max_backoff_s)),
+            retry_jitter_s=max(0.0, float(retry_jitter_s)),
+            circuit_failure_threshold=max(1, int(circuit_failure_threshold)),
+            circuit_cooldown_s=max(0.0, float(circuit_cooldown_s)),
+        )
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._diagnostics: dict[str, Any] = {
+            "requests": 0,
+            "successes": 0,
+            "retries": 0,
+            "timeouts": 0,
+            "network_errors": 0,
+            "http_errors": 0,
+            "auth_errors": 0,
+            "rate_limit_errors": 0,
+            "server_errors": 0,
+            "circuit_open": False,
+            "circuit_open_count": 0,
+            "circuit_close_count": 0,
+            "consecutive_failures": 0,
+            "last_error": "",
+            "last_status_code": 0,
+        }
 
-    @staticmethod
-    def _max_attempts() -> int:
-        raw = os.getenv("CLAWLITE_PROVIDER_429_MAX_ATTEMPTS", "3").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 3
-        return max(1, value)
+    def diagnostics(self) -> dict[str, Any]:
+        payload = dict(self._diagnostics)
+        payload["consecutive_failures"] = int(self._consecutive_failures)
+        payload["circuit_open"] = bool(self._circuit_open_until > time.monotonic())
+        return payload
 
-    @staticmethod
-    def _wait_seconds() -> float:
-        raw = os.getenv("CLAWLITE_PROVIDER_429_WAIT_SECONDS", "60").strip()
-        try:
-            value = float(raw)
-        except ValueError:
-            value = 60.0
-        return max(0.0, value)
+    def _record_success(self) -> None:
+        self._diagnostics["successes"] = int(self._diagnostics["successes"]) + 1
+        self._consecutive_failures = 0
+        self._diagnostics["consecutive_failures"] = 0
+        self._diagnostics["last_error"] = ""
+        self._diagnostics["last_status_code"] = 0
+
+    def _record_failure(self, *, error: str, status_code: int | None = None) -> None:
+        self._diagnostics["last_error"] = str(error)
+        self._diagnostics["last_status_code"] = int(status_code or 0)
+        self._consecutive_failures += 1
+        self._diagnostics["consecutive_failures"] = self._consecutive_failures
+        if status_code in {401, 403} or str(error).startswith("provider_auth_error:"):
+            self._diagnostics["auth_errors"] = int(self._diagnostics["auth_errors"]) + 1
+        if status_code == 429:
+            self._diagnostics["rate_limit_errors"] = int(self._diagnostics["rate_limit_errors"]) + 1
+        if status_code is not None and 500 <= status_code <= 599:
+            self._diagnostics["server_errors"] = int(self._diagnostics["server_errors"]) + 1
+
+        if self._consecutive_failures >= self.reliability.circuit_failure_threshold:
+            was_open = self._circuit_open_until > time.monotonic()
+            self._circuit_open_until = time.monotonic() + self.reliability.circuit_cooldown_s
+            if not was_open:
+                self._diagnostics["circuit_open_count"] = int(self._diagnostics["circuit_open_count"]) + 1
+            self._diagnostics["circuit_open"] = True
+
+    def _check_circuit(self) -> str | None:
+        now = time.monotonic()
+        if self._circuit_open_until <= 0:
+            self._diagnostics["circuit_open"] = False
+            return None
+        if now >= self._circuit_open_until:
+            self._circuit_open_until = 0.0
+            self._consecutive_failures = 0
+            self._diagnostics["consecutive_failures"] = 0
+            self._diagnostics["circuit_open"] = False
+            self._diagnostics["circuit_close_count"] = int(self._diagnostics["circuit_close_count"]) + 1
+            return None
+        self._diagnostics["circuit_open"] = True
+        return f"provider_circuit_open:{self.provider_name}:{self.reliability.circuit_cooldown_s}"
+
+    def _retry_delay(self, attempt: int, *, retry_after_s: float | None = None) -> float:
+        if retry_after_s is not None:
+            return max(0.0, float(retry_after_s))
+        base = self.reliability.retry_initial_backoff_s * (2 ** max(0, attempt - 1))
+        capped = min(base, self.reliability.retry_max_backoff_s)
+        return max(0.0, capped + random.uniform(0.0, self.reliability.retry_jitter_s))
 
     @staticmethod
     def _extract_text(content: Any) -> str:
@@ -260,10 +331,14 @@ class LiteLLMProvider(LLMProvider):
         reasoning_effort: str | None = None,
     ) -> LLMResult:
         if not self.api_key.strip():
-            raise RuntimeError("provider_auth_error:missing_api_key:anthropic")
+            error = "provider_auth_error:missing_api_key:anthropic"
+            self._record_failure(error=error, status_code=401)
+            raise RuntimeError(error)
 
         if not self.base_url.strip():
-            raise RuntimeError("provider_config_error:missing_base_url:anthropic")
+            error = "provider_config_error:missing_base_url:anthropic"
+            self._record_failure(error=error)
+            raise RuntimeError(error)
 
         system_text, anthropic_messages = self._anthropic_messages(messages)
         payload: dict[str, Any] = {
@@ -287,8 +362,7 @@ class LiteLLMProvider(LLMProvider):
         headers.update(self.extra_headers)
 
         url = f"{self.base_url}/messages"
-        attempts = self._max_attempts()
-        wait_seconds = self._wait_seconds()
+        attempts = self.reliability.retry_max_attempts
 
         for attempt in range(1, attempts + 1):
             try:
@@ -320,6 +394,7 @@ class LiteLLMProvider(LLMProvider):
                                 )
                             )
 
+                self._record_success()
                 return LLMResult(
                     text="\n".join(text_parts).strip(),
                     model=self.model,
@@ -329,16 +404,49 @@ class LiteLLMProvider(LLMProvider):
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 detail = self._error_detail(exc.response)
-                if status == 429 and attempt < attempts and not self._is_hard_quota_429(detail=detail, resp=exc.response):
-                    await asyncio.sleep(wait_seconds)
+                self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
+                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
+                should_retry = (
+                    status is not None
+                    and (status == 429 or 500 <= status <= 599)
+                    and not hard_quota
+                    and attempt < attempts
+                )
+                if should_retry:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
                     continue
                 if detail:
-                    raise RuntimeError(f"provider_http_error:{status}:{detail}") from exc
-                raise RuntimeError(f"provider_http_error:{status}") from exc
+                    error = f"provider_http_error:{status}:{detail}"
+                    self._record_failure(error=error, status_code=status)
+                    raise RuntimeError(error) from exc
+                error = f"provider_http_error:{status}"
+                self._record_failure(error=error, status_code=status)
+                raise RuntimeError(error) from exc
+            except httpx.TimeoutException as exc:
+                self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
+                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                if attempt < attempts:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                error = f"provider_network_error:{exc}"
+                self._record_failure(error=error)
+                raise RuntimeError(error) from exc
             except httpx.RequestError as exc:
-                raise RuntimeError(f"provider_network_error:{exc}") from exc
+                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                if attempt < attempts:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                error = f"provider_network_error:{exc}"
+                self._record_failure(error=error)
+                raise RuntimeError(error) from exc
 
-        raise RuntimeError("provider_429_exhausted")
+        error = "provider_429_exhausted"
+        self._record_failure(error=error, status_code=429)
+        raise RuntimeError(error)
 
     async def complete(
         self,
@@ -349,6 +457,11 @@ class LiteLLMProvider(LLMProvider):
         temperature: float | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResult:
+        self._diagnostics["requests"] = int(self._diagnostics["requests"]) + 1
+        if circuit_error := self._check_circuit():
+            self._record_failure(error=circuit_error)
+            raise RuntimeError(circuit_error)
+
         if not self.openai_compatible and self.provider_name == "anthropic":
             return await self._complete_anthropic(
                 messages=messages,
@@ -359,16 +472,22 @@ class LiteLLMProvider(LLMProvider):
             )
 
         if not self.openai_compatible:
-            raise RuntimeError(
+            error = (
                 f"provider_config_error:provider '{self.provider_name}' is not OpenAI-compatible in ClawLite. "
                 "Use an OpenAI-compatible gateway/base_url."
             )
+            self._record_failure(error=error)
+            raise RuntimeError(error)
 
         if not self.api_key.strip():
-            raise RuntimeError(f"provider_auth_error:missing_api_key:{self.provider_name}")
+            error = f"provider_auth_error:missing_api_key:{self.provider_name}"
+            self._record_failure(error=error, status_code=401)
+            raise RuntimeError(error)
 
         if not self.base_url.strip():
-            raise RuntimeError(f"provider_config_error:missing_base_url:{self.provider_name}")
+            error = f"provider_config_error:missing_base_url:{self.provider_name}"
+            self._record_failure(error=error)
+            raise RuntimeError(error)
 
         url = f"{self.base_url}/chat/completions"
         headers = {"content-type": "application/json"}
@@ -389,8 +508,7 @@ class LiteLLMProvider(LLMProvider):
             payload["tools"] = [{"type": "function", "function": row} for row in tools]
             payload["tool_choice"] = "auto"
 
-        attempts = self._max_attempts()
-        wait_seconds = self._wait_seconds()
+        attempts = self.reliability.retry_max_attempts
 
         for attempt in range(1, attempts + 1):
             try:
@@ -401,20 +519,54 @@ class LiteLLMProvider(LLMProvider):
                 message = data.get("choices", [{}])[0].get("message", {})
                 text = self._extract_text(message.get("content", ""))
                 tool_calls = self._parse_tool_calls(message)
+                self._record_success()
                 return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "litellm"})
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None
                 detail = self._error_detail(exc.response)
-                if status == 429 and attempt < attempts and not self._is_hard_quota_429(detail=detail, resp=exc.response):
-                    await asyncio.sleep(wait_seconds)
+                self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
+                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
+                should_retry = (
+                    status is not None
+                    and (status == 429 or 500 <= status <= 599)
+                    and not hard_quota
+                    and attempt < attempts
+                )
+                if should_retry:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
                     continue
                 if detail:
-                    raise RuntimeError(f"provider_http_error:{status}:{detail}") from exc
-                raise RuntimeError(f"provider_http_error:{status}") from exc
+                    error = f"provider_http_error:{status}:{detail}"
+                    self._record_failure(error=error, status_code=status)
+                    raise RuntimeError(error) from exc
+                error = f"provider_http_error:{status}"
+                self._record_failure(error=error, status_code=status)
+                raise RuntimeError(error) from exc
+            except httpx.TimeoutException as exc:
+                self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
+                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                if attempt < attempts:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                error = f"provider_network_error:{exc}"
+                self._record_failure(error=error)
+                raise RuntimeError(error) from exc
             except httpx.RequestError as exc:
-                raise RuntimeError(f"provider_network_error:{exc}") from exc
+                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                if attempt < attempts:
+                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                    await asyncio.sleep(self._retry_delay(attempt))
+                    continue
+                error = f"provider_network_error:{exc}"
+                self._record_failure(error=error)
+                raise RuntimeError(error) from exc
 
-        raise RuntimeError("provider_429_exhausted")
+        error = "provider_429_exhausted"
+        self._record_failure(error=error, status_code=429)
+        raise RuntimeError(error)
 
     def get_default_model(self) -> str:
         return self.model

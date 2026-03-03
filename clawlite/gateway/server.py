@@ -252,6 +252,13 @@ def _provider_config(config: AppConfig) -> dict[str, Any]:
 
     return {
         "model": active_model,
+        "retry_max_attempts": config.provider.retry_max_attempts,
+        "retry_initial_backoff_s": config.provider.retry_initial_backoff_s,
+        "retry_max_backoff_s": config.provider.retry_max_backoff_s,
+        "retry_jitter_s": config.provider.retry_jitter_s,
+        "circuit_failure_threshold": config.provider.circuit_failure_threshold,
+        "circuit_cooldown_s": config.provider.circuit_cooldown_s,
+        "fallback_model": config.provider.fallback_model,
         "providers": {
             "litellm": {
                 "base_url": selected_api_base or config.provider.litellm_base_url,
@@ -571,6 +578,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return (502, f"Remote provider failure (HTTP {provider_http_code}).{detail}")
         if message.startswith("provider_network_error:"):
             return (503, "Remote provider is currently unavailable (network error).")
+        if message.startswith("provider_circuit_open:"):
+            return (503, "Remote provider circuit breaker is open after repeated failures. Try again after cooldown.")
         if message.startswith("codex_http_error:401"):
             return (502, "Codex authentication failed (401). Re-authenticate OAuth for the Codex provider.")
         if message.startswith("codex_http_error:429") or message == "codex_429_exhausted":

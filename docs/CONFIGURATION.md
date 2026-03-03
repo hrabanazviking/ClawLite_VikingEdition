@@ -5,6 +5,7 @@ Default file: `~/.clawlite/config.json`
 Main fields (summary):
 - `workspace_path`, `state_path`
 - `provider` and `providers` (active model, credentials/base per provider)
+- `provider` reliability controls: retry (`retry_*`), circuit breaker (`circuit_*`), optional `fallback_model`
 - `agents.defaults` (model, limits, temperature)
 - `gateway.host`, `gateway.port`
 - `gateway.auth` (API auth control)
@@ -72,6 +73,10 @@ Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gate
 - `provider.model` defines the preferred provider (`gemini/...`, `openrouter/...`, `openai/...`, `groq/...`).
 - If the key is not in `provider.litellm_api_key`, the runtime tries provider-specific environment variables.
 - `provider.litellm_base_url` is optional for common providers: runtime applies provider default base URL.
+- Provider reliability fields are additive and backward-compatible:
+  - `retry_max_attempts`, `retry_initial_backoff_s`, `retry_max_backoff_s`, `retry_jitter_s`
+  - `circuit_failure_threshold`, `circuit_cooldown_s`
+  - `fallback_model` (optional second model path for retryable provider failures)
 
 ## Telegram (main options)
 

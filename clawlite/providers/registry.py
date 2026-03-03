@@ -7,6 +7,7 @@ from typing import Any
 from clawlite.providers.base import LLMProvider
 from clawlite.providers.codex import CodexProvider
 from clawlite.providers.custom import CustomProvider
+from clawlite.providers.failover import FailoverProvider
 from clawlite.providers.litellm import LiteLLMProvider
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -367,17 +368,44 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
     return token, account_id
 
 
-def build_provider(config: dict[str, Any]) -> LLMProvider:
+def _reliability_settings(config: dict[str, Any]) -> dict[str, Any]:
+    retry_max_attempts = max(1, int(config.get("retry_max_attempts", config.get("retryMaxAttempts", 3)) or 3))
+    retry_initial_backoff_s = max(
+        0.0,
+        float(config.get("retry_initial_backoff_s", config.get("retryInitialBackoffS", 0.5)) or 0.5),
+    )
+    retry_max_backoff_s = max(
+        retry_initial_backoff_s,
+        float(config.get("retry_max_backoff_s", config.get("retryMaxBackoffS", 8.0)) or 8.0),
+    )
+    retry_jitter_s = max(0.0, float(config.get("retry_jitter_s", config.get("retryJitterS", 0.2)) or 0.2))
+    circuit_failure_threshold = max(
+        1,
+        int(config.get("circuit_failure_threshold", config.get("circuitFailureThreshold", 3)) or 3),
+    )
+    circuit_cooldown_s = max(0.0, float(config.get("circuit_cooldown_s", config.get("circuitCooldownS", 30.0)) or 30.0))
+    return {
+        "retry_max_attempts": retry_max_attempts,
+        "retry_initial_backoff_s": retry_initial_backoff_s,
+        "retry_max_backoff_s": retry_max_backoff_s,
+        "retry_jitter_s": retry_jitter_s,
+        "circuit_failure_threshold": circuit_failure_threshold,
+        "circuit_cooldown_s": circuit_cooldown_s,
+    }
+
+
+def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
     model = str(config.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash").strip()
     model_lower = model.lower()
     providers_cfg = dict(config.get("providers") or {})
     litellm_cfg = _provider_cfg(providers_cfg, "litellm")
+    reliability = _reliability_settings(config)
 
     if model_lower.startswith(("openai-codex/", "openai_codex/")):
         model_name = model.split("/", 1)[1] if "/" in model else model
         token, account_id = _resolve_codex_oauth(config)
         if token:
-            return CodexProvider(model=model_name, access_token=token, account_id=account_id)
+            return CodexProvider(model=model_name, access_token=token, account_id=account_id, **reliability)
 
         openai_cfg = _provider_cfg(providers_cfg, "openai")
         resolved = resolve_litellm_provider(
@@ -393,6 +421,7 @@ def build_provider(config: dict[str, Any]) -> LLMProvider:
             provider_name=resolved.name,
             openai_compatible=resolved.openai_compatible,
             extra_headers={},
+            **reliability,
         )
 
     if model_lower.startswith("custom/"):
@@ -406,6 +435,7 @@ def build_provider(config: dict[str, Any]) -> LLMProvider:
             api_key=_cfg_value(custom_cfg, "api_key", "apiKey") or "",
             model=str(custom_cfg.get("model", model.split("/", 1)[-1])),
             extra_headers=extra_headers,
+            **reliability,
         )
 
     predicted_name = detect_provider_name(model, api_key="", base_url="")
@@ -429,4 +459,19 @@ def build_provider(config: dict[str, Any]) -> LLMProvider:
         provider_name=resolved.name,
         openai_compatible=resolved.openai_compatible,
         extra_headers=extra_headers,
+        **reliability,
     )
+
+
+def build_provider(config: dict[str, Any]) -> LLMProvider:
+    primary = _build_provider_single(config)
+    model = str(config.get("model", "") or "").strip()
+    fallback_model = str(config.get("fallback_model", config.get("fallbackModel", "")) or "").strip()
+    if not fallback_model or fallback_model == model:
+        return primary
+
+    fallback_config = dict(config)
+    fallback_config["model"] = fallback_model
+    fallback_config["fallback_model"] = ""
+    fallback = _build_provider_single(fallback_config)
+    return FailoverProvider(primary=primary, fallback=fallback, fallback_model=fallback_model)

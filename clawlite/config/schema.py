@@ -87,6 +87,13 @@ class ProviderConfig:
     model: str = "gemini/gemini-2.5-flash"
     litellm_base_url: str = "https://api.openai.com/v1"
     litellm_api_key: str = ""
+    retry_max_attempts: int = 3
+    retry_initial_backoff_s: float = 0.5
+    retry_max_backoff_s: float = 8.0
+    retry_jitter_s: float = 0.2
+    circuit_failure_threshold: int = 3
+    circuit_cooldown_s: float = 30.0
+    fallback_model: str = ""
 
 
 @dataclass(slots=True)
@@ -602,6 +609,25 @@ class AppConfig:
                 model=str(payload.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
                 litellm_base_url=str(payload.get("litellm_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"),
                 litellm_api_key=str(payload.get("litellm_api_key", "") or ""),
+                retry_max_attempts=max(1, int(payload.get("retry_max_attempts", payload.get("retryMaxAttempts", 3)) or 3)),
+                retry_initial_backoff_s=max(
+                    0.0,
+                    float(payload.get("retry_initial_backoff_s", payload.get("retryInitialBackoffS", 0.5)) or 0.5),
+                ),
+                retry_max_backoff_s=max(
+                    0.0,
+                    float(payload.get("retry_max_backoff_s", payload.get("retryMaxBackoffS", 8.0)) or 8.0),
+                ),
+                retry_jitter_s=max(0.0, float(payload.get("retry_jitter_s", payload.get("retryJitterS", 0.2)) or 0.2)),
+                circuit_failure_threshold=max(
+                    1,
+                    int(payload.get("circuit_failure_threshold", payload.get("circuitFailureThreshold", 3)) or 3),
+                ),
+                circuit_cooldown_s=max(
+                    0.0,
+                    float(payload.get("circuit_cooldown_s", payload.get("circuitCooldownS", 30.0)) or 30.0),
+                ),
+                fallback_model=str(payload.get("fallback_model", payload.get("fallbackModel", "")) or "").strip(),
             )
         if isinstance(self.providers, dict):
             self.providers = ProvidersConfig.from_dict(self.providers)
@@ -639,10 +665,55 @@ class AppConfig:
         defaults = cls()
 
         provider_raw = dict(raw.get("provider") or {})
+        def _provider_value(snake: str, camel: str, default: Any) -> Any:
+            if camel in provider_raw:
+                return provider_raw.get(camel)
+            return provider_raw.get(snake, default)
+
         provider = ProviderConfig(
-            model=str(provider_raw.get("model", defaults.provider.model) or defaults.provider.model),
-            litellm_base_url=str(provider_raw.get("litellm_base_url", defaults.provider.litellm_base_url) or defaults.provider.litellm_base_url),
-            litellm_api_key=str(provider_raw.get("litellm_api_key", defaults.provider.litellm_api_key) or defaults.provider.litellm_api_key),
+            model=str(_provider_value("model", "model", defaults.provider.model) or defaults.provider.model),
+            litellm_base_url=str(
+                _provider_value("litellm_base_url", "litellmBaseUrl", defaults.provider.litellm_base_url)
+                or defaults.provider.litellm_base_url
+            ),
+            litellm_api_key=str(
+                _provider_value("litellm_api_key", "litellmApiKey", defaults.provider.litellm_api_key)
+                or defaults.provider.litellm_api_key
+            ),
+            retry_max_attempts=max(
+                1,
+                int(_provider_value("retry_max_attempts", "retryMaxAttempts", defaults.provider.retry_max_attempts) or defaults.provider.retry_max_attempts),
+            ),
+            retry_initial_backoff_s=max(
+                0.0,
+                float(
+                    _provider_value("retry_initial_backoff_s", "retryInitialBackoffS", defaults.provider.retry_initial_backoff_s)
+                    or defaults.provider.retry_initial_backoff_s
+                ),
+            ),
+            retry_max_backoff_s=max(
+                0.0,
+                float(
+                    _provider_value("retry_max_backoff_s", "retryMaxBackoffS", defaults.provider.retry_max_backoff_s)
+                    or defaults.provider.retry_max_backoff_s
+                ),
+            ),
+            retry_jitter_s=max(
+                0.0,
+                float(_provider_value("retry_jitter_s", "retryJitterS", defaults.provider.retry_jitter_s) or defaults.provider.retry_jitter_s),
+            ),
+            circuit_failure_threshold=max(
+                1,
+                int(
+                    _provider_value("circuit_failure_threshold", "circuitFailureThreshold", defaults.provider.circuit_failure_threshold)
+                    or defaults.provider.circuit_failure_threshold
+                ),
+            ),
+            circuit_cooldown_s=max(
+                0.0,
+                float(_provider_value("circuit_cooldown_s", "circuitCooldownS", defaults.provider.circuit_cooldown_s) or defaults.provider.circuit_cooldown_s),
+            ),
+            fallback_model=str(_provider_value("fallback_model", "fallbackModel", defaults.provider.fallback_model) or defaults.provider.fallback_model).strip(),
         )
 
         agents = AgentsConfig.from_dict(dict(raw.get("agents") or {}))

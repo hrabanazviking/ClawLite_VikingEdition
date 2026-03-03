@@ -17,6 +17,9 @@ class FakeProvider:
     async def complete(self, *, messages, tools):
         return LLMResult(text="pong", model="fake/test", tool_calls=[], metadata={})
 
+    def diagnostics(self):
+        return {"requests": 1, "successes": 1}
+
 
 class FailingProvider:
     def __init__(self, message: str) -> None:
@@ -175,6 +178,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "engine" in payload["environment"]
         assert "persistence" in payload["environment"]["engine"]
         assert "session_store" in payload["environment"]["engine"]
+        assert payload["environment"]["engine"]["provider"]["requests"] == 1
 
     cfg_disabled = AppConfig(
         workspace_path=str(tmp_path / "workspace2"),

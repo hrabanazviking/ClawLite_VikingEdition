@@ -28,6 +28,7 @@ Unlike heavier alternatives, ClawLite is intentionally compact: around **4.2k li
 - 🗓️ **Autonomous scheduling** with Cron jobs and heartbeat loops.
 - 🗂️ **Persistent memory + sessions** stored under `~/.clawlite/state`.
 - 🔌 **Multi-provider LLM support** (Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, custom OpenAI-compatible endpoints).
+- 🧯 **Provider reliability controls**: bounded retry/backoff (+ jitter), provider circuit breaker, additive provider diagnostics, and optional fallback model failover for retryable failures.
 - 🛠️ **Tool execution** for shell, files, web, cron, message routing, skills, and subagents.
 
 ## 🚀 Quick Start (4 Steps)
@@ -227,6 +228,7 @@ clawlite/
   - Core loop persistence is now fail-soft: response delivery is preserved when session append or memory consolidation fails, with degraded-mode logging for recovery visibility.
   - Gateway diagnostics now expose additive engine persistence telemetry and session-store durability/recovery counters when diagnostics config exposure is enabled.
   - Tool I/O reliability hardening landed: additive tool execution telemetry in engine diagnostics, deterministic `exec` invalid-syntax/truncation safeguards, and safer MCP timeout/network/HTTP/invalid-response handling with bounded retry.
+  - Provider reliability hardening landed: fail-soft retry taxonomy (429 non-quota + 5xx + network/timeout), Retry-After support, provider circuit breaker telemetry, and optional one-hop fallback model failover.
   - Scheduler is active with both Cron jobs and Heartbeat loop, plus CLI/API controls.
   - Scheduler reliability telemetry hardening landed: heartbeat/cron now expose additive durability counters, trigger/reason/job health signals, and isolate transient persistence/schedule/job failures without crashing runtime loops.
   - Provider routing is active for Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, and custom OpenAI-compatible endpoints.
@@ -242,7 +244,7 @@ clawlite/
   - [ ] Telegram at near-100% reliability: typing signal, formatting stability, resilient retries, and zero-crash channel loop (inspired by [OpenClaw](https://github.com/openclaw/openclaw) + [nanobot](https://github.com/HKUDS/nanobot) reliability targets).
   - [ ] ClawLite core loop fully reliable across Memory, Agents, Heartbeat, Soul context, Tools, and User context.
   - [ ] Gateway v1 stability hardening with expanded integration tests for `/v1/chat`, `/v1/cron/*`, and scheduler dispatch.
-  - [ ] Provider/runtime robustness: safer auth/config validation, clearer provider error taxonomy, and stronger fallback/retry behavior (aligned with OpenClaw/nanobot production lessons).
+  - [x] Provider/runtime robustness: safer auth/config validation, clearer provider error taxonomy, stronger fallback/retry behavior, and additive provider telemetry.
 - **P1 Capability Expansion**
   - [ ] Skills system at production quality: discovery, execution diagnostics, guardrails, and repeatable outcomes (OpenClaw/nanobot inspired operator UX).
   - [ ] Subagents at production quality: queue/retry/resume reliability, better observability, and practical delegation flows.
