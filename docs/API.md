@@ -61,6 +61,8 @@ Example response:
 
 Channel diagnostics returned via health/diagnostics use additive maps and may include per-channel `signals` entries.
 
+Queue diagnostics are additive and may include delivery/dead-letter observability fields: `inbound_published`, `outbound_enqueued`, `outbound_dropped`, `dead_letter_enqueued`, `dead_letter_replayed`, `dead_letter_replay_attempts`, `dead_letter_replay_skipped`, `dead_letter_replay_dropped`, `dead_letter_reason_counts`, and best-effort oldest-age gauges (`outbound_oldest_age_s`, `dead_letter_oldest_age_s`).
+
 Scheduler diagnostics/status payloads are additive and include reliability telemetry:
 - `heartbeat` may include trigger/reason counters, state-save counters, `consecutive_error_count`, and `state_last_error`.
 - `cron` may include load/save durability counters plus service-level execution/schedule counters; cron jobs include per-job health fields (`last_status`, `last_error`, `consecutive_failures`, `run_count`).
@@ -70,6 +72,11 @@ Scheduler diagnostics/status payloads are additive and include reliability telem
 If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostics_disabled","status":404}`.
 
 `channels` entries are additive and may include channel-specific `signals` maps for operational counters/state.
+
+`channels_delivery` is additive and includes manager-level delivery counters with this shape:
+
+- `total`: aggregate counters (`attempts`, `success`, `failures`, `dead_lettered`, `replayed`, `channel_unavailable`, `policy_dropped`)
+- `per_channel`: same counter schema keyed by channel name
 
 When `gateway.diagnostics.include_config=true`, `environment` may include additive engine persistence telemetry, nested session-store durability/recovery diagnostics, tool execution telemetry under `environment.engine.tools` (`total` + `per_tool` counters), and provider telemetry under `environment.engine.provider`.
 
@@ -85,13 +92,25 @@ Example response:
   "control_plane": {"ready": true, "phase": "running", "components": {}, "auth": {}},
   "queue": {
     "inbound_size": 0,
+    "inbound_published": 0,
     "outbound_size": 0,
+    "outbound_enqueued": 0,
     "outbound_dropped": 0,
     "dead_letter_size": 0,
+    "dead_letter_enqueued": 0,
+    "dead_letter_replayed": 0,
+    "dead_letter_replay_attempts": 0,
+    "dead_letter_replay_skipped": 0,
+    "dead_letter_replay_dropped": 0,
+    "dead_letter_reason_counts": {},
     "topics": 0,
     "stop_sessions": 0
   },
   "channels": {},
+  "channels_delivery": {
+    "total": {},
+    "per_channel": {}
+  },
   "cron": {},
   "heartbeat": {},
   "supervisor": {},
@@ -117,6 +136,29 @@ Example response:
 ```
 
 If heartbeat is disabled (`gateway.heartbeat.enabled=false`), returns `409` with `{"error":"heartbeat_disabled","status":409}`.
+
+## `POST /v1/control/dead-letter/replay`
+
+Control-plane endpoint for bounded dead-letter replay.
+
+Request body (all fields optional):
+
+```json
+{
+  "limit": 100,
+  "channel": "telegram",
+  "reason": "send_failed",
+  "session_id": "telegram:123",
+  "dry_run": false
+}
+```
+
+Behavior:
+
+- Replays only dead-letter entries matching provided filters.
+- Replay is bounded by `limit`.
+- `dry_run=true` performs matching/scan without enqueuing outbound events.
+- Returns additive summary for auditability (`scanned`, `matched`, `replayed`, `kept`, `dropped`, `replayed_by_channel`).
 
 ## `POST /v1/chat`
 

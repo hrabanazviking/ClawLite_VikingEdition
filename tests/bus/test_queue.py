@@ -79,3 +79,115 @@ def test_message_queue_outbound_drop_when_full_is_non_blocking() -> None:
         assert stats["outbound_dropped"] == 1
 
     asyncio.run(_scenario())
+
+
+def test_message_queue_dead_letter_reason_histogram_increments() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        await bus.publish_dead_letter(
+            OutboundEvent(channel="fake", session_id="s1", target="u1", text="a", dead_lettered=True, dead_letter_reason="send_failed")
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(channel="fake", session_id="s2", target="u2", text="b", dead_lettered=True, dead_letter_reason="send_failed")
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(channel="fake", session_id="s3", target="u3", text="c", dead_lettered=True)
+        )
+
+        stats = bus.stats()
+        assert stats["dead_letter_enqueued"] == 3
+        assert stats["dead_letter_reason_counts"]["send_failed"] == 2
+        assert stats["dead_letter_reason_counts"]["unknown"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_message_queue_dead_letter_replay_filters_dry_run_marker_and_bounds() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue(maxsize=10)
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s1",
+                target="u1",
+                text="one",
+                metadata={"id": "one"},
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+                last_error="boom",
+            )
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s2",
+                target="u2",
+                text="two",
+                metadata={"id": "two"},
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="telegram",
+                session_id="s1",
+                target="u3",
+                text="three",
+                metadata={"id": "three"},
+                dead_lettered=True,
+                dead_letter_reason="channel_unavailable",
+            )
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s1",
+                target="u4",
+                text="four",
+                metadata={"id": "four"},
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+
+        dry = await bus.replay_dead_letters(limit=5, channel="fake", reason="send_failed", session_id="s1", dry_run=True)
+        assert dry["scanned"] == 4
+        assert dry["matched"] == 2
+        assert dry["replayed"] == 0
+        assert dry["kept"] == 4
+        assert dry["dropped"] == 0
+        assert dry["replayed_by_channel"] == {}
+        assert bus.stats()["dead_letter_size"] == 4
+
+        replay = await bus.replay_dead_letters(limit=1, channel="fake", reason="send_failed", session_id="s1", dry_run=False)
+        assert replay["scanned"] == 4
+        assert replay["matched"] == 2
+        assert replay["replayed"] == 1
+        assert replay["kept"] == 3
+        assert replay["dropped"] == 0
+        assert replay["replayed_by_channel"] == {"fake": 1}
+
+        replayed = await bus.next_outbound()
+        assert replayed.attempt == 1
+        assert replayed.dead_lettered is False
+        assert replayed.dead_letter_reason == ""
+        assert replayed.last_error == ""
+        assert replayed.metadata["_replayed_from_dead_letter"] is True
+
+        for idx in range(10):
+            await bus.publish_outbound(OutboundEvent(channel="fake", session_id="fill", target="x", text=f"fill-{idx}"))
+
+        dropped = await bus.replay_dead_letters(limit=5, channel="fake", reason="send_failed", session_id="s1", dry_run=False)
+        assert dropped["matched"] == 1
+        assert dropped["replayed"] == 0
+        assert dropped["dropped"] == 1
+
+        stats = bus.stats()
+        assert stats["dead_letter_replayed"] == 1
+        assert stats["dead_letter_replay_attempts"] == 2
+        assert stats["dead_letter_replay_skipped"] == 3
+        assert stats["dead_letter_replay_dropped"] == 1
+        assert stats["dead_letter_size"] == 3
+
+    asyncio.run(_scenario())

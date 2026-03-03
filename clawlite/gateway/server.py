@@ -10,7 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from clawlite.bus.queue import MessageQueue
 from clawlite.channels.manager import ChannelManager
@@ -67,12 +67,21 @@ class ControlPlaneResponse(BaseModel):
 class DiagnosticsResponse(BaseModel):
     schema_version: str
     control_plane: ControlPlaneResponse
-    queue: dict[str, int]
+    queue: dict[str, Any]
     channels: dict[str, Any]
+    channels_delivery: dict[str, Any] = Field(default_factory=dict)
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
-    supervisor: dict[str, Any] = {}
-    environment: dict[str, Any] = {}
+    supervisor: dict[str, Any] = Field(default_factory=dict)
+    environment: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeadLetterReplayRequest(BaseModel):
+    limit: int = 100
+    channel: str = ""
+    reason: str = ""
+    session_id: str = ""
+    dry_run: bool = False
 
 
 @dataclass(slots=True)
@@ -699,11 +708,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             control_plane=_control_plane_payload(),
             queue=runtime.bus.stats(),
             channels=runtime.channels.status(),
+            channels_delivery=runtime.channels.delivery_diagnostics(),
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
             environment=environment,
         )
+
+    @app.post("/v1/control/dead-letter/replay")
+    async def replay_dead_letters(req: DeadLetterReplayRequest, request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        summary = await runtime.channels.replay_dead_letters(
+            limit=req.limit,
+            channel=req.channel,
+            reason=req.reason,
+            session_id=req.session_id,
+            dry_run=req.dry_run,
+        )
+        return summary
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:

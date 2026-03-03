@@ -82,6 +82,40 @@ class ChannelManager:
             "channel_dispatch_context",
             default=None,
         )
+        self._delivery_total: dict[str, int] = {
+            "attempts": 0,
+            "success": 0,
+            "failures": 0,
+            "dead_lettered": 0,
+            "replayed": 0,
+            "channel_unavailable": 0,
+            "policy_dropped": 0,
+        }
+        self._delivery_per_channel: dict[str, dict[str, int]] = {}
+
+    def _ensure_delivery_channel(self, channel: str) -> dict[str, int]:
+        name = str(channel or "").strip() or "unknown"
+        row = self._delivery_per_channel.get(name)
+        if row is None:
+            row = {
+                "attempts": 0,
+                "success": 0,
+                "failures": 0,
+                "dead_lettered": 0,
+                "replayed": 0,
+                "channel_unavailable": 0,
+                "policy_dropped": 0,
+            }
+            self._delivery_per_channel[name] = row
+        return row
+
+    def _inc_delivery(self, *, channel: str, key: str, delta: int = 1) -> None:
+        amount = int(delta)
+        if amount <= 0:
+            return
+        self._delivery_total[key] = self._delivery_total.get(key, 0) + amount
+        row = self._ensure_delivery_channel(channel)
+        row[key] = row.get(key, 0) + amount
 
     def register(self, name: str, channel_cls: type[BaseChannel]) -> None:
         self._registry[name] = channel_cls
@@ -205,8 +239,10 @@ class ChannelManager:
                 last_error=last_error,
             )
             await self.bus.publish_outbound(attempt_event)
+            self._inc_delivery(channel=event.channel, key="attempts")
             try:
                 await channel.send(target=event.target, text=event.text, metadata=event.metadata)
+                self._inc_delivery(channel=event.channel, key="success")
                 bind_event("channel.send", session=event.session_id, channel=event.channel).info(
                     "dispatch sent target={} attempt={}/{}",
                     event.target,
@@ -217,6 +253,7 @@ class ChannelManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._inc_delivery(channel=event.channel, key="failures")
                 last_error = str(exc)
                 bind_event("channel.send", session=event.session_id, channel=event.channel).error(
                     "dispatch send failed target={} attempt={}/{} error={}",
@@ -240,6 +277,7 @@ class ChannelManager:
             last_error=last_error,
         )
         await self.bus.publish_dead_letter(dead)
+        self._inc_delivery(channel=event.channel, key="dead_lettered")
         bind_event("channel.send", session=event.session_id, channel=event.channel).error(
             "dispatch dead-letter target={} attempts={} error={}",
             event.target,
@@ -251,6 +289,7 @@ class ChannelManager:
     async def _publish_and_send(self, *, event: OutboundEvent) -> None:
         channel = self._channels.get(event.channel)
         if channel is None:
+            self._inc_delivery(channel=event.channel, key="channel_unavailable")
             bind_event("channel.dispatch", session=event.session_id, channel=event.channel).error("channel unavailable")
             dead = replace(
                 event,
@@ -262,14 +301,48 @@ class ChannelManager:
                 last_error="channel unavailable",
             )
             await self.bus.publish_dead_letter(dead)
+            self._inc_delivery(channel=event.channel, key="dead_lettered")
             return
         if not self._delivery_allowed(channel=channel, event=event):
+            self._inc_delivery(channel=event.channel, key="policy_dropped")
             bind_event("channel.send", session=event.session_id, channel=event.channel).debug(
                 "dispatch dropped by delivery policy target={}",
                 event.target,
             )
             return
         await self._retry_send(channel=channel, event=event)
+
+    async def replay_dead_letters(
+        self,
+        *,
+        limit: int = 100,
+        channel: str = "",
+        reason: str = "",
+        session_id: str = "",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        summary = await self.bus.replay_dead_letters(
+            limit=limit,
+            channel=channel,
+            reason=reason,
+            session_id=session_id,
+            dry_run=dry_run,
+        )
+        replayed_by_channel = summary.get("replayed_by_channel", {})
+        if isinstance(replayed_by_channel, dict):
+            for name, count in replayed_by_channel.items():
+                try:
+                    amount = int(count)
+                except (TypeError, ValueError):
+                    continue
+                self._inc_delivery(channel=str(name), key="replayed", delta=amount)
+        return summary
+
+    def delivery_diagnostics(self) -> dict[str, Any]:
+        return {
+            "total": dict(self._delivery_total),
+            "per_channel": {name: dict(row) for name, row in sorted(self._delivery_per_channel.items())},
+        }
 
     async def _handle_stop(self, event: InboundEvent) -> None:
         session_id = event.session_id
@@ -537,6 +610,7 @@ class ChannelManager:
             row: dict[str, Any] = {
                 "running": ch.running,
                 "last_error": ch.health().last_error,
+                "delivery": dict(self._ensure_delivery_channel(name)),
             }
             channel_signals = getattr(ch, "signals", None)
             if callable(channel_signals):

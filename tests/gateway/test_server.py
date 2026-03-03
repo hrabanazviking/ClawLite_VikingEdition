@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from clawlite.bus.events import OutboundEvent
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.gateway.server import _run_heartbeat, create_app
 from clawlite.providers.base import LLMResult
@@ -171,7 +172,12 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert payload["schema_version"] == "2026-03-02"
         assert "control_plane" in payload
         assert "queue" in payload
+        assert "dead_letter_replayed" in payload["queue"]
+        assert "dead_letter_replay_attempts" in payload["queue"]
         assert "channels" in payload
+        assert "channels_delivery" in payload
+        assert "total" in payload["channels_delivery"]
+        assert "per_channel" in payload["channels_delivery"]
         assert "cron" in payload
         assert "heartbeat" in payload
         assert "supervisor" in payload
@@ -197,6 +203,59 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         disabled = client.get("/v1/diagnostics")
         assert disabled.status_code == 404
         assert disabled.json()["error"] == "diagnostics_disabled"
+
+
+def test_gateway_dead_letter_replay_endpoint_auth_and_summary(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": "replay-token",
+                "allow_loopback_without_auth": False,
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    asyncio.run(
+        app.state.runtime.bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s1",
+                target="u1",
+                text="dead",
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+    )
+
+    with TestClient(app) as client:
+        unauthorized = client.post("/v1/control/dead-letter/replay", json={"dry_run": True})
+        assert unauthorized.status_code == 401
+
+        replay = client.post(
+            "/v1/control/dead-letter/replay",
+            headers={"Authorization": "Bearer replay-token"},
+            json={
+                "limit": 10,
+                "channel": "fake",
+                "reason": "send_failed",
+                "session_id": "s1",
+                "dry_run": True,
+            },
+        )
+        assert replay.status_code == 200
+        payload = replay.json()
+        assert payload["scanned"] == 1
+        assert payload["matched"] == 1
+        assert payload["replayed"] == 0
+        assert payload["kept"] == 1
+        assert payload["dropped"] == 0
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:

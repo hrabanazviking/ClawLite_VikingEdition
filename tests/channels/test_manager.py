@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from clawlite.bus.events import OutboundEvent
 from clawlite.bus.queue import MessageQueue
 from clawlite.channels.base import BaseChannel, ChannelCapabilities
 from clawlite.channels.manager import ChannelManager
@@ -509,5 +510,81 @@ def test_channel_manager_status_includes_channel_specific_signals() -> None:
         assert status["fake"]["signals"] == {"foo": 1, "bar": 2}
 
         await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_delivery_counters_track_success_failure_and_dead_letter() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start(
+            {
+                "channels": {
+                    "send_max_attempts": 2,
+                    "send_retry_backoff_s": 0.01,
+                    "send_retry_max_backoff_s": 0.01,
+                    "fake": {"enabled": True, "fail_first_n": 10},
+                }
+            }
+        )
+
+        fake = mgr._channels["fake"]
+        await fake.emit(session_id="fake:diag", user_id="u1", text="hello", metadata={"channel": "fake", "chat_id": "diag"})
+        await asyncio.sleep(0.2)
+
+        channel_delivery = mgr.status()["fake"]["delivery"]
+        assert channel_delivery["attempts"] == 2
+        assert channel_delivery["success"] == 0
+        assert channel_delivery["failures"] == 2
+        assert channel_delivery["dead_lettered"] == 1
+
+        diagnostics = mgr.delivery_diagnostics()
+        assert diagnostics["total"]["attempts"] == 2
+        assert diagnostics["total"]["failures"] == 2
+        assert diagnostics["total"]["dead_lettered"] == 1
+        assert diagnostics["per_channel"]["fake"]["dead_lettered"] == 1
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_replay_dead_letters_updates_replay_counters() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s1",
+                target="u1",
+                text="dead",
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="telegram",
+                session_id="s2",
+                target="u2",
+                text="dead2",
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+
+        summary = await mgr.replay_dead_letters(limit=5, channel="fake", reason="send_failed", session_id="s1", dry_run=False)
+        assert summary["matched"] == 1
+        assert summary["replayed"] == 1
+        assert summary["replayed_by_channel"] == {"fake": 1}
+
+        diagnostics = mgr.delivery_diagnostics()
+        assert diagnostics["total"]["replayed"] == 1
+        assert diagnostics["per_channel"]["fake"]["replayed"] == 1
+        assert "telegram" not in diagnostics["per_channel"]
 
     asyncio.run(_scenario())

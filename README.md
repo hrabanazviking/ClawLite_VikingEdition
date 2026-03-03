@@ -232,6 +232,7 @@ clawlite/
   - Provider reliability hardening landed: fail-soft retry taxonomy (429 non-quota + 5xx + network/timeout), Retry-After support, provider circuit breaker telemetry, and optional one-hop fallback model failover.
   - Scheduler is active with both Cron jobs and Heartbeat loop, plus CLI/API controls.
   - Gateway runtime supervisor is active with additive health telemetry and bounded auto-recovery checks for heartbeat/cron/channel runtime health, plus cooldown-based restart-storm protection.
+  - P1 proactive delivery observability is active: additive outbound/dead-letter telemetry in queue/channel diagnostics plus bounded dead-letter replay control via API.
   - Scheduler reliability telemetry hardening landed: heartbeat/cron now expose additive durability counters, trigger/reason/job health signals, and isolate transient persistence/schedule/job failures without crashing runtime loops.
   - Provider routing is active for Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, and custom OpenAI-compatible endpoints.
   - Core tools and workspace templates are live: shell/files/web/cron/message/skills/subagent tools and `IDENTITY`, `SOUL`, `AGENTS`, `TOOLS`, `USER`, `HEARTBEAT`, `BOOTSTRAP`, `memory/MEMORY`.

@@ -18,6 +18,7 @@
 - Improve proactive delivery through channels with minimum observability
 - Strengthen long-term memory and per-session context recovery
 - P1 progress: runtime supervisor bootstrap landed in gateway lifecycle with additive diagnostics, bounded per-component cooldown recovery, and incident/recovery counters for heartbeat, cron, channels, and provider circuit-open observability.
+- P1 progress: proactive delivery observability landed with additive queue/dead-letter telemetry, channel-manager delivery diagnostics (total + per-channel), and bounded/auditable dead-letter replay control API (`/v1/control/dead-letter/replay`).
 
 ## P2 — Ecosystem
 

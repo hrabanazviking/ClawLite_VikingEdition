@@ -57,6 +57,26 @@ curl -sS -X POST http://127.0.0.1:8787/v1/control/heartbeat/trigger \
   -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN"
 ```
 
+## Dead-letter replay control via API
+
+Dry-run (safe preview):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/v1/control/dead-letter/replay \
+  -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 50, "channel": "telegram", "reason": "send_failed", "dry_run": true}'
+```
+
+Bounded replay:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/v1/control/dead-letter/replay \
+  -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 10, "channel": "telegram", "reason": "send_failed", "session_id": "telegram:123", "dry_run": false}'
+```
+
 ## Smoke tests
 
 ```bash
@@ -117,6 +137,14 @@ pytest -q tests
 - Monitor recovery behavior: `recovery_attempts` should correlate with incidents; repeated growth in `recovery_failures` means failed restart paths.
 - Check cooldown protection: growth in `recovery_skipped_cooldown` during incidents is expected anti-storm behavior; persistent high growth means unresolved component failures.
 - Inspect `last_incident`, `cooldown_active`, `last_error`, and `consecutive_error_count` for current fault context and supervisor health.
+
+## Delivery observability and dead-letter runbook checks
+
+- Queue telemetry (`/v1/diagnostics.queue`): monitor `outbound_enqueued` vs `outbound_dropped` and `dead_letter_enqueued` trends.
+- Dead-letter causes: inspect `dead_letter_reason_counts`; sustained growth in one reason is the primary triage signal.
+- Replay telemetry: track `dead_letter_replayed`, `dead_letter_replay_attempts`, `dead_letter_replay_skipped`, and `dead_letter_replay_dropped` after control actions.
+- Channel delivery telemetry (`/v1/diagnostics.channels_delivery`): validate `total` and `per_channel` counters (`attempts`, `success`, `failures`, `dead_lettered`, `replayed`, `channel_unavailable`, `policy_dropped`).
+- Replay procedure: always run `dry_run=true` first, then execute bounded replay (`limit` + optional filters), then verify post-action counters and dead-letter size.
 
 ## Tool I/O reliability checks
 

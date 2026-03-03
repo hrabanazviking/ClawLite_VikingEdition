@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
 from typing import AsyncIterator
 
 from clawlite.bus.events import InboundEvent, OutboundEvent
@@ -16,16 +18,45 @@ class MessageQueue:
         self._dead_letter: asyncio.Queue[OutboundEvent] = asyncio.Queue(maxsize=maxsize)
         self._topics: dict[str, list[asyncio.Queue[InboundEvent]]] = defaultdict(list)
         self._stop_events: dict[str, asyncio.Event] = {}
+        self._inbound_published = 0
+        self._outbound_enqueued = 0
         self._outbound_dropped = 0
+        self._dead_letter_enqueued = 0
+        self._dead_letter_replayed = 0
+        self._dead_letter_replay_attempts = 0
+        self._dead_letter_replay_skipped = 0
+        self._dead_letter_replay_dropped = 0
+        self._dead_letter_reason_counts: dict[str, int] = defaultdict(int)
+
+    @staticmethod
+    def _oldest_age_seconds(queue: asyncio.Queue[Any]) -> float | None:
+        snapshot = list(getattr(queue, "_queue", []))
+        oldest: datetime | None = None
+        for item in snapshot:
+            raw = getattr(item, "created_at", "")
+            try:
+                stamp = datetime.fromisoformat(str(raw))
+            except Exception:
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if oldest is None or stamp < oldest:
+                oldest = stamp
+        if oldest is None:
+            return None
+        age = (datetime.now(timezone.utc) - oldest).total_seconds()
+        return max(0.0, age)
 
     async def publish_inbound(self, event: InboundEvent) -> None:
         await self._inbound.put(event)
+        self._inbound_published += 1
         for queue in self._topics.get(event.channel, []):
             await queue.put(event)
 
     async def publish_outbound(self, event: OutboundEvent) -> None:
         try:
             self._outbound.put_nowait(event)
+            self._outbound_enqueued += 1
         except asyncio.QueueFull:
             self._outbound_dropped += 1
 
@@ -37,6 +68,115 @@ class MessageQueue:
 
     async def publish_dead_letter(self, event: OutboundEvent) -> None:
         await self._dead_letter.put(event)
+        self._dead_letter_enqueued += 1
+        reason = str(event.dead_letter_reason or "unknown")
+        self._dead_letter_reason_counts[reason] += 1
+
+    @staticmethod
+    def _dead_letter_matches(
+        event: OutboundEvent,
+        *,
+        channel: str,
+        reason: str,
+        session_id: str,
+    ) -> bool:
+        if channel and event.channel != channel:
+            return False
+        if reason and event.dead_letter_reason != reason:
+            return False
+        if session_id and event.session_id != session_id:
+            return False
+        return True
+
+    async def replay_dead_letters(
+        self,
+        *,
+        limit: int = 100,
+        channel: str = "",
+        reason: str = "",
+        session_id: str = "",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        bounded_limit = max(0, int(limit or 0))
+        replay_budget = bounded_limit
+        channel_filter = str(channel or "").strip()
+        reason_filter = str(reason or "").strip()
+        session_filter = str(session_id or "").strip()
+
+        scanned = 0
+        matched = 0
+        replayed = 0
+        kept = 0
+        dropped = 0
+        replayed_by_channel: dict[str, int] = defaultdict(int)
+
+        to_keep: list[OutboundEvent] = []
+        size = self._dead_letter.qsize()
+        for _ in range(size):
+            try:
+                dead = self._dead_letter.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            scanned += 1
+            if not self._dead_letter_matches(
+                dead,
+                channel=channel_filter,
+                reason=reason_filter,
+                session_id=session_filter,
+            ):
+                to_keep.append(dead)
+                kept += 1
+                continue
+
+            matched += 1
+            if dry_run or replay_budget <= 0:
+                to_keep.append(dead)
+                kept += 1
+                self._dead_letter_replay_skipped += 1
+                continue
+
+            self._dead_letter_replay_attempts += 1
+            metadata = dict(dead.metadata)
+            metadata["_replayed_from_dead_letter"] = True
+            replay_event = OutboundEvent(
+                channel=dead.channel,
+                session_id=dead.session_id,
+                target=dead.target,
+                text=dead.text,
+                metadata=metadata,
+                attempt=1,
+                max_attempts=dead.max_attempts,
+                retryable=dead.retryable,
+                dead_lettered=False,
+                dead_letter_reason="",
+                last_error="",
+            )
+            before_dropped = self._outbound_dropped
+            await self.publish_outbound(replay_event)
+            if self._outbound_dropped > before_dropped:
+                dropped += 1
+                self._dead_letter_replay_dropped += 1
+                to_keep.append(dead)
+                kept += 1
+                continue
+            replay_budget -= 1
+            replayed += 1
+            self._dead_letter_replayed += 1
+            replayed_by_channel[dead.channel] += 1
+
+        for dead in to_keep:
+            await self._dead_letter.put(dead)
+
+        return {
+            "scanned": scanned,
+            "matched": matched,
+            "replayed": replayed,
+            "kept": kept,
+            "dropped": dropped,
+            "replayed_by_channel": dict(sorted(replayed_by_channel.items())),
+            "dry_run": bool(dry_run),
+            "limit": bounded_limit,
+        }
 
     async def next_dead_letter(self) -> OutboundEvent:
         return await self._dead_letter.get()
@@ -77,12 +217,27 @@ class MessageQueue:
             if not event.is_set():
                 self._stop_events.pop(normalized, None)
 
-    def stats(self) -> dict[str, int]:
-        return {
+    def stats(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "inbound_size": self._inbound.qsize(),
+            "inbound_published": self._inbound_published,
             "outbound_size": self._outbound.qsize(),
+            "outbound_enqueued": self._outbound_enqueued,
             "outbound_dropped": self._outbound_dropped,
             "dead_letter_size": self._dead_letter.qsize(),
+            "dead_letter_enqueued": self._dead_letter_enqueued,
+            "dead_letter_replayed": self._dead_letter_replayed,
+            "dead_letter_replay_attempts": self._dead_letter_replay_attempts,
+            "dead_letter_replay_skipped": self._dead_letter_replay_skipped,
+            "dead_letter_replay_dropped": self._dead_letter_replay_dropped,
+            "dead_letter_reason_counts": dict(sorted(self._dead_letter_reason_counts.items())),
             "topics": sum(len(v) for v in self._topics.values()),
             "stop_sessions": len(self._stop_events),
         }
+        outbound_oldest_age_s = self._oldest_age_seconds(self._outbound)
+        if outbound_oldest_age_s is not None:
+            out["outbound_oldest_age_s"] = outbound_oldest_age_s
+        dead_letter_oldest_age_s = self._oldest_age_seconds(self._dead_letter)
+        if dead_letter_oldest_age_s is not None:
+            out["dead_letter_oldest_age_s"] = dead_letter_oldest_age_s
+        return out
