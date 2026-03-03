@@ -21,6 +21,7 @@ from clawlite.core.memory import MemoryStore
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
+from clawlite.runtime.autonomy import AutonomyService
 from clawlite.runtime.supervisor import RuntimeSupervisor, SupervisorIncident
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
@@ -73,6 +74,7 @@ class DiagnosticsResponse(BaseModel):
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
     supervisor: dict[str, Any] = Field(default_factory=dict)
+    autonomy: dict[str, Any] = Field(default_factory=dict)
     environment: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -82,6 +84,10 @@ class DeadLetterReplayRequest(BaseModel):
     reason: str = ""
     session_id: str = ""
     dry_run: bool = False
+
+
+class AutonomyTriggerRequest(BaseModel):
+    force: bool = True
 
 
 @dataclass(slots=True)
@@ -94,6 +100,7 @@ class RuntimeContainer:
     heartbeat: HeartbeatService
     workspace: WorkspaceLoader
     supervisor: RuntimeSupervisor | None = None
+    autonomy: AutonomyService | None = None
 
 
 @dataclass(slots=True)
@@ -110,6 +117,7 @@ class GatewayLifecycleState:
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
                 "supervisor": {"enabled": True, "running": False, "last_error": ""},
+                "autonomy": {"enabled": False, "running": False, "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
             }
 
@@ -446,6 +454,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     lifecycle = GatewayLifecycleState()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
     lifecycle.components["supervisor"]["enabled"] = bool(cfg.gateway.supervisor.enabled)
+    lifecycle.components["autonomy"]["enabled"] = bool(cfg.gateway.autonomy.enabled)
 
     def _provider_circuit_open(payload: Any) -> bool:
         if isinstance(payload, dict):
@@ -505,11 +514,52 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return True
         return False
 
+    async def _autonomy_snapshot() -> dict[str, Any]:
+        queue = runtime.bus.stats()
+        supervisor = runtime.supervisor.status() if runtime.supervisor is not None else {}
+        channels_status = runtime.channels.status()
+        running_count = 0
+        for row in channels_status.values():
+            if isinstance(row, dict) and bool(row.get("running", False)):
+                running_count += 1
+        return {
+            "queue": queue,
+            "supervisor": supervisor,
+            "channels": {
+                "enabled_count": len(cfg.channels.enabled_names()),
+                "running_count": running_count,
+            },
+        }
+
+    async def _run_autonomy(snapshot: dict[str, Any]) -> str:
+        queue = snapshot.get("queue", {}) if isinstance(snapshot.get("queue"), dict) else {}
+        supervisor = snapshot.get("supervisor", {}) if isinstance(snapshot.get("supervisor"), dict) else {}
+        channels = snapshot.get("channels", {}) if isinstance(snapshot.get("channels"), dict) else {}
+        prompt = (
+            "Autonomy review tick. Analyze runtime diagnostics and propose exactly one safe, low-risk operational improvement. "
+            "If no safe action is needed now, reply AUTONOMY_IDLE. "
+            f"queue(outbound={int(queue.get('outbound_size', 0) or 0)},dead_letter={int(queue.get('dead_letter_size', 0) or 0)}); "
+            f"supervisor(incidents={int(supervisor.get('incident_count', 0) or 0)},errors={int(supervisor.get('consecutive_error_count', 0) or 0)}); "
+            f"channels(enabled={int(channels.get('enabled_count', 0) or 0)},running={int(channels.get('running_count', 0) or 0)})."
+        )
+        result = await runtime.engine.run(session_id=cfg.gateway.autonomy.session_id, user_text=prompt)
+        return result.text
+
     runtime.supervisor = RuntimeSupervisor(
         interval_s=cfg.gateway.supervisor.interval_s,
         cooldown_s=cfg.gateway.supervisor.cooldown_s,
         incident_checks=_supervisor_incidents,
         recover=_supervisor_recover,
+    )
+    runtime.autonomy = AutonomyService(
+        enabled=cfg.gateway.autonomy.enabled,
+        interval_s=cfg.gateway.autonomy.interval_s,
+        cooldown_s=cfg.gateway.autonomy.cooldown_s,
+        timeout_s=cfg.gateway.autonomy.timeout_s,
+        max_queue_backlog=cfg.gateway.autonomy.max_queue_backlog,
+        session_id=cfg.gateway.autonomy.session_id,
+        snapshot_callback=_autonomy_snapshot,
+        run_callback=_run_autonomy,
     )
 
     def _control_plane_payload() -> ControlPlaneResponse:
@@ -535,6 +585,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("cron", runtime.cron.start, runtime.cron.stop, True),
             ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("supervisor", runtime.supervisor.start if runtime.supervisor else None, runtime.supervisor.stop if runtime.supervisor else None, bool(cfg.gateway.supervisor.enabled and runtime.supervisor is not None)),
+            ("autonomy", runtime.autonomy.start if runtime.autonomy else None, runtime.autonomy.stop if runtime.autonomy else None, bool(cfg.gateway.autonomy.enabled and runtime.autonomy is not None)),
         ]
 
         for name, start_fn, stop_fn, enabled in steps:
@@ -549,6 +600,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 elif name == "cron":
                     await start_fn(lambda job: _route_cron_job(runtime, job))
                 elif name == "supervisor":
+                    await start_fn()
+                elif name == "autonomy":
                     await start_fn()
                 else:
                     await start_fn(lambda: _run_heartbeat(runtime))
@@ -571,6 +624,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _stop_subsystems() -> None:
         steps: list[tuple[str, Any, bool]] = [
+            ("autonomy", runtime.autonomy.stop if runtime.autonomy else None, bool(cfg.gateway.autonomy.enabled and runtime.autonomy is not None)),
             ("supervisor", runtime.supervisor.stop if runtime.supervisor else None, bool(cfg.gateway.supervisor.enabled and runtime.supervisor is not None)),
             ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("cron", runtime.cron.stop, True),
@@ -712,6 +766,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
+            autonomy=runtime.autonomy.status() if runtime.autonomy is not None else {},
             environment=environment,
         )
 
@@ -740,6 +795,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "reason": decision.reason,
                 "text": decision.text,
             },
+        }
+
+    @app.post("/v1/control/autonomy/trigger")
+    async def trigger_autonomy(request: Request, req: AutonomyTriggerRequest | None = None) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        autonomy = runtime.autonomy
+        if autonomy is None:
+            return {"ok": False, "error": "autonomy_unavailable", "autonomy": {}}
+        force = True if req is None else bool(req.force)
+        status = await autonomy.run_once(force=force)
+        return {
+            "ok": True,
+            "forced": force,
+            "autonomy": status,
         }
 
     @app.post("/v1/chat", response_model=ChatResponse)

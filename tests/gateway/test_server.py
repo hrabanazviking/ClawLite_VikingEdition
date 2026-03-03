@@ -181,10 +181,14 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "cron" in payload
         assert "heartbeat" in payload
         assert "supervisor" in payload
+        assert "autonomy" in payload
         assert "ticks" in payload["supervisor"]
         assert "incident_count" in payload["supervisor"]
         assert "recovery_attempts" in payload["supervisor"]
         assert payload["supervisor"]["ticks"] >= 0
+        assert "enabled" in payload["autonomy"]
+        assert "run_attempts" in payload["autonomy"]
+        assert "skipped_disabled" in payload["autonomy"]
         assert payload["environment"]["workspace_path"] == str(tmp_path / "workspace")
         assert "engine" in payload["environment"]
         assert "persistence" in payload["environment"]["engine"]
@@ -258,6 +262,42 @@ def test_gateway_dead_letter_replay_endpoint_auth_and_summary(tmp_path: Path) ->
         assert payload["replayed"] == 0
         assert payload["kept"] == 1
         assert payload["dropped"] == 0
+
+
+def test_gateway_autonomy_trigger_endpoint_auth_and_forced_run(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": "autonomy-token",
+                "allow_loopback_without_auth": False,
+            },
+            "heartbeat": {"enabled": False},
+            "autonomy": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        unauthorized = client.post("/v1/control/autonomy/trigger")
+        assert unauthorized.status_code == 401
+
+        forced = client.post(
+            "/v1/control/autonomy/trigger",
+            headers={"Authorization": "Bearer autonomy-token"},
+            json={"force": True},
+        )
+        assert forced.status_code == 200
+        payload = forced.json()
+        assert payload["ok"] is True
+        assert payload["forced"] is True
+        assert payload["autonomy"]["enabled"] is False
+        assert payload["autonomy"]["run_attempts"] >= 1
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:

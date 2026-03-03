@@ -87,6 +87,48 @@ class GatewaySupervisorConfig:
 
 
 @dataclass(slots=True)
+class GatewayAutonomyConfig:
+    enabled: bool = False
+    interval_s: int = 900
+    cooldown_s: int = 300
+    timeout_s: float = 45.0
+    max_queue_backlog: int = 200
+    session_id: str = "autonomy:system"
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
+        data = dict(raw or {})
+        if "intervalS" in data:
+            interval_raw = data.get("intervalS")
+        else:
+            interval_raw = data.get("interval_s", 900)
+        if "cooldownS" in data:
+            cooldown_raw = data.get("cooldownS")
+        else:
+            cooldown_raw = data.get("cooldown_s", 300)
+        if "timeoutS" in data:
+            timeout_raw = data.get("timeoutS")
+        else:
+            timeout_raw = data.get("timeout_s", 45.0)
+        if "maxQueueBacklog" in data:
+            max_backlog_raw = data.get("maxQueueBacklog")
+        else:
+            max_backlog_raw = data.get("max_queue_backlog", 200)
+        if "sessionId" in data:
+            session_raw = data.get("sessionId")
+        else:
+            session_raw = data.get("session_id", "autonomy:system")
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            interval_s=max(1, int(interval_raw or 900)),
+            cooldown_s=max(0, int(cooldown_raw or 300)),
+            timeout_s=max(0.1, float(timeout_raw or 45.0)),
+            max_queue_backlog=max(0, int(max_backlog_raw or 200)),
+            session_id=str(session_raw or "autonomy:system").strip() or "autonomy:system",
+        )
+
+
+@dataclass(slots=True)
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 8787
@@ -94,6 +136,7 @@ class GatewayConfig:
     auth: GatewayAuthConfig = field(default_factory=GatewayAuthConfig)
     diagnostics: GatewayDiagnosticsConfig = field(default_factory=GatewayDiagnosticsConfig)
     supervisor: GatewaySupervisorConfig = field(default_factory=GatewaySupervisorConfig)
+    autonomy: GatewayAutonomyConfig = field(default_factory=GatewayAutonomyConfig)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayConfig:
@@ -105,6 +148,7 @@ class GatewayConfig:
             auth=GatewayAuthConfig.from_dict(dict(data.get("auth") or {})),
             diagnostics=GatewayDiagnosticsConfig.from_dict(dict(data.get("diagnostics") or {})),
             supervisor=GatewaySupervisorConfig.from_dict(dict(data.get("supervisor") or {})),
+            autonomy=GatewayAutonomyConfig.from_dict(dict(data.get("autonomy") or {})),
         )
 
 

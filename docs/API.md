@@ -45,6 +45,7 @@ Example response:
     "cron": {"enabled": true, "running": true, "last_error": ""},
     "heartbeat": {"enabled": true, "running": true, "last_error": ""},
     "supervisor": {"enabled": true, "running": true, "last_error": ""},
+    "autonomy": {"enabled": false, "running": false, "last_error": "disabled"},
     "engine": {"enabled": true, "running": true, "last_error": ""}
   },
   "auth": {
@@ -84,6 +85,8 @@ Provider telemetry keys are additive and may include: `requests`, `successes`, `
 
 Supervisor telemetry is additive under `supervisor` and may include: `ticks`, `incident_count`, `recovery_attempts`, `recovery_success`, `recovery_failures`, `recovery_skipped_cooldown`, `component_incidents`, `last_incident`, `last_recovery_at`, `last_error`, `consecutive_error_count`, and `cooldown_active`.
 
+Autonomy telemetry is additive under `autonomy` and may include: `running`, `enabled`, `session_id`, `ticks`, `run_attempts`, `run_success`, `run_failures`, `skipped_backlog`, `skipped_cooldown`, `skipped_disabled`, `last_run_at`, `last_result_excerpt`, `last_error`, `consecutive_error_count`, `last_snapshot`, and `cooldown_remaining_s`.
+
 Example response:
 
 ```json
@@ -114,6 +117,7 @@ Example response:
   "cron": {},
   "heartbeat": {},
   "supervisor": {},
+  "autonomy": {},
   "environment": {}
 }
 ```
@@ -136,6 +140,35 @@ Example response:
 ```
 
 If heartbeat is disabled (`gateway.heartbeat.enabled=false`), returns `409` with `{"error":"heartbeat_disabled","status":409}`.
+
+## `POST /v1/control/autonomy/trigger`
+
+Request body is optional:
+
+```json
+{
+  "force": true
+}
+```
+
+- Default is `force=true` for explicit operator-triggered runs.
+- With `force=false`, disabled state, queue backlog guard, and cooldown guard may skip execution.
+- Returns a non-crashing status summary even when autonomy is disabled.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "forced": true,
+  "autonomy": {
+    "enabled": false,
+    "run_attempts": 1,
+    "run_success": 1,
+    "run_failures": 0
+  }
+}
+```
 
 ## `POST /v1/control/dead-letter/replay`
 

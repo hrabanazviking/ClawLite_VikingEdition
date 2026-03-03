@@ -45,6 +45,14 @@
       "enabled": true,
       "interval_s": 20,
       "cooldown_s": 30
+    },
+    "autonomy": {
+      "enabled": false,
+      "interval_s": 900,
+      "cooldown_s": 300,
+      "timeout_s": 45.0,
+      "max_queue_backlog": 200,
+      "session_id": "autonomy:system"
     }
   },
   "scheduler": {

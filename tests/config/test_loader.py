@@ -280,6 +280,35 @@ def test_load_config_gateway_supervisor_parses_snake_and_camel(tmp_path: Path) -
     assert cfg.gateway.supervisor.cooldown_s == 45
 
 
+def test_load_config_gateway_autonomy_parses_snake_and_camel(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "gateway": {
+                    "autonomy": {
+                        "enabled": True,
+                        "intervalS": 600,
+                        "cooldown_s": 120,
+                        "timeoutS": 12.5,
+                        "max_queue_backlog": 77,
+                        "sessionId": "autonomy:test",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.gateway.autonomy.enabled is True
+    assert cfg.gateway.autonomy.interval_s == 600
+    assert cfg.gateway.autonomy.cooldown_s == 120
+    assert cfg.gateway.autonomy.timeout_s == 12.5
+    assert cfg.gateway.autonomy.max_queue_backlog == 77
+    assert cfg.gateway.autonomy.session_id == "autonomy:test"
+
+
 def test_load_config_tool_loop_detection_settings(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(

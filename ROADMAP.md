@@ -20,6 +20,7 @@
 - P1 progress: runtime supervisor bootstrap landed in gateway lifecycle with additive diagnostics, bounded per-component cooldown recovery, and incident/recovery counters for heartbeat, cron, channels, and provider circuit-open observability.
 - P1 progress: proactive delivery observability landed with additive queue/dead-letter telemetry, channel-manager delivery diagnostics (total + per-channel), and bounded/auditable dead-letter replay control API (`/v1/control/dead-letter/replay`).
 - P1 progress: long-term memory/session recovery hardening landed with malformed memory JSONL tolerant reads + best-effort read-repair, per-session context recovery fallback (history-first with curated-memory fallback), and additive `memory_store` + `session_recovery` diagnostics in engine/gateway telemetry.
+- P1 progress: autonomy loop bootstrap landed with an opt-in periodic autonomy worker (supervised review turn), bounded queue-backlog/cooldown/timeout guards, fail-soft tick isolation, additive diagnostics telemetry, and manual control endpoint (`/v1/control/autonomy/trigger`).
 
 ## P2 — Ecosystem
 

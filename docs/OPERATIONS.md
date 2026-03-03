@@ -57,6 +57,26 @@ curl -sS -X POST http://127.0.0.1:8787/v1/control/heartbeat/trigger \
   -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN"
 ```
 
+## Manual autonomy trigger via API
+
+Forced trigger (runs even if `gateway.autonomy.enabled=false`):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/v1/control/autonomy/trigger \
+  -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"force": true}'
+```
+
+Guarded trigger (respects disabled/backlog/cooldown guards):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/v1/control/autonomy/trigger \
+  -H "Authorization: Bearer $CLAWLITE_GATEWAY_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"force": false}'
+```
+
 ## Dead-letter replay control via API
 
 Dry-run (safe preview):
@@ -95,6 +115,7 @@ pytest -q tests
 2. Confirm minimum configuration: `clawlite validate provider` and `clawlite validate channels`.
 3. If heartbeat fails, validate `gateway.heartbeat.enabled` and trigger it manually (`/v1/control/heartbeat/trigger`).
 4. Before hotfix/release: `bash scripts/smoke_test.sh` and `pytest -q tests`.
+5. If autonomy appears stalled, check `/v1/diagnostics` (`autonomy.running`, `ticks`, `run_attempts`, `last_error`) and use `/v1/control/autonomy/trigger` for a bounded manual turn.
 
 ## Persistence degraded mode (engine fail-soft)
 
@@ -140,6 +161,14 @@ pytest -q tests
 - Monitor recovery behavior: `recovery_attempts` should correlate with incidents; repeated growth in `recovery_failures` means failed restart paths.
 - Check cooldown protection: growth in `recovery_skipped_cooldown` during incidents is expected anti-storm behavior; persistent high growth means unresolved component failures.
 - Inspect `last_incident`, `cooldown_active`, `last_error`, and `consecutive_error_count` for current fault context and supervisor health.
+
+## Runtime autonomy runbook checks
+
+- In `/v1/diagnostics.autonomy`, validate liveness (`running=true` when enabled) and that `ticks` increases over time.
+- Backpressure guard: investigate persistent growth in `skipped_backlog`; it indicates outbound/dead-letter backlog pressure.
+- Cooldown guard: occasional `skipped_cooldown` growth is expected; persistent growth with low `run_attempts` means cadence/cooldown tuning is needed.
+- Failure signal: monitor `run_failures`, `consecutive_error_count`, and `last_error` for repeated autonomy turn faults.
+- Review `last_result_excerpt` and `last_snapshot` to confirm autonomy is reading current queue/supervisor/channel signals.
 
 ## Delivery observability and dead-letter runbook checks
 

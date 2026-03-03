@@ -12,6 +12,7 @@ Main fields (summary):
 - `gateway.diagnostics` (exposure and protection of `/v1/diagnostics`)
 - `gateway.heartbeat` (enable/disable and interval for gateway heartbeat)
 - `gateway.supervisor` (runtime health checks + bounded auto-recovery loop)
+- `gateway.autonomy` (opt-in periodic autonomy review worker)
 - `scheduler.timezone` (timezone for cron)
 - `channels` (telegram/discord/slack/whatsapp + extras)
 
@@ -61,6 +62,14 @@ Note: provider-specific key variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `
       "enabled": true,
       "interval_s": 20,
       "cooldown_s": 30
+    },
+    "autonomy": {
+      "enabled": false,
+      "interval_s": 900,
+      "cooldown_s": 300,
+      "timeout_s": 45.0,
+      "max_queue_backlog": 200,
+      "session_id": "autonomy:system"
     }
   }
 }
@@ -80,6 +89,16 @@ Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gate
 - `gateway.supervisor.interval_s` controls supervisor tick cadence.
 - `gateway.supervisor.cooldown_s` applies per-component cooldown before another recovery attempt.
 - Snake case and camelCase are accepted (`interval_s` / `intervalS`, `cooldown_s` / `cooldownS`).
+
+## Runtime autonomy bootstrap
+
+- `gateway.autonomy.enabled` is opt-in and defaults to `false` to avoid unexpected model usage/cost.
+- `gateway.autonomy.interval_s` controls periodic autonomy ticks.
+- `gateway.autonomy.cooldown_s` enforces minimum spacing between non-forced runs.
+- `gateway.autonomy.timeout_s` bounds each autonomy turn with timeout containment.
+- `gateway.autonomy.max_queue_backlog` skips non-forced ticks when `outbound_size + dead_letter_size` is high.
+- `gateway.autonomy.session_id` defines the engine session used for autonomy turns.
+- Snake case and camelCase are accepted (`interval_s`/`intervalS`, `cooldown_s`/`cooldownS`, `timeout_s`/`timeoutS`, `max_queue_backlog`/`maxQueueBacklog`, `session_id`/`sessionId`).
 
 ## Automatic provider resolution
 
