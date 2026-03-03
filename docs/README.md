@@ -8,3 +8,4 @@ Documentação técnica do runtime novo do ClawLite.
 - [API (Gateway)](./API.md)
 - [Skills](./SKILLS.md)
 - [Operations](./OPERATIONS.md)
+- [Telegram Reliability Semantics](./TELEGRAM_RELIABILITY_SEMANTICS.md)
