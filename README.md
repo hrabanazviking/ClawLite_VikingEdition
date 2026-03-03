@@ -19,6 +19,7 @@ Unlike heavier alternatives, ClawLite is intentionally compact: around **4.2k li
 ## ✨ Main Features
 - 🧠 **Unified agent engine** for CLI, HTTP API, WebSocket, scheduler, and channels.
 - 💬 **Telegram-first channel support** with allowlist validation and long-message chunking.
+- 🛡️ **Telegram reliability mechanisms**: retry/backoff with jitter, auth circuit breaker for 401/403, formatting fallback, and safe offset commit only after successful processing.
 - 🧩 **Skills via `SKILL.md`** with autoload and executable `command/script` actions.
 - 🗓️ **Autonomous scheduling** with Cron jobs and heartbeat loops.
 - 🗂️ **Persistent memory + sessions** stored under `~/.clawlite/state`.
@@ -126,6 +127,8 @@ Environment overrides supported:
 | Command | Purpose |
 |---|---|
 | `clawlite start [--host --port --config]` | Start FastAPI + WebSocket gateway |
+| `clawlite gateway [--host --port --config]` | Alias for `clawlite start` |
+| `clawlite status` | Show runtime/config status summary |
 | `clawlite run "<prompt>" [--session-id]` | Run one prompt through the engine |
 | `clawlite onboard [--overwrite ...]` | Generate workspace identity templates |
 | `clawlite validate provider|channels|onboarding [--fix]` | Validate operator readiness for provider/channel/workspace |
@@ -212,21 +215,35 @@ clawlite/
 └── utils/        # helpers and logging setup
 ```
 
+## 📊 Status Snapshot (2026-03-03)
+- **Working now**
+  - Gateway/API v1 endpoints are implemented and documented (`/health`, `/v1/chat`, `/v1/cron/*`, `/v1/ws`).
+  - Telegram channel is the only production channel today, with polling, retry/backoff (+ jitter), 401/403 auth circuit breaker, allowlist checks, chunked outbound, formatting fallback, and safe offset commit after successful processing.
+  - Scheduler is active with both Cron jobs and Heartbeat loop, plus CLI/API controls.
+  - Provider routing is active for Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, and custom OpenAI-compatible endpoints.
+  - Core tools and workspace templates are live: shell/files/web/cron/message/skills/subagent tools and `IDENTITY`, `SOUL`, `AGENTS`, `TOOLS`, `USER`, `HEARTBEAT`, `BOOTSTRAP`, `memory/MEMORY`.
+- **Known gaps**
+  - Telegram reliability is improved but not yet a guaranteed zero-error operation under all network/provider conditions.
+  - Typing indicator behavior and richer Telegram formatting consistency are not finalized as strict reliability goals.
+  - Most non-Telegram channels are still skeleton adapters.
+  - 24/7 autonomous self-improvement loops are in progress, not complete.
+
 ## 🛣️ Roadmap
-- **P0 Core Stability**
-- [ ] Consolidate one execution path across CLI, gateway, and channels.
-- [ ] Expand integration tests for scheduler and channel dispatch.
-- [ ] Harden input validation for channel webhooks and external I/O tools.
-- [ ] Keep `pytest -q tests` green in CI for Python 3.10 and 3.12.
-- **P1 Operational Autonomy**
-- [ ] Finalize 24/7 supervised runtime on Linux with automatic recovery.
-- [ ] Improve proactive outbound delivery reliability for Telegram.
-- [ ] Strengthen long-term memory retrieval quality across sessions.
-- [ ] Add clearer operational logs and failure runbooks.
-- **P2 Ecosystem**
-- [ ] Improve user skill experience (discovery, execution diagnostics).
-- [ ] Expand MCP integration and specialized provider support.
-- [ ] Publish objective release/deploy guides with pass/fail checklists.
+- **P0 Reliability and Core Completion (highest priority)**
+  - [ ] Telegram at near-100% reliability: typing signal, formatting stability, resilient retries, and zero-crash channel loop (inspired by OpenClaw + nanobot reliability targets).
+  - [ ] ClawLite core loop fully reliable across Memory, Agents, Heartbeat, Soul context, Tools, and User context.
+  - [ ] Gateway v1 stability hardening with expanded integration tests for `/v1/chat`, `/v1/cron/*`, and scheduler dispatch.
+  - [ ] Provider/runtime robustness: safer auth/config validation, clearer provider error taxonomy, and stronger fallback/retry behavior (aligned with OpenClaw/nanobot production lessons).
+- **P1 Capability Expansion**
+  - [ ] Skills system at production quality: discovery, execution diagnostics, guardrails, and repeatable outcomes (OpenClaw/nanobot inspired operator UX).
+  - [ ] Subagents at production quality: queue/retry/resume reliability, better observability, and practical delegation flows.
+  - [ ] Move from supervised automation to truly autonomous operation with controlled guardrails.
+  - [ ] Main objective: autonomous and intelligent self-improvement 24/7 with internet research loops and measurable quality gates.
+- **P2 Ecosystem and Collaboration**
+  - [ ] Future collaboration network: OpenClaw + nanobot + ClawLite working together in Telegram/Discord group workflows.
+  - [ ] Codex 5.3 xhigh + agents/subagents applied to GitHub operations (posts, PRs, commits, releases, READMEs, docs, architecture notes, and continuous learning tasks).
+  - [ ] Dashboard for transparent progress tracking, total time spent, and an agent reward system for delivered outcomes.
+  - [ ] PT-BR vision (concise): `objetivo final = autonomia real, melhoria continua e colaboracao entre agentes`.
 
 See full plan in [`ROADMAP.md`](ROADMAP.md).
 
