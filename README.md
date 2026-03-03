@@ -5,7 +5,11 @@
   <p><strong>FastAPI gateway, Telegram-first operations, persistent memory, and real tool execution.</strong></p>
   <p>
     <a href="https://github.com/eobarretooo/ClawLite/actions/workflows/ci.yml"><img src="https://github.com/eobarretooo/ClawLite/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/eobarretooo/ClawLite/actions/workflows/coverage.yml"><img src="https://github.com/eobarretooo/ClawLite/actions/workflows/coverage.yml/badge.svg" alt="Coverage Workflow"></a>
     <a href="https://github.com/eobarretooo/ClawLite/releases"><img src="https://img.shields.io/github/v/release/eobarretooo/ClawLite" alt="Latest Release"></a>
+    <a href="https://github.com/eobarretooo/ClawLite/graphs/contributors"><img src="https://img.shields.io/github/contributors/eobarretooo/ClawLite" alt="Contributors"></a>
+    <a href="https://github.com/eobarretooo/ClawLite/issues"><img src="https://img.shields.io/github/issues/eobarretooo/ClawLite" alt="Open Issues"></a>
+    <a href="https://github.com/eobarretooo/ClawLite/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22good%20first%20issue%22"><img src="https://img.shields.io/github/issues/eobarretooo/ClawLite/good%20first%20issue" alt="Good First Issues"></a>
     <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
     <img src="https://img.shields.io/badge/platform-linux-0ea5e9" alt="Linux">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT License"></a>
@@ -254,6 +258,10 @@ PRs are welcome and encouraged.
 - Check open issues: <https://github.com/eobarretooo/ClawLite/issues>
 - Run tests before PR: `pytest -q tests`
 - Keep docs aligned with runtime behavior
+
+## 🌍 Community
+- Discussions: <https://github.com/eobarretooo/ClawLite/discussions>
+- Issues: <https://github.com/eobarretooo/ClawLite/issues>
 
 ## 🙏 Acknowledgements
 ClawLite is its own implementation.
