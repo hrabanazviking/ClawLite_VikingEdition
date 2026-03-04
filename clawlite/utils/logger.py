@@ -67,8 +67,8 @@ def _action_key_from_level(level_name: str) -> str:
 def _format_timestamp(record: dict[str, Any]) -> str:
     moment = record.get("time")
     if hasattr(moment, "strftime"):
-        return moment.strftime("%Y-%m-%d %H:%M:%S")
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return moment.strftime("%H:%M:%S")
+    return datetime.now().strftime("%H:%M:%S")
 
 
 def _extract_exception_lines(exception: Any) -> list[str]:

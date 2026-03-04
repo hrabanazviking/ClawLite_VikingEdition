@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def test_plain_logger_uses_default_extra_fields(monkeypatch) -> None:
     assert rows
     line = rows[0].strip()
     assert line.startswith("[")
+    assert re.match(r"^\[\d{2}:\d{2}:\d{2}\]", line)
     assert "] ┃ [" in line
     assert line.endswith(": plain log line")
 
