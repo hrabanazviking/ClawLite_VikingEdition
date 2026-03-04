@@ -6,6 +6,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from clawlite.utils.logger import render_loguru_message
+
 _LOGGING_CONFIGURED = False
 _DEFAULT_EXTRA = {"event": "-", "session": "-", "channel": "-", "tool": "-", "run": "-"}
 _ANSI_RESET = "\x1b[0m"
@@ -111,15 +113,25 @@ def setup_logging(level: str | None = None) -> None:
     base_logger = logger
 
     if stderr_enabled:
-        base_logger.add(
-            sys.stderr,
-            level=resolved_level,
-            format=_make_text_formatter(enable_color=_stderr_supports_color()) if log_format != "json" else "{message}",
-            enqueue=False,
-            backtrace=False,
-            diagnose=False,
-            serialize=(log_format == "json"),
-        )
+        if log_format == "json":
+            base_logger.add(
+                sys.stderr,
+                level=resolved_level,
+                format="{message}",
+                enqueue=False,
+                backtrace=False,
+                diagnose=False,
+                serialize=True,
+            )
+        else:
+            base_logger.add(
+                render_loguru_message,
+                level=resolved_level,
+                enqueue=False,
+                backtrace=False,
+                diagnose=False,
+                serialize=False,
+            )
 
     if file_path:
         path = Path(file_path).expanduser()

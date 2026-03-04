@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from typing import Any
 
 from clawlite import __version__
@@ -20,11 +19,13 @@ from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
 from clawlite.core.skills import SkillsLoader
 from clawlite.scheduler.cron import CronService
+from clawlite.utils.logger import stdout_json
+from clawlite.utils.logger import stdout_text
 from clawlite.workspace.loader import WorkspaceLoader
 
 
 def _print_json(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    stdout_json(payload)
 
 
 def cmd_start(args: argparse.Namespace) -> int:
@@ -515,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if bool(getattr(args, "version", False)):
-        print(__version__)
+        stdout_text(__version__)
         return 0
     handler = getattr(args, "handler", None)
     if not callable(handler):
