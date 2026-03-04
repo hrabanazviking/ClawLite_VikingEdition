@@ -141,6 +141,55 @@ def test_gateway_telegram_webhook_endpoint_requires_secret_and_dispatches(tmp_pa
             webhook_handler.assert_awaited_once_with({"update_id": 2, "message": {"text": "hello"}})
 
 
+def test_gateway_telegram_webhook_timeout_returns_408_contract(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={
+            "telegram": {
+                "enabled": True,
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_enabled": True,
+                "webhook_secret": "secret-1",
+                "webhook_url": "https://example.com/hook",
+            }
+        },
+    )
+    app = create_app(cfg)
+
+    class FakeBot:
+        def __init__(self, token: str) -> None:
+            assert token == "x:token"
+
+        async def set_webhook(self, **kwargs):
+            return kwargs
+
+        async def delete_webhook(self, **kwargs):
+            return kwargs
+
+    fake_module = SimpleNamespace(Bot=FakeBot)
+    with patch.dict(sys.modules, {"telegram": fake_module}):
+        with TestClient(app) as client:
+            async def _timeout_wait_for(coro, timeout):
+                del timeout
+                if asyncio.iscoroutine(coro):
+                    coro.close()
+                raise asyncio.TimeoutError()
+
+            with patch("clawlite.gateway.server.asyncio.wait_for", new=_timeout_wait_for):
+                timeout_response = client.post(
+                    "/api/webhooks/telegram",
+                    json={"update_id": 2, "message": {"text": "hello"}},
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "secret-1"},
+                )
+            assert timeout_response.status_code == 408
+            payload = timeout_response.json()
+            assert payload["error"] == "telegram_webhook_payload_timeout"
+            assert payload["code"] == "telegram_webhook_payload_timeout"
+
+
 def test_gateway_successful_chat_completes_bootstrap_lifecycle(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

@@ -89,6 +89,7 @@
 - Telegram parity increment: inbound `message_reaction` now supports policy gating (`off|own|all`) with own-message cache filtering, safe metadata routing, and dedicated reaction counters.
 - Telegram parity increment: context-aware ingress authorization delivered (`dm_policy`, `group_policy`, `topic_policy`, per-context allowlists, and `group_overrides` with topic-level overrides) across message, callback_query, and message_reaction paths.
 - Telegram parity increment: outbound action surface (`edit`, `delete`, `react`, `create_topic`, `reply`) now exposed through tool metadata bridge with channel-side dispatch and action counters.
+- Telegram parity increment: webhook/polling hardening with unified dedupe keys, stale-update skip telemetry, atomic offset store v2 (`schema_version`, `token_fingerprint`), and webhook payload timeout contract (`telegram_webhook_payload_timeout`).
 
 ### FUTURE (Scale + polish)
 

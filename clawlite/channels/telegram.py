@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import html
 import hashlib
 import json
@@ -378,17 +379,6 @@ class TelegramChannel(BaseChannel):
         self.handle_commands = bool(config.get("handle_commands", config.get("handleCommands", True)))
         self._task: asyncio.Task[Any] | None = None
         self._typing_tasks: dict[str, asyncio.Task[Any]] = {}
-        self._offset = self._load_offset()
-        self._connected = False
-        self._webhook_mode_active = False
-        self._startup_drop_done = False
-        self._webhook_seen_limit = max(32, int(config.get("webhook_dedupe_limit", 2048) or 2048))
-        self._webhook_seen_ids: set[int] = set()
-        self._webhook_seen_order: deque[int] = deque()
-        self._own_sent_message_keys: set[tuple[str, int]] = set()
-        self._own_sent_message_order: deque[tuple[str, int]] = deque()
-        self._message_signatures: dict[tuple[str, int], str] = {}
-        self._signature_limit = 4096
         self._signals: dict[str, int] = {
             "send_retry_count": 0,
             "send_retry_after_count": 0,
@@ -407,6 +397,10 @@ class TelegramChannel(BaseChannel):
             "webhook_update_received_count": 0,
             "webhook_update_duplicate_count": 0,
             "webhook_update_parse_error_count": 0,
+            "update_duplicate_skip_count": 0,
+            "polling_stale_update_skip_count": 0,
+            "offset_persist_error_count": 0,
+            "offset_load_error_count": 0,
             "message_reaction_received_count": 0,
             "message_reaction_ignored_bot_count": 0,
             "message_reaction_blocked_count": 0,
@@ -418,6 +412,20 @@ class TelegramChannel(BaseChannel):
             "action_react_count": 0,
             "action_create_topic_count": 0,
         }
+        self._offset = self._load_offset()
+        self._connected = False
+        self._webhook_mode_active = False
+        self._startup_drop_done = False
+        self._update_dedupe_limit = max(
+            32,
+            int(getattr(telegram_config, "update_dedupe_limit", 4096) or 4096),
+        )
+        self._seen_update_keys: set[str] = set()
+        self._seen_update_order: deque[str] = deque()
+        self._own_sent_message_keys: set[tuple[str, int]] = set()
+        self._own_sent_message_order: deque[tuple[str, int]] = deque()
+        self._message_signatures: dict[tuple[str, int], str] = {}
+        self._signature_limit = 4096
         self._send_auth_breaker_seen_open = False
         self._typing_auth_breaker_seen_open = False
 
@@ -539,15 +547,64 @@ class TelegramChannel(BaseChannel):
             return [TelegramChannel._to_namespace(item) for item in value]
         return value
 
-    def _remember_webhook_update_id(self, update_id: int) -> bool:
-        if update_id in self._webhook_seen_ids:
-            self._signals["webhook_update_duplicate_count"] += 1
+    @staticmethod
+    def _field(value: Any, name: str) -> Any:
+        if isinstance(value, dict):
+            return value.get(name)
+        return getattr(value, name, None)
+
+    @staticmethod
+    def _coerce_update_id(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    def _build_update_dedupe_key(self, update: Any) -> str | None:
+        update_id = self._coerce_update_id(self._field(update, "update_id"))
+        if update_id is not None:
+            return f"update:{update_id}"
+
+        callback_query = self._field(update, "callback_query")
+        callback_query_id = str(self._field(callback_query, "id") or "").strip()
+        if callback_query_id:
+            return f"callback:{callback_query_id}"
+
+        for field_name, is_edit in (
+            ("message", False),
+            ("edited_message", True),
+            ("channel_post", False),
+            ("edited_channel_post", True),
+        ):
+            message = self._field(update, field_name)
+            if message is None:
+                continue
+            chat_id = self._field(message, "chat_id")
+            if chat_id in {None, ""}:
+                chat = self._field(message, "chat")
+                chat_id = self._field(chat, "id")
+            message_id = self._coerce_update_id(self._field(message, "message_id"))
+            if chat_id in {None, ""} or message_id is None:
+                continue
+            is_edit_int = 1 if is_edit else 0
+            return f"message:{chat_id}:{message_id}:{is_edit_int}"
+        return None
+
+    def _remember_update_dedupe_key(self, dedupe_key: str, *, source: str) -> bool:
+        key = str(dedupe_key or "").strip()
+        if not key:
+            return True
+        if key in self._seen_update_keys:
+            self._signals["update_duplicate_skip_count"] += 1
+            if source == "webhook":
+                self._signals["webhook_update_duplicate_count"] += 1
             return False
-        self._webhook_seen_ids.add(update_id)
-        self._webhook_seen_order.append(update_id)
-        while len(self._webhook_seen_order) > self._webhook_seen_limit:
-            oldest = self._webhook_seen_order.popleft()
-            self._webhook_seen_ids.discard(oldest)
+        self._seen_update_keys.add(key)
+        self._seen_update_order.append(key)
+        while len(self._seen_update_order) > self._update_dedupe_limit:
+            oldest = self._seen_update_order.popleft()
+            self._seen_update_keys.discard(oldest)
         return True
 
     async def _ensure_bot(self) -> Any:
@@ -943,13 +1000,39 @@ class TelegramChannel(BaseChannel):
             return 0
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            if isinstance(data, dict):
+                offset_raw = data.get("offset", 0)
+            elif isinstance(data, int):
+                offset_raw = data
+            else:
+                raise ValueError("offset payload must be object or int")
+            offset = int(offset_raw or 0)
+            return max(0, offset)
+        except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
+            self._signals["offset_load_error_count"] += 1
+            logger.warning("telegram offset load failed path={} error={}", path, exc)
             return 0
-        return int(data.get("offset", 0) or 0)
 
     def _save_offset(self) -> None:
         path = self._offset_path()
-        path.write_text(json.dumps({"offset": self._offset}), encoding="utf-8")
+        payload = {
+            "schema_version": 2,
+            "offset": max(0, int(self._offset or 0)),
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "token_fingerprint": hashlib.sha256(self.token.encode("utf-8")).hexdigest()[:12],
+        }
+        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_path.replace(path)
+        except OSError as exc:
+            self._signals["offset_persist_error_count"] += 1
+            logger.warning("telegram offset persist failed path={} error={}", path, exc)
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     async def _poll_loop(self) -> None:
         backoff = self.reconnect_initial_s
@@ -972,13 +1055,19 @@ class TelegramChannel(BaseChannel):
                     logger.info("telegram connected polling=true")
                 backoff = self.reconnect_initial_s
                 for item in updates:
+                    dedupe_key = self._build_update_dedupe_key(item)
+                    if dedupe_key and not self._remember_update_dedupe_key(dedupe_key, source="polling"):
+                        continue
+                    update_id = self._coerce_update_id(getattr(item, "update_id", None))
+                    if update_id is not None and update_id < self._offset:
+                        self._signals["polling_stale_update_skip_count"] += 1
+                        continue
                     processed_ok = await self._handle_update(item)
                     if not processed_ok:
                         raise RuntimeError("telegram update processing failed")
-                    update_id = getattr(item, "update_id", None)
                     if update_id is None:
                         continue
-                    self._offset = max(self._offset, int(update_id) + 1)
+                    self._offset = max(self._offset, update_id + 1)
                     self._save_offset()
                 await asyncio.sleep(self.poll_interval_s)
             except asyncio.CancelledError:
@@ -1390,16 +1479,9 @@ class TelegramChannel(BaseChannel):
 
         self._signals["webhook_update_received_count"] += 1
         normalized = self._normalize_webhook_payload(payload)
-        update_id = normalized.get("update_id")
-        parsed_update_id: int | None = None
-        if update_id is not None:
-            try:
-                parsed_update_id = int(update_id)
-            except (TypeError, ValueError):
-                self._signals["webhook_update_parse_error_count"] += 1
-                return False
-            if not self._remember_webhook_update_id(parsed_update_id):
-                return False
+        dedupe_key = self._build_update_dedupe_key(normalized)
+        if dedupe_key and not self._remember_update_dedupe_key(dedupe_key, source="webhook"):
+            return False
 
         try:
             item = self._to_namespace(normalized)

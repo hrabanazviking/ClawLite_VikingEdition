@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -1346,6 +1349,34 @@ def test_telegram_offset_not_committed_when_processing_fails() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_load_offset_accepts_legacy_payload(tmp_path: Path) -> None:
+    channel = TelegramChannel(config={"token": "x:token"})
+    offset_path = tmp_path / "offset.json"
+    offset_path.write_text(json.dumps({"offset": 77}), encoding="utf-8")
+    channel._offset_path = lambda: offset_path  # type: ignore[method-assign]
+
+    loaded = channel._load_offset()
+
+    assert loaded == 77
+    assert channel.signals()["offset_load_error_count"] == 0
+
+
+def test_telegram_save_offset_writes_v2_payload_with_fingerprint(tmp_path: Path) -> None:
+    channel = TelegramChannel(config={"token": "x:token"})
+    offset_path = tmp_path / "offset.json"
+    channel._offset_path = lambda: offset_path  # type: ignore[method-assign]
+    channel._offset = 123
+
+    channel._save_offset()
+
+    persisted = json.loads(offset_path.read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == 2
+    assert persisted["offset"] == 123
+    assert isinstance(persisted["updated_at"], str) and persisted["updated_at"]
+    assert persisted["token_fingerprint"] == hashlib.sha256("x:token".encode("utf-8")).hexdigest()[:12]
+    assert channel.signals()["offset_persist_error_count"] == 0
+
+
 def test_telegram_polling_transient_failure_recovers_and_processes_update() -> None:
     async def _scenario() -> None:
         emitted: list[str] = []
@@ -1997,6 +2028,56 @@ def test_telegram_polling_recovery_matrix_multiple_reconnects_then_stable_update
     asyncio.run(_scenario())
 
 
+def test_telegram_polling_stale_update_is_skipped_and_counted() -> None:
+    async def _scenario() -> None:
+        emitted: list[str] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            del session_id, user_id, metadata
+            emitted.append(text)
+
+        channel = TelegramChannel(config={"token": "x:token", "poll_interval_s": 0.01}, on_message=_on_message)
+        channel._save_offset = lambda: None  # type: ignore[method-assign]
+        channel._offset = 200
+
+        user = SimpleNamespace(id=1, username="alice", first_name="Alice", language_code="en")
+        chat = SimpleNamespace(type="private")
+        message = SimpleNamespace(
+            text="stale",
+            caption=None,
+            chat_id=42,
+            from_user=user,
+            message_id=10,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        stale_update = SimpleNamespace(update_id=150, message=message, edited_message=None, effective_message=message)
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_updates(self, *, offset, timeout, allowed_updates):
+                del offset, timeout, allowed_updates
+                self.calls += 1
+                if self.calls == 1:
+                    return [stale_update]
+                channel._running = False
+                return []
+
+        channel.bot = FakeBot()
+        channel._running = True
+        await channel._poll_loop()
+
+        assert emitted == []
+        assert channel._offset == 200
+        assert channel.signals()["polling_stale_update_skip_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_auth_breaker_close_count_tracks_natural_cooldown() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(
@@ -2163,6 +2244,74 @@ def test_telegram_handle_webhook_update_normalizes_callback_payload_and_dedupes(
         signals = channel.signals()
         assert signals["webhook_update_received_count"] == 2
         assert signals["webhook_update_duplicate_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_dedupe_skips_duplicate_callback_query_without_update_id() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict[str, object]) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.acks: list[dict[str, object]] = []
+
+            async def answer_callback_query(self, **kwargs):
+                self.acks.append(kwargs)
+                return True
+
+        channel.bot = FakeBot()
+        payload = {
+            "callback_query": {
+                "id": "cq-dup-no-update",
+                "data": "action:raw",
+                "from": {"id": 7, "username": "alice"},
+                "message": {"message_id": 55, "chat": {"id": 42}},
+            }
+        }
+
+        first = await channel.handle_webhook_update(payload)
+        duplicate = await channel.handle_webhook_update(payload)
+
+        assert first is True
+        assert duplicate is False
+        assert len(emitted) == 1
+        signals = channel.signals()
+        assert signals["update_duplicate_skip_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_dedupe_skips_duplicate_message_key_without_update_id() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict[str, object]) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+        payload = {
+            "message": {
+                "message_id": 90,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 7, "username": "alice"},
+                "text": "raw message",
+            }
+        }
+
+        first = await channel.handle_webhook_update(payload)
+        duplicate = await channel.handle_webhook_update(payload)
+
+        assert first is True
+        assert duplicate is False
+        assert len(emitted) == 1
+        signals = channel.signals()
+        assert signals["update_duplicate_skip_count"] == 1
 
     asyncio.run(_scenario())
 

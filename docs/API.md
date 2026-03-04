@@ -458,6 +458,7 @@ Diagnóstico de autenticação do gateway.
 - Enabled only when Telegram channel is enabled and running in active webhook mode.
 - Validates `X-Telegram-Bot-Api-Secret-Token` against channel secret when configured.
 - Accepts JSON object payload up to 1 MB and returns `{ "ok": true, "processed": <bool> }`.
+- Applies a 5s body-read timeout and returns `408` with code `telegram_webhook_payload_timeout` on slow/incomplete payload reads.
 
 Response:
 

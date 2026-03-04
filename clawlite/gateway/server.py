@@ -1035,7 +1035,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             if not supplied_secret or supplied_secret != expected_secret:
                 raise HTTPException(status_code=401, detail="telegram_webhook_secret_invalid")
 
-        raw_body = await request.body()
+        try:
+            raw_body = await asyncio.wait_for(request.body(), timeout=5.0)
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(status_code=408, detail="telegram_webhook_payload_timeout") from exc
         if len(raw_body) > TELEGRAM_WEBHOOK_MAX_BODY_BYTES:
             raise HTTPException(status_code=413, detail="telegram_webhook_payload_too_large")
         try:

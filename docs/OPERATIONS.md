@@ -48,6 +48,7 @@ Notas:
 - `/api/token` retorna token mascarado (nunca o token bruto).
 - `WS /ws` espelha `WS /v1/ws`.
 - Telegram suporta runtime em webhook com validacao de `X-Telegram-Bot-Api-Secret-Token`; se ativacao de webhook falhar, o canal faz fallback seguro para polling.
+- Telegram hardening adicional: dedupe unificado de updates (webhook + polling), persistencia atomica de offset (`schema_version=2`) e timeout de 5s na leitura de payload webhook (`telegram_webhook_payload_timeout`).
 - `/v1/status` e `/api/status` expõem `contract_version` e `server_time`.
 - `/v1/status` e `/api/status` incluem componente `bootstrap` com visibilidade de pendência/último estado.
 - `/v1/diagnostics` e `/api/diagnostics` expõem `generated_at`, `uptime_s` e `contract_version`.

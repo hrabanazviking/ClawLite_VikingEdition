@@ -465,6 +465,7 @@ class TelegramChannelConfig(BaseChannelConfig):
     webhook_secret: str = ""
     webhook_path: str = "/api/webhooks/telegram"
     webhook_url: str = ""
+    update_dedupe_limit: int = 4096
     poll_interval_s: float = 1.0
     poll_timeout_s: int = 20
     reconnect_initial_s: float = 2.0
@@ -511,6 +512,19 @@ class TelegramChannelConfig(BaseChannelConfig):
             webhook_secret=str(data.get("webhook_secret", data.get("webhookSecret", "")) or ""),
             webhook_path=str(data.get("webhook_path", data.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram"),
             webhook_url=str(data.get("webhook_url", data.get("webhookUrl", "")) or ""),
+            update_dedupe_limit=max(
+                32,
+                int(
+                    data.get(
+                        "update_dedupe_limit",
+                        data.get(
+                            "updateDedupeLimit",
+                            data.get("webhook_dedupe_limit", data.get("webhookDedupeLimit", 4096)),
+                        ),
+                    )
+                    or 4096
+                ),
+            ),
             poll_interval_s=float(data.get("poll_interval_s", data.get("pollIntervalS", 1.0)) or 1.0),
             poll_timeout_s=int(data.get("poll_timeout_s", data.get("pollTimeoutS", 20)) or 20),
             reconnect_initial_s=float(data.get("reconnect_initial_s", data.get("reconnectInitialS", 2.0)) or 2.0),
