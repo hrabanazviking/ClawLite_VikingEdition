@@ -8,7 +8,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -71,6 +71,37 @@ class DiagnosticsResponse(BaseModel):
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
     environment: dict[str, Any] = {}
+
+
+ROOT_ENTRYPOINT_HTML = """<!doctype html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>ClawLite Gateway</title>
+  </head>
+  <body>
+    <h1>ClawLite Gateway</h1>
+    <p>Available endpoints:</p>
+    <ul>
+      <li>GET /health</li>
+      <li>GET /v1/status, GET /api/status</li>
+      <li>POST /v1/chat, POST /api/message</li>
+      <li>GET /api/token</li>
+      <li>WS /v1/ws, WS /ws</li>
+    </ul>
+  </body>
+</html>
+"""
+
+
+def _mask_secret(value: str, *, keep: int = 4) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if len(token) <= keep:
+        return "*" * len(token)
+    return f"{'*' * max(3, len(token) - keep)}{token[-keep:]}"
 
 
 @dataclass(slots=True)
@@ -593,10 +624,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "queue": runtime.bus.stats(),
         }
 
-    @app.get("/v1/status", response_model=ControlPlaneResponse)
-    async def status(request: Request) -> ControlPlaneResponse:
+    async def _status_handler(request: Request) -> ControlPlaneResponse:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         return _control_plane_payload()
+
+    @app.get("/v1/status", response_model=ControlPlaneResponse)
+    async def status(request: Request) -> ControlPlaneResponse:
+        return await _status_handler(request)
+
+    @app.get("/api/status", response_model=ControlPlaneResponse)
+    async def api_status(request: Request) -> ControlPlaneResponse:
+        return await _status_handler(request)
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
     async def diagnostics(request: Request) -> DiagnosticsResponse:
@@ -635,8 +673,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             },
         }
 
-    @app.post("/v1/chat", response_model=ChatResponse)
-    async def chat(req: ChatRequest, request: Request) -> ChatResponse:
+    async def _chat_handler(req: ChatRequest, request: Request) -> ChatResponse:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         if not req.session_id.strip() or not req.text.strip():
             raise HTTPException(status_code=400, detail="session_id and text are required")
@@ -649,6 +686,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=status_code, detail=detail)
         bind_event("gateway.chat", session=req.session_id).info("chat response generated model={}", out.model)
         return ChatResponse(text=out.text, model=out.model)
+
+    @app.post("/v1/chat", response_model=ChatResponse)
+    async def chat(req: ChatRequest, request: Request) -> ChatResponse:
+        return await _chat_handler(req, request)
+
+    @app.post("/api/message", response_model=ChatResponse)
+    async def api_message(req: ChatRequest, request: Request) -> ChatResponse:
+        return await _chat_handler(req, request)
+
+    @app.get("/api/token")
+    async def api_token(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        return {
+            "token_configured": bool(auth_guard.token),
+            "token_masked": _mask_secret(auth_guard.token),
+            "mode": auth_guard.mode,
+            "header_name": auth_guard.header_name,
+            "query_param": auth_guard.query_param,
+        }
 
     @app.post("/v1/cron/add")
     async def cron_add(req: CronAddRequest, request: Request) -> dict[str, Any]:
@@ -672,12 +728,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         removed = runtime.cron.remove_job(job_id)
         return {"ok": removed, "status": "removed" if removed else "not_found"}
 
-    @app.websocket("/v1/ws")
-    async def ws_chat(socket: WebSocket) -> None:
+    async def _ws_chat(socket: WebSocket, *, path_label: str) -> None:
         if not await auth_guard.check_ws(socket=socket, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth):
             return
         await socket.accept()
-        bind_event("gateway.ws", channel="ws").info("websocket client connected path=/v1/ws")
+        bind_event("gateway.ws", channel="ws").info("websocket client connected path={}", path_label)
         try:
             while True:
                 payload = await socket.receive_json()
@@ -696,8 +751,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 await socket.send_json({"text": out.text, "model": out.model})
                 bind_event("gateway.ws", session=session_id, channel="ws").debug("websocket response sent model={}", out.model)
         except WebSocketDisconnect:
-            bind_event("gateway.ws", channel="ws").info("websocket client disconnected path=/v1/ws")
+            bind_event("gateway.ws", channel="ws").info("websocket client disconnected path={}", path_label)
             return
+
+    @app.websocket("/v1/ws")
+    async def ws_chat(socket: WebSocket) -> None:
+        await _ws_chat(socket, path_label="/v1/ws")
+
+    @app.websocket("/ws")
+    async def ws_chat_alias(socket: WebSocket) -> None:
+        await _ws_chat(socket, path_label="/ws")
+
+    @app.get("/", response_class=HTMLResponse)
+    async def root() -> HTMLResponse:
+        return HTMLResponse(content=ROOT_ENTRYPOINT_HTML, status_code=200)
 
     return app
 

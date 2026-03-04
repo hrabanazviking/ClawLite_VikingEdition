@@ -24,6 +24,22 @@ pytest -q tests
 curl -sS http://127.0.0.1:8787/health | python -m json.tool
 ```
 
+## Verificar aliases de compatibilidade do gateway
+
+```bash
+curl -sS http://127.0.0.1:8787/
+curl -sS http://127.0.0.1:8787/api/status | python -m json.tool
+curl -sS -X POST http://127.0.0.1:8787/api/message \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"cli:ops","text":"ping"}' | python -m json.tool
+curl -sS http://127.0.0.1:8787/api/token | python -m json.tool
+```
+
+Notas:
+- `/api/status` e `/api/message` espelham `/v1/status` e `/v1/chat`.
+- `/api/token` retorna token mascarado (nunca o token bruto).
+- `WS /ws` espelha `WS /v1/ws`.
+
 ## Cron manual
 
 ```bash

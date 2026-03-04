@@ -68,6 +68,13 @@ Health check:
 curl -s http://127.0.0.1:8787/health
 ```
 
+Gateway compatibility aliases (OpenClaw-style surface):
+- `GET /api/status` (alias de `GET /v1/status`)
+- `POST /api/message` (alias de `POST /v1/chat`)
+- `GET /api/token` (diagnóstico com token mascarado)
+- `WS /ws` (alias de `WS /v1/ws`)
+- `GET /` (entrypoint HTML leve e determinístico)
+
 ## 🔧 Minimal Config (Gemini + Telegram)
 ClawLite loads config from `~/.clawlite/config.json` by default.
 

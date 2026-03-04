@@ -24,3 +24,24 @@
 2. CLI principal sem regressão (`start`, `run`, `onboard`, `cron`, `skills`)
 3. API principal funcionando (`/health`, `/v1/chat`, `/v1/cron/*`)
 4. Documentação alinhada com o comportamento real
+
+## ClawLite Parity Roadmap (nanobot + OpenClaw)
+
+### NOW (Critical parity)
+- [ ] Replace passive channel stubs with active adapters for Discord, Slack, and WhatsApp.
+- [ ] Enforce stronger tool safety policy for exec, web, and mcp.
+- [ ] Align gateway with production-grade contract.
+- [ ] Upgrade heartbeat to HEARTBEAT_OK + persisted check state.
+- Progresso 2026-03-04: camada de compatibilidade do gateway entregue (`/api/status`, `/api/message`, `/api/token`, `/ws`, `/`).
+
+### NEXT (Operational maturity)
+- [ ] Improve prompt/memory pipeline.
+- [ ] Expand provider + config capability.
+- [ ] Align workspace/bootstrap/templates with runtime lifecycle.
+- [ ] Expand CLI operations.
+- [ ] Add structured observability.
+
+### FUTURE (Scale + polish)
+- [ ] Subagent orchestration controls.
+- [ ] Memory/session retention and compaction.
+- [ ] Multi-channel concurrency optimization.

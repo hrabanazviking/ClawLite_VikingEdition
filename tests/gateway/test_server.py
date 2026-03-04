@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.gateway.server import _run_heartbeat, create_app
@@ -42,6 +43,28 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
         assert chat.status_code == 200
         assert chat.json()["text"] == "pong"
+        alias = client.post("/api/message", json={"session_id": "cli:1", "text": "ping"})
+        assert alias.status_code == 200
+        assert alias.json()["text"] == "pong"
+
+
+def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        root = client.get("/")
+        assert root.status_code == 200
+        body = root.text
+        assert "<h1>ClawLite Gateway</h1>" in body
+        assert "GET /v1/status, GET /api/status" in body
+        assert "POST /v1/chat, POST /api/message" in body
+        assert "WS /v1/ws, WS /ws" in body
 
 
 def test_gateway_chat_provider_error_returns_graceful_message(tmp_path: Path) -> None:
@@ -133,11 +156,81 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         assert unauthorized.status_code == 401
         assert unauthorized.json()["error"] == "gateway_auth_required"
 
+        unauthorized_alias = client.get("/api/status")
+        assert unauthorized_alias.status_code == 401
+        assert unauthorized_alias.json()["error"] == "gateway_auth_required"
+
+        unauthorized_token = client.get("/api/token")
+        assert unauthorized_token.status_code == 401
+        assert unauthorized_token.json()["error"] == "gateway_auth_required"
+
         ok = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
         assert ok.status_code == 200
         payload = ok.json()
         assert payload["ready"] is True
         assert payload["auth"]["posture"] == "strict"
+
+        ok_alias = client.get("/api/status", headers={"Authorization": "Bearer secret-token"})
+        assert ok_alias.status_code == 200
+        assert ok_alias.json() == payload
+
+        token = client.get("/api/token", headers={"Authorization": "Bearer secret-token"})
+        assert token.status_code == 200
+        token_payload = token.json()
+        assert token_payload["token_configured"] is True
+        assert token_payload["token_masked"] == "********oken"
+        assert token_payload["token_masked"] != "secret-token"
+
+
+def test_gateway_ws_alias_behaves_like_v1_ws(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/ws") as socket:
+            socket.send_json({"session_id": "cli:ws", "text": "ping"})
+            payload = socket.receive_json()
+            assert payload["text"] == "pong"
+
+        with client.websocket_connect("/ws") as socket_alias:
+            socket_alias.send_json({"session_id": "cli:ws", "text": "ping"})
+            payload_alias = socket_alias.receive_json()
+            assert payload_alias["text"] == "pong"
+
+
+def test_gateway_ws_alias_respects_auth_guard(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": "secret-token",
+                "allow_loopback_without_auth": False,
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws"):
+                pass
+
+        with client.websocket_connect("/ws?token=secret-token") as socket:
+            socket.send_json({"session_id": "cli:ws", "text": "ping"})
+            payload = socket.receive_json()
+            assert payload["text"] == "pong"
 
 
 def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:

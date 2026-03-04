@@ -2,6 +2,10 @@
 
 Base URL padrão: `http://127.0.0.1:8787`
 
+## `GET /`
+
+Entrypoint leve do gateway (HTML estático e determinístico) com visão rápida dos endpoints disponíveis.
+
 ## `GET /health`
 
 Retorna status geral do runtime:
@@ -19,6 +23,21 @@ Request:
   "text": "me lembra de beber agua"
 }
 ```
+
+Alias compatível: `POST /api/message` (mesma request/response e mesma política de autenticação).
+
+## `GET /v1/status`
+
+Estado do control-plane do gateway.
+
+Alias compatível: `GET /api/status` (mesmo payload e mesma política de autenticação).
+
+## `GET /api/token`
+
+Diagnóstico de autenticação do gateway.
+- Nunca retorna token em texto puro.
+- Retorna apenas estado (`token_configured`) e versão mascarada determinística (`token_masked`).
+- Segue a mesma política de autenticação dos endpoints de control-plane.
 
 Response:
 
@@ -57,3 +76,5 @@ Payload por mensagem:
 ```json
 {"session_id":"cli:ws","text":"oi"}
 ```
+
+Alias compatível: `WS /ws` (mesmo comportamento, incluindo autenticação).
