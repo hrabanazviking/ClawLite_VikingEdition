@@ -239,6 +239,11 @@ def diagnostics_snapshot(config: AppConfig, *, config_path: str, include_validat
         "workspace_path": config.workspace_path,
         "state_path": config.state_path,
         "provider_model": config.agents.defaults.model,
+        "memory_window": config.agents.defaults.memory_window,
+        "agent_defaults": {
+            "provider_model": config.agents.defaults.model,
+            "memory_window": config.agents.defaults.memory_window,
+        },
         "gateway": {
             "host": config.gateway.host,
             "port": config.gateway.port,

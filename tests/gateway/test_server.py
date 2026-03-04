@@ -51,6 +51,18 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         assert alias.json()["text"] == "pong"
 
 
+def test_gateway_runtime_passes_memory_window_to_engine(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        agents={"defaults": {"memory_window": 33}},
+        channels={},
+    )
+    app = create_app(cfg)
+    assert app.state.runtime.engine.memory_window == 33
+
+
 def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

@@ -41,6 +41,7 @@
 
 ### NEXT (Operational maturity)
 - [ ] Improve prompt/memory pipeline.
+- Progresso 2026-03-04: `agents.defaults.memory_window` conectado ponta-a-ponta (config -> gateway runtime -> engine -> `sessions.read(limit=...)`) com visibilidade em `clawlite status` e `clawlite diagnostics`.
 - [ ] Expand provider + config capability.
 - [ ] Align workspace/bootstrap/templates with runtime lifecycle.
 - [ ] Expand CLI operations.

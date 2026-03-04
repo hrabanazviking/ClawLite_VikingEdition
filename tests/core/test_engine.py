@@ -65,6 +65,18 @@ class FakeProviderWithSamplingCapture:
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
 
+class SessionStoreCapture:
+    def __init__(self) -> None:
+        self.last_limit: int | None = None
+
+    def read(self, session_id: str, limit: int = 20) -> list[dict[str, str]]:
+        self.last_limit = limit
+        return []
+
+    def append(self, session_id: str, role: str, content: str) -> None:
+        return None
+
+
 class FakeProviderWithReasoningCapture:
     def __init__(self) -> None:
         self.last_reasoning_effort: str | None = None
@@ -276,6 +288,23 @@ def test_engine_passes_max_tokens_and_temperature_when_supported() -> None:
         assert out.text == "ok"
         assert provider.last_max_tokens == 2048
         assert provider.last_temperature == 0.25
+
+    asyncio.run(_scenario())
+
+
+def test_engine_uses_configured_memory_window_for_session_history() -> None:
+    async def _scenario() -> None:
+        provider = FakeProviderWithSamplingCapture()
+        sessions = SessionStoreCapture()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory_window=7,
+        )
+        out = await engine.run(session_id="cli:memory-window", user_text="hello")
+        assert out.text == "ok"
+        assert sessions.last_limit == 7
 
     asyncio.run(_scenario())
 

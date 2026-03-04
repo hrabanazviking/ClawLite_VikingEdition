@@ -201,6 +201,7 @@ class AgentEngine:
         max_tool_calls_per_turn: int = 80,
         max_tool_result_chars: int = 4000,
         max_progress_events_per_turn: int = 120,
+        memory_window: int = 20,
         reasoning_effort_default: str | None = None,
         loop_detection: LoopDetectionSettings | None = None,
     ) -> None:
@@ -222,6 +223,7 @@ class AgentEngine:
         self.max_tool_calls_per_turn = max(1, int(max_tool_calls_per_turn))
         self.max_tool_result_chars = max(32, int(max_tool_result_chars))
         self.max_progress_events_per_turn = max(1, int(max_progress_events_per_turn))
+        self.memory_window = max(1, int(memory_window))
         self.reasoning_effort_default = self._normalize_reasoning_effort(reasoning_effort_default)
         resolved_loop = loop_detection or LoopDetectionSettings()
         critical_threshold = max(1, int(resolved_loop.critical_threshold))
@@ -532,7 +534,7 @@ class AgentEngine:
         run_log.info("processing message chars={}", len(user_text))
         budget = self._resolve_turn_budget(turn_budget)
         progress_counter = [0]
-        history = self.sessions.read(session_id, limit=20)
+        history = self.sessions.read(session_id, limit=self.memory_window)
         memories = [row.text for row in self.memory.search(user_text, limit=6)]
         skills = self.skills_loader.render_for_prompt()
         always_names = [item.name for item in self.skills_loader.always_on()]

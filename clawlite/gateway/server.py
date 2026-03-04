@@ -408,6 +408,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         max_iterations=config.agents.defaults.max_tool_iterations,
         max_tokens=config.agents.defaults.max_tokens,
         temperature=config.agents.defaults.temperature,
+        memory_window=config.agents.defaults.memory_window,
         reasoning_effort_default=config.agents.defaults.reasoning_effort,
         loop_detection=LoopDetectionSettings(
             enabled=config.tools.loop_detection.enabled,
