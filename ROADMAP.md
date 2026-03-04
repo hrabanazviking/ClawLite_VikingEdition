@@ -51,3 +51,27 @@
 - [ ] Subagent orchestration controls.
 - [ ] Memory/session retention and compaction.
 - [ ] Multi-channel concurrency optimization.
+
+## Plano do usuário — objetivos "100%" (execução integrada)
+
+### Mapeamento prático
+- **Telegram 100% (typing, formatting, robust delivery)** — **Status: parcial** (`P1` + `FUTURE`, paridade `NEXT`)  
+  Critério 100%: typing indicator em tempo real, formatação consistente Markdown/HTML segura, retries com backoff + idempotência, confirmação de entrega e fallback de erro observável por mensagem.
+- **Core 100% (Memory, Agents, Heartbeat, Soul, Tools, User) com autonomia nível OpenClaw** — **Status: parcial** (`P0` + `P1`, paridade `NOW`/`NEXT`)  
+  Critério 100%: heartbeat estável 24/7 com estado persistido, memória curta+longa com recuperação por sessão, loop de agente proativo sem intervenção manual, políticas de tools por canal já aplicadas e fluxo usuário-sessão auditável ponta a ponta.
+- **Providers 100% (robust API handling)** — **Status: parcial** (`P1` + `P2`, paridade `NEXT`)  
+  Critério 100%: timeouts/retries/circuit-breaker por provider, classificação determinística de erros (auth, quota, rate, transient, fatal), fallback configurável entre providers e testes de integração cobrindo falhas reais.
+- **Skills 100%** — **Status: parcial** (`P2`, paridade `NEXT`)  
+  Critério 100%: discovery confiável, execução isolada com diagnóstico claro, contratos de entrada/saída validados e cobertura de testes para skills críticas.
+- **Autonomy 100%** — **Status: parcial** (`P1`, paridade `NEXT`)  
+  Critério 100%: operação contínua sem operador, recuperação automática após falha, decisões proativas com limites de segurança e observabilidade mínima para incidentes.
+- **Subagents 100%** — **Status: parcial** (`FUTURE`)  
+  Critério 100%: orquestração de subagentes com roteamento por tarefa, isolamento de contexto, controle de concorrência e síntese final consistente no agente principal.
+- **Futuro: memória avançada + modo sem aprovação (notificação-only) + self-improvement** — **Status: ausente** (`FUTURE`)  
+  Critério 100%: memória semântica com compactação/retensão, política operacional `no-approval` com trilha de auditoria e notificações passivas, e ciclo de auto-melhoria orientado por métricas sem quebrar guardrails de segurança.
+
+### Ordem de execução sugerida (curta)
+1. Fechar `P0` do core e estabilizar operação 24/7 (`P1`) para base de autonomia.
+2. Completar Telegram + providers robustos para confiabilidade de canal e inferência.
+3. Consolidar skills e autonomia proativa com observabilidade estruturada.
+4. Entrar em `FUTURE` com subagentes, memória avançada e modo `no-approval` com notificação-only.
