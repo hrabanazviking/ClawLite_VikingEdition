@@ -416,6 +416,8 @@ Request:
 
 Alias compatível: `POST /api/message` (mesma request/response e mesma política de autenticação).
 
+Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), preservando o fluxo normal de envio e inline keyboard.
+
 ## `GET /v1/status`
 
 Estado do control-plane do gateway.

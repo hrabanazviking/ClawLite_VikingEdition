@@ -147,6 +147,65 @@ def test_message_tool_invalid_buttons_raises_value_error() -> None:
     asyncio.run(_scenario())
 
 
+def test_message_tool_maps_telegram_edit_action_to_metadata_bridge() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+        out = await tool.run(
+            {
+                "channel": "telegram",
+                "target": "1",
+                "action": "edit",
+                "message_id": 42,
+                "text": "updated",
+            },
+            ToolContext(session_id="s"),
+        )
+        assert out.startswith("sent:telegram")
+        metadata = api.calls[-1]["metadata"]
+        assert metadata["_telegram_action"] == "edit"
+        assert metadata["_telegram_action_message_id"] == 42
+
+    asyncio.run(_scenario())
+
+
+def test_message_tool_telegram_action_constraints_raise_value_error() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+
+        try:
+            await tool.run(
+                {
+                    "channel": "telegram",
+                    "target": "1",
+                    "action": "delete",
+                    "text": "",
+                },
+                ToolContext(session_id="s"),
+            )
+            raise AssertionError("expected ValueError for missing message_id")
+        except ValueError as exc:
+            assert "message_id" in str(exc)
+
+        try:
+            await tool.run(
+                {
+                    "channel": "slack",
+                    "target": "general",
+                    "action": "edit",
+                    "message_id": 1,
+                    "text": "x",
+                },
+                ToolContext(session_id="s"),
+            )
+            raise AssertionError("expected ValueError for non-telegram action")
+        except ValueError as exc:
+            assert "telegram" in str(exc)
+
+    asyncio.run(_scenario())
+
+
 def test_spawn_tool() -> None:
     async def _scenario() -> None:
         manager = SubagentManager()

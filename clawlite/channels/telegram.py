@@ -413,6 +413,10 @@ class TelegramChannel(BaseChannel):
             "message_reaction_emitted_count": 0,
             "policy_blocked_count": 0,
             "policy_allowed_count": 0,
+            "action_edit_count": 0,
+            "action_delete_count": 0,
+            "action_react_count": 0,
+            "action_create_topic_count": 0,
         }
         self._send_auth_breaker_seen_open = False
         self._typing_auth_breaker_seen_open = False
@@ -1416,12 +1420,125 @@ class TelegramChannel(BaseChannel):
             raise ValueError("telegram target(chat_id) is required")
         caller_metadata = metadata if isinstance(metadata, dict) else None
         metadata_payload = dict(caller_metadata or {})
-        message_thread_id = self._coerce_thread_id(metadata_payload.get("message_thread_id", target_thread_id))
-        await self._stop_typing_keepalive(chat_id=chat_id, message_thread_id=message_thread_id)
+        action = str(metadata_payload.get("_telegram_action", metadata_payload.get("telegram_action", "send")) or "send").strip().lower()
+        if action not in {"send", "reply", "edit", "delete", "react", "create_topic"}:
+            action = "send"
+
         if self.bot is None:
             from telegram import Bot
 
             self.bot = Bot(token=self.token)
+
+        action_message_id = metadata_payload.get(
+            "_telegram_action_message_id",
+            metadata_payload.get("telegram_action_message_id", metadata_payload.get("message_id")),
+        )
+        try:
+            action_message_id = int(action_message_id) if action_message_id is not None else None
+        except (TypeError, ValueError):
+            action_message_id = None
+
+        action_emoji = str(
+            metadata_payload.get(
+                "_telegram_action_emoji",
+                metadata_payload.get("telegram_action_emoji", metadata_payload.get("emoji", "")),
+            )
+            or ""
+        ).strip()
+        action_topic_name = str(
+            metadata_payload.get(
+                "_telegram_action_topic_name",
+                metadata_payload.get("telegram_action_topic_name", metadata_payload.get("topic_name", "")),
+            )
+            or ""
+        ).strip()
+        action_topic_icon_custom_emoji_id = str(
+            metadata_payload.get(
+                "_telegram_action_topic_icon_custom_emoji_id",
+                metadata_payload.get("telegram_action_topic_icon_custom_emoji_id", ""),
+            )
+            or ""
+        ).strip()
+        action_topic_icon_color = metadata_payload.get(
+            "_telegram_action_topic_icon_color",
+            metadata_payload.get("telegram_action_topic_icon_color"),
+        )
+        try:
+            action_topic_icon_color = int(action_topic_icon_color) if action_topic_icon_color is not None else None
+        except (TypeError, ValueError):
+            action_topic_icon_color = None
+
+        if action == "edit":
+            if action_message_id is None:
+                raise ValueError("telegram action edit requires message_id")
+            if not str(text or "").strip():
+                raise ValueError("telegram action edit requires non-empty text")
+            if not hasattr(self.bot, "edit_message_text"):
+                raise ValueError("telegram:action_unsupported:edit")
+            payload_text = markdown_to_telegram_html(text)
+            payload_parse_mode: str | None = "HTML"
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=action_message_id,
+                    text=payload_text,
+                    parse_mode=payload_parse_mode,
+                )
+            except Exception as exc:
+                if not _is_formatting_error(exc):
+                    raise
+                await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=action_message_id,
+                    text=html.escape(text, quote=False),
+                    parse_mode=None,
+                )
+            self._signals["action_edit_count"] += 1
+            return f"telegram:edited:{action_message_id}"
+
+        if action == "delete":
+            if action_message_id is None:
+                raise ValueError("telegram action delete requires message_id")
+            if not hasattr(self.bot, "delete_message"):
+                raise ValueError("telegram:action_unsupported:delete")
+            await self.bot.delete_message(chat_id=chat_id, message_id=action_message_id)
+            self._signals["action_delete_count"] += 1
+            return f"telegram:deleted:{action_message_id}"
+
+        if action == "react":
+            if action_message_id is None:
+                raise ValueError("telegram action react requires message_id")
+            if not action_emoji:
+                raise ValueError("telegram action react requires emoji")
+            if not hasattr(self.bot, "set_message_reaction"):
+                raise ValueError("telegram:action_unsupported:react")
+            await self.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=action_message_id,
+                reaction=[{"type": "emoji", "emoji": action_emoji}],
+            )
+            self._signals["action_react_count"] += 1
+            return f"telegram:reacted:{action_message_id}"
+
+        if action == "create_topic":
+            if not action_topic_name:
+                raise ValueError("telegram action create_topic requires topic_name")
+            if not hasattr(self.bot, "create_forum_topic"):
+                raise ValueError("telegram:action_unsupported:create_topic")
+            payload: dict[str, Any] = {"chat_id": chat_id, "name": action_topic_name}
+            if action_topic_icon_color is not None:
+                payload["icon_color"] = action_topic_icon_color
+            if action_topic_icon_custom_emoji_id:
+                payload["icon_custom_emoji_id"] = action_topic_icon_custom_emoji_id
+            topic_result = await self.bot.create_forum_topic(**payload)
+            thread_id = self._coerce_thread_id(getattr(topic_result, "message_thread_id", None)) or 0
+            self._signals["action_create_topic_count"] += 1
+            return f"telegram:topic_created:{thread_id}"
+
+        if action == "reply" and metadata_payload.get("reply_to_message_id") is None and action_message_id is not None:
+            metadata_payload["reply_to_message_id"] = action_message_id
+        message_thread_id = self._coerce_thread_id(metadata_payload.get("message_thread_id", target_thread_id))
+        await self._stop_typing_keepalive(chat_id=chat_id, message_thread_id=message_thread_id)
         chunks = split_message(text)
         policy = self._send_retry_policy.normalized()
         reply_to_message_id = metadata_payload.get("reply_to_message_id", metadata_payload.get("message_id"))

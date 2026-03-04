@@ -62,6 +62,7 @@ Notas:
 - Contadores agregados de decisao de politica ficam em `engine.channels.telegram_signals`: `policy_allowed_count` e `policy_blocked_count`.
 - Telegram ingere tambem updates de canal `channel_post` e `edited_channel_post` (polling e webhook) pelo mesmo pipeline inbound.
 - Tool `message` suporta `metadata` e `buttons` para inline keyboard do Telegram via `_telegram_inline_keyboard`.
+- Tool `message` suporta a surface de acoes Telegram via `action`/`metadata` (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) com bridge por `_telegram_action*`.
 - `/v1/diagnostics` e `/api/diagnostics` incluem `engine.turn_metrics` com contadores por turno (`turns_total`, `turns_success`, `turns_provider_errors`, `turns_cancelled`), `tool_calls_executed`, buckets de latencia e ultimo resultado/modelo.
 - Telemetria de provider/failover inclui classificacao de erro (`last_error_class`, `error_class_counts`, `last_primary_error_class`, `last_fallback_error_class`) para diagnostico operacional.
 - `queue.dead_letter_recent` expoe snapshots por mensagem (sem `text`) para inspecionar outcomes de fallback/dead-letter em ordem mais recente primeiro.

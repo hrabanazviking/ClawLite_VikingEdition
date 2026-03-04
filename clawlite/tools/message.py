@@ -30,6 +30,17 @@ class MessageTool(Tool):
                 "channel": {"type": "string"},
                 "target": {"type": "string"},
                 "text": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["send", "reply", "edit", "delete", "react", "create_topic"],
+                    "default": "send",
+                },
+                "message_id": {"type": "integer"},
+                "emoji": {"type": "string"},
+                "reply_to_message_id": {"type": "integer"},
+                "topic_name": {"type": "string"},
+                "topic_icon_color": {"type": "integer"},
+                "topic_icon_custom_emoji_id": {"type": "string"},
                 "metadata": {"type": "object"},
                 "buttons": {
                     "type": "array",
@@ -46,8 +57,18 @@ class MessageTool(Tool):
                     },
                 },
             },
-            "required": ["channel", "target", "text"],
+            "required": ["channel", "target"],
         }
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            out = int(value)
+        except (TypeError, ValueError):
+            return None
+        return out
 
     @staticmethod
     def _validate_buttons(buttons: Any) -> list[list[dict[str, str]]]:
@@ -83,8 +104,14 @@ class MessageTool(Tool):
         channel = str(arguments.get("channel", "")).strip() or ctx.channel
         target = str(arguments.get("target", "")).strip()
         text = str(arguments.get("text", "")).strip()
-        if not channel or not target or not text:
-            raise ValueError("channel, target and text are required")
+        action = str(arguments.get("action", "send") or "send").strip().lower()
+        allowed_actions = {"send", "reply", "edit", "delete", "react", "create_topic"}
+        if action not in allowed_actions:
+            raise ValueError("invalid action")
+        if not channel or not target:
+            raise ValueError("channel and target are required")
+        if action != "send" and channel != "telegram":
+            raise ValueError("telegram actions are only supported on telegram channel")
 
         raw_metadata = arguments.get("metadata")
         metadata: dict[str, Any] | None = None
@@ -92,6 +119,60 @@ class MessageTool(Tool):
             if not isinstance(raw_metadata, dict):
                 raise ValueError("metadata must be an object")
             metadata = dict(raw_metadata)
+
+        message_id = self._coerce_int(arguments.get("message_id"))
+        reply_to_message_id = self._coerce_int(arguments.get("reply_to_message_id"))
+        emoji = str(arguments.get("emoji", "") or "").strip()
+        topic_name = str(arguments.get("topic_name", "") or "").strip()
+        topic_icon_color = self._coerce_int(arguments.get("topic_icon_color"))
+        topic_icon_custom_emoji_id = str(arguments.get("topic_icon_custom_emoji_id", "") or "").strip()
+
+        if action == "send":
+            if not text:
+                raise ValueError("send action requires non-empty text")
+        elif action == "reply":
+            if not text:
+                raise ValueError("reply action requires non-empty text")
+            metadata_reply_to = self._coerce_int((metadata or {}).get("reply_to_message_id"))
+            effective_reply_to = (
+                reply_to_message_id
+                if reply_to_message_id is not None
+                else message_id
+                if message_id is not None
+                else metadata_reply_to
+            )
+            if effective_reply_to is None:
+                raise ValueError("reply action requires reply_to_message_id or message_id")
+            reply_to_message_id = effective_reply_to
+        elif action == "edit":
+            if not text or message_id is None:
+                raise ValueError("edit action requires non-empty text and message_id")
+        elif action == "delete":
+            if message_id is None:
+                raise ValueError("delete action requires message_id")
+        elif action == "react":
+            if message_id is None or not emoji:
+                raise ValueError("react action requires message_id and non-empty emoji")
+        elif action == "create_topic":
+            if not topic_name:
+                raise ValueError("create_topic action requires non-empty topic_name")
+
+        should_bridge_action = action != "send"
+        if should_bridge_action:
+            metadata = dict(metadata or {})
+            metadata["_telegram_action"] = action
+            if message_id is not None:
+                metadata["_telegram_action_message_id"] = message_id
+            if emoji:
+                metadata["_telegram_action_emoji"] = emoji
+            if topic_name:
+                metadata["_telegram_action_topic_name"] = topic_name
+            if topic_icon_color is not None:
+                metadata["_telegram_action_topic_icon_color"] = topic_icon_color
+            if topic_icon_custom_emoji_id:
+                metadata["_telegram_action_topic_icon_custom_emoji_id"] = topic_icon_custom_emoji_id
+            if action == "reply" and reply_to_message_id is not None:
+                metadata["reply_to_message_id"] = reply_to_message_id
 
         if "buttons" in arguments and arguments.get("buttons") is not None:
             keyboard = self._validate_buttons(arguments.get("buttons"))

@@ -838,6 +838,136 @@ def test_telegram_send_supports_inline_keyboard_from_metadata() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_action_edit_dispatches_and_returns_marker() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def edit_message_text(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        out = await channel.send(
+            target="42",
+            text="**patched**",
+            metadata={"_telegram_action": "edit", "_telegram_action_message_id": 77},
+        )
+
+        assert out == "telegram:edited:77"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["chat_id"] == "42"
+        assert bot.calls[0]["message_id"] == 77
+        assert channel.signals()["action_edit_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_action_delete_dispatches_and_returns_marker() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def delete_message(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        out = await channel.send(
+            target="42",
+            text="ignored",
+            metadata={"_telegram_action": "delete", "_telegram_action_message_id": 88},
+        )
+
+        assert out == "telegram:deleted:88"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["chat_id"] == "42"
+        assert bot.calls[0]["message_id"] == 88
+        assert channel.signals()["action_delete_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_action_react_dispatches_and_returns_marker() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def set_message_reaction(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        out = await channel.send(
+            target="42",
+            text="ignored",
+            metadata={
+                "_telegram_action": "react",
+                "_telegram_action_message_id": 99,
+                "_telegram_action_emoji": ":fire:",
+            },
+        )
+
+        assert out == "telegram:reacted:99"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["chat_id"] == "42"
+        assert bot.calls[0]["message_id"] == 99
+        assert bot.calls[0]["reaction"] == [{"type": "emoji", "emoji": ":fire:"}]
+        assert channel.signals()["action_react_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_action_create_topic_dispatches_and_returns_marker() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def create_forum_topic(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(message_thread_id=123)
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        out = await channel.send(
+            target="-10042",
+            text="ignored",
+            metadata={
+                "_telegram_action": "create_topic",
+                "_telegram_action_topic_name": "Ops",
+                "_telegram_action_topic_icon_color": 7322096,
+            },
+        )
+
+        assert out == "telegram:topic_created:123"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["chat_id"] == "-10042"
+        assert bot.calls[0]["name"] == "Ops"
+        assert bot.calls[0]["icon_color"] == 7322096
+        assert channel.signals()["action_create_topic_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_retries_transient_failures() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(
