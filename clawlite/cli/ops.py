@@ -284,6 +284,99 @@ def provider_logout_openai_codex(config: AppConfig, *, config_path: str | Path |
     }
 
 
+SUPPORTED_PROVIDER_USE: tuple[str, ...] = (
+    "openai-codex",
+    "openai",
+    "gemini",
+    "groq",
+    "deepseek",
+    "anthropic",
+    "openrouter",
+    "custom",
+)
+
+
+def provider_use_model(
+    config: AppConfig,
+    *,
+    config_path: str | Path | None,
+    provider: str,
+    model: str,
+    fallback_model: str = "",
+    clear_fallback: bool = False,
+) -> dict[str, Any]:
+    provider_norm = str(provider or "").strip().lower().replace("_", "-")
+    model_norm = str(model or "").strip()
+    fallback_norm = str(fallback_model or "").strip()
+
+    if not provider_norm:
+        return {
+            "ok": False,
+            "error": "provider_required",
+        }
+
+    if provider_norm not in SUPPORTED_PROVIDER_USE:
+        return {
+            "ok": False,
+            "error": f"unsupported_provider:{provider_norm}",
+            "supported": list(SUPPORTED_PROVIDER_USE),
+        }
+
+    if not model_norm:
+        return {
+            "ok": False,
+            "error": "model_required",
+            "provider": provider_norm,
+        }
+
+    if fallback_norm and clear_fallback:
+        return {
+            "ok": False,
+            "error": "invalid_fallback_options",
+            "detail": "Cannot combine --fallback-model with --clear-fallback.",
+            "provider": provider_norm,
+            "model": model_norm,
+        }
+
+    if provider_norm == "openai-codex":
+        model_lower = model_norm.lower()
+        if not (model_lower.startswith("openai-codex/") or model_lower.startswith("openai_codex/")):
+            return {
+                "ok": False,
+                "error": "provider_model_mismatch",
+                "provider": provider_norm,
+                "model": model_norm,
+                "expected": "openai-codex/*",
+            }
+    else:
+        expected_provider = provider_norm.replace("-", "_")
+        detected_provider = detect_provider_name(model_norm)
+        if detected_provider != expected_provider:
+            return {
+                "ok": False,
+                "error": "provider_model_mismatch",
+                "provider": provider_norm,
+                "model": model_norm,
+                "detected_provider": detected_provider,
+            }
+
+    config.provider.model = model_norm
+    config.agents.defaults.model = model_norm
+    if fallback_norm:
+        config.provider.fallback_model = fallback_norm
+    elif clear_fallback:
+        config.provider.fallback_model = ""
+
+    saved_path = save_config(config, path=config_path)
+    return {
+        "ok": True,
+        "saved_path": str(saved_path),
+        "provider": provider_norm,
+        "model": str(config.provider.model),
+        "fallback_model": str(config.provider.fallback_model or ""),
+    }
+
+
 def provider_validation(config: AppConfig) -> dict[str, Any]:
     model = str(config.agents.defaults.model or config.provider.model).strip() or config.provider.model
     provider_name = detect_provider_name(model)

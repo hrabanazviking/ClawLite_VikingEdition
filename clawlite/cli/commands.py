@@ -15,6 +15,7 @@ from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_openai_codex
 from clawlite.cli.ops import provider_logout_openai_codex
 from clawlite.cli.ops import provider_status
+from clawlite.cli.ops import provider_use_model
 from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
 from clawlite.core.skills import SkillsLoader
@@ -152,6 +153,20 @@ def cmd_provider_logout(args: argparse.Namespace) -> int:
         return 2
     cfg = load_config(args.config)
     payload = provider_logout_openai_codex(cfg, config_path=args.config)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_provider_use(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = provider_use_model(
+        cfg,
+        config_path=args.config,
+        provider=str(args.provider or ""),
+        model=str(args.model or ""),
+        fallback_model=str(args.fallback_model or ""),
+        clear_fallback=bool(args.clear_fallback),
+    )
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
 
@@ -440,6 +455,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_logout = provider_sub.add_parser("logout", help="Clear provider auth from config")
     p_provider_logout.add_argument("provider", nargs="?", default="openai-codex", choices=["openai-codex"])
     p_provider_logout.set_defaults(handler=cmd_provider_logout)
+
+    p_provider_use = provider_sub.add_parser("use", help="Switch active provider/model and persist config")
+    p_provider_use.add_argument("provider")
+    p_provider_use.add_argument("--model", required=True)
+    p_provider_use.add_argument("--fallback-model", default="")
+    p_provider_use.add_argument("--clear-fallback", action="store_true")
+    p_provider_use.set_defaults(handler=cmd_provider_use)
 
     p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
     p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")

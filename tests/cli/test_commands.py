@@ -571,6 +571,142 @@ def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, ca
     assert payload == {"ok": False, "error": "unsupported_provider:unknown-provider"}
 
 
+def test_cli_provider_use_success_updates_config_and_returns_rc0(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "gemini/gemini-2.5-flash", "fallback_model": "openai/gpt-4.1-mini"},
+                "agents": {"defaults": {"model": "gemini/gemini-2.5-flash"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "openai",
+            "--model",
+            "openai/gpt-4.1-mini",
+            "--fallback-model",
+            "openai/gpt-4o-mini",
+        ]
+    )
+    assert rc_use == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["provider"] == "openai"
+    assert payload["model"] == "openai/gpt-4.1-mini"
+    assert payload["fallback_model"] == "openai/gpt-4o-mini"
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["provider"]["model"] == "openai/gpt-4.1-mini"
+    assert persisted["agents"]["defaults"]["model"] == "openai/gpt-4.1-mini"
+    assert persisted["provider"]["fallback_model"] == "openai/gpt-4o-mini"
+
+
+def test_cli_provider_use_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "unknown-provider",
+            "--model",
+            "openai/gpt-4.1-mini",
+        ]
+    )
+    assert rc_use == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "unsupported_provider:unknown-provider"
+
+
+def test_cli_provider_use_provider_model_mismatch_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "gemini",
+            "--model",
+            "openai/gpt-4.1-mini",
+        ]
+    )
+    assert rc_use == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "provider_model_mismatch"
+    assert payload["provider"] == "gemini"
+
+
+def test_cli_provider_use_clear_fallback_clears_config(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4.1-mini", "fallback_model": "openai/gpt-4o-mini"},
+                "agents": {"defaults": {"model": "openai/gpt-4.1-mini"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "openai",
+            "--model",
+            "openai/gpt-4.1-mini",
+            "--clear-fallback",
+        ]
+    )
+    assert rc_use == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["fallback_model"] == ""
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["provider"]["fallback_model"] == ""
+
+
 def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -604,6 +740,22 @@ def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, cap
         ]
     )
     assert rc_login == 0
+    assert "clawlite.gateway.server" not in sys.modules
+
+    capsys.readouterr()
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "openai-codex",
+            "--model",
+            "openai-codex/gpt-5.3-codex",
+        ]
+    )
+    assert rc_use == 0
     assert "clawlite.gateway.server" not in sys.modules
 
 

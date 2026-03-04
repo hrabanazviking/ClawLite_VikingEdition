@@ -111,6 +111,13 @@ Notas:
 - Em erro de token ausente/expirado, gateway retorna orientação explícita para `clawlite provider login openai-codex`.
 - `clawlite provider status` também suporta providers de API key (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`) com payload seguro de origem/configuração.
 
+Troca segura de provider/modelo ativo:
+
+```bash
+clawlite provider use openai --model openai/gpt-4.1-mini --fallback-model openai/gpt-4o-mini
+clawlite provider use openai --model openai/gpt-4.1-mini --clear-fallback
+```
+
 ## Incident checklist
 
 1. Confirmar `/health`.
