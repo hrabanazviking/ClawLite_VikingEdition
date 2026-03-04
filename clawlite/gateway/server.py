@@ -413,8 +413,15 @@ class _MessageAPI:
     def __init__(self, manager: ChannelManager) -> None:
         self.manager = manager
 
-    async def send(self, *, channel: str, target: str, text: str) -> str:
-        return await self.manager.send(channel=channel, target=target, text=text)
+    async def send(
+        self,
+        *,
+        channel: str,
+        target: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        return await self.manager.send(channel=channel, target=target, text=text, metadata=metadata)
 
 
 def _provider_config(config: AppConfig) -> dict[str, Any]:

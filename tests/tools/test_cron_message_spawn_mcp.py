@@ -41,7 +41,11 @@ class FakeCronAPI:
 
 
 class FakeMsgAPI:
-    async def send(self, *, channel: str, target: str, text: str) -> str:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def send(self, *, channel: str, target: str, text: str, metadata: dict | None = None) -> str:
+        self.calls.append({"channel": channel, "target": target, "text": text, "metadata": metadata})
         return f"sent:{channel}:{target}:{text}"
 
 
@@ -87,9 +91,58 @@ def test_cron_tool_add_and_list() -> None:
 
 def test_message_tool() -> None:
     async def _scenario() -> None:
-        tool = MessageTool(FakeMsgAPI())
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
         out = await tool.run({"channel": "telegram", "target": "1", "text": "hello"}, ToolContext(session_id="s"))
         assert out.startswith("sent:telegram")
+        assert api.calls[-1]["metadata"] is None
+
+    asyncio.run(_scenario())
+
+
+def test_message_tool_maps_buttons_to_telegram_metadata() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+        out = await tool.run(
+            {
+                "channel": "telegram",
+                "target": "1",
+                "text": "choose",
+                "metadata": {"message_thread_id": 7},
+                "buttons": [[{"text": "Approve", "callback_data": "approve:1"}, {"text": "Open", "url": "https://example.com"}]],
+            },
+            ToolContext(session_id="s"),
+        )
+        assert out.startswith("sent:telegram")
+        sent_metadata = api.calls[-1]["metadata"]
+        assert sent_metadata["message_thread_id"] == 7
+        assert sent_metadata["_telegram_inline_keyboard"][0][0]["text"] == "Approve"
+        assert sent_metadata["_telegram_inline_keyboard"][0][0]["callback_data"] == "approve:1"
+        assert sent_metadata["_telegram_inline_keyboard"][0][1]["text"] == "Open"
+        assert sent_metadata["_telegram_inline_keyboard"][0][1]["url"] == "https://example.com"
+
+    asyncio.run(_scenario())
+
+
+def test_message_tool_invalid_buttons_raises_value_error() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+
+        try:
+            await tool.run(
+                {
+                    "channel": "telegram",
+                    "target": "1",
+                    "text": "choose",
+                    "buttons": [[{"text": "Broken", "callback_data": "x", "url": "https://example.com"}]],
+                },
+                ToolContext(session_id="s"),
+            )
+            raise AssertionError("expected ValueError for invalid buttons")
+        except ValueError as exc:
+            assert "exactly one" in str(exc)
 
     asyncio.run(_scenario())
 

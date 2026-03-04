@@ -83,6 +83,7 @@
 - Outbound delivery now includes bounded idempotency suppression with explicit confirmation/final-failure visibility (`delivery_confirmed`, `delivery_failed_final`, `idempotency_suppressed`).
 - Telegram outbound now captures per-message delivery receipts (`message_ids`, `last_message_id`) and channel delivery diagnostics include bounded per-message outcome snapshots via `channels_delivery.recent`.
 - Telegram parity increment: inbound `callback_query` updates now flow through allowlist+ack path with channel signals, and outbound supports metadata-driven inline keyboards.
+- Message tool parity increment: `message` now accepts `metadata` + `buttons` and bridges inline keyboard payloads to Telegram via gateway/channel metadata path.
 
 ### FUTURE (Scale + polish)
 
