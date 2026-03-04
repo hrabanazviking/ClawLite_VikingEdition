@@ -494,6 +494,18 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "dead_letter_recent" in payload["queue"]
         assert isinstance(payload["queue"]["dead_letter_recent"], list)
         assert "channels" in payload
+        assert "channels_delivery" in payload
+        channels_delivery = payload["channels_delivery"]
+        assert set(channels_delivery.keys()) >= {"total", "per_channel"}
+        assert set(channels_delivery["total"].keys()) >= {
+            "attempts",
+            "success",
+            "failures",
+            "dead_lettered",
+            "replayed",
+            "channel_unavailable",
+            "policy_dropped",
+        }
         assert "cron" in payload
         assert "heartbeat" in payload
         assert "bootstrap" in payload

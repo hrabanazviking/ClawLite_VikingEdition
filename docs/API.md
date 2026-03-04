@@ -432,6 +432,7 @@ Campos baseline de contrato:
 - `generated_at`: timestamp UTC ISO-8601 da geracao do snapshot.
 - `uptime_s`: uptime do processo do gateway em segundos.
 - `contract_version`: versao estavel do contrato HTTP do gateway.
+- `channels_delivery`: contadores de entrega agregados do `ChannelManager` (`total` e `per_channel`).
 - `http`: telemetria HTTP em memoria (aditiva) com `total_requests`,
   `in_flight`, `by_method`, `by_path`, `by_status` e `latency_ms`
   (`count`, `min`, `max`, `avg`).

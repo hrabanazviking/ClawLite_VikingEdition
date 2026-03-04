@@ -79,6 +79,7 @@ class DiagnosticsResponse(BaseModel):
     control_plane: ControlPlaneResponse
     queue: dict[str, Any]
     channels: dict[str, Any]
+    channels_delivery: dict[str, Any] = {}
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
     bootstrap: dict[str, Any]
@@ -936,6 +937,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             control_plane=_control_plane_payload(generated_at),
             queue=runtime.bus.stats(),
             channels=runtime.channels.status(),
+            channels_delivery=runtime.channels.delivery_diagnostics(),
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
             bootstrap=_bootstrap_status_snapshot(),

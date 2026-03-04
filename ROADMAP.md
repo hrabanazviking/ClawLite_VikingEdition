@@ -79,6 +79,7 @@
 - Turn-level structured observability added to diagnostics (`engine.turn_metrics`) with outcome counters, tool-call totals, latency buckets, and latest turn model/outcome.
 - Provider/config CLI capability expanded with deterministic `clawlite provider use` (safe provider/model switch + fallback set/clear) and structured `rc` semantics.
 - Per-message fallback observability added via queue dead-letter snapshots (`queue.dead_letter_recent`) in gateway diagnostics for safe operator inspection.
+- Channel delivery manager counters are now exposed in gateway diagnostics as `channels_delivery` (`total` + `per_channel`).
 
 ### FUTURE (Scale + polish)
 
