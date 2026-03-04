@@ -7,6 +7,7 @@ import math
 import re
 import asyncio
 import threading
+import unicodedata
 import uuid
 from collections import Counter
 from contextlib import contextmanager
@@ -31,10 +32,10 @@ CURATION_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 EMOTIONAL_MARKERS: dict[str, tuple[str, ...]] = {
-    "positive": ("feliz", "animado", "grato", "happy", "excited", "awesome", "otimo", "great"),
-    "negative": ("triste", "ansioso", "irritado", "chateado", "sad", "angry", "stressed", "frustrated"),
-    "urgent": ("urgente", "asap", "imediato", "agora", "critical", "critico", "prazo"),
-    "calm": ("calmo", "tranquilo", "relaxado", "peaceful", "serene"),
+    "excited": ("🎉", "incrível", "amei", "!!", "consegui", "funcionou", "perfeito"),
+    "frustrated": ("não funciona", "odeio", "absurdo", "de novo isso", "erro", "falhou"),
+    "sad": ("triste", "mal", "cansado", "desanimado", "difícil"),
+    "positive": ("ótimo", "obrigado", "ajudou", "certo", "legal"),
 }
 PROFILE_TOPIC_STOPWORDS: frozenset[str] = frozenset(
     {
@@ -835,13 +836,26 @@ class MemoryStore:
 
     @staticmethod
     def _detect_emotional_tone(text: str) -> str:
-        clean = str(text or "").lower()
-        if not clean:
+        raw_text = str(text or "")
+        if not raw_text.strip():
             return "neutral"
+
+        def _normalize_for_emotion(value: str) -> str:
+            lowered = str(value or "").strip().lower()
+            if not lowered:
+                return ""
+            normalized = unicodedata.normalize("NFKD", lowered)
+            return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+        clean = _normalize_for_emotion(raw_text)
         best_label = "neutral"
         best_score = 0
         for label, markers in EMOTIONAL_MARKERS.items():
-            score = sum(1 for marker in markers if marker in clean)
+            score = 0
+            for marker in markers:
+                marker_clean = _normalize_for_emotion(marker)
+                if marker_clean and marker_clean in clean:
+                    score += 1
             if score > best_score:
                 best_score = score
                 best_label = label
@@ -850,7 +864,7 @@ class MemoryStore:
     @staticmethod
     def _guidance_label_from_tone(tone: str) -> str:
         clean = str(tone or "").strip().lower()
-        if clean in {"frustrated", "negative", "urgent"}:
+        if clean in {"frustrated", "sad", "negative", "urgent"}:
             return "frustrated"
         if clean in {"excited", "positive"}:
             return "excited"

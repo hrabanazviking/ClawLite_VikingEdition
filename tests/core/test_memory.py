@@ -739,7 +739,17 @@ def test_memory_emotional_tracking_flag_controls_add_tone_detection(tmp_path: Pa
 
     enabled_store = MemoryStore(tmp_path / "enabled.jsonl", emotional_tracking=True)
     enabled_row = enabled_store.add("estou triste e ansioso com o prazo", source="user")
-    assert enabled_row.emotional_tone == "negative"
+    assert enabled_row.emotional_tone == "sad"
+
+
+def test_memory_detect_emotional_tone_scores_frustrated_phrase() -> None:
+    tone = MemoryStore._detect_emotional_tone("Não funciona, erro de novo isso")
+    assert tone == "frustrated"
+
+
+def test_memory_detect_emotional_tone_scores_excited_phrase() -> None:
+    tone = MemoryStore._detect_emotional_tone("Incrível!! Funcionou, consegui perfeito")
+    assert tone == "excited"
 
 
 def test_memory_snapshot_rollback_and_diff(tmp_path: Path) -> None:
