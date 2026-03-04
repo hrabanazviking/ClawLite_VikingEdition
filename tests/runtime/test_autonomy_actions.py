@@ -1,0 +1,418 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from clawlite.runtime.autonomy_actions import AutonomyActionController
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_allowlisted_action_executes() -> None:
+    clock = _Clock()
+    calls = {"count": 0}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            calls["count"] += 1
+            return {"ok": True}
+
+        status = await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        assert calls["count"] == 1
+        assert status["totals"]["executed"] == 1
+        assert status["totals"]["succeeded"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_unknown_and_denylisted_actions_blocked() -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(now_monotonic=clock.monotonic)
+
+        status_unknown = await controller.process('{"action":"do_anything","args":{}}', {})
+        assert status_unknown["totals"]["blocked"] == 1
+        assert status_unknown["totals"]["unknown_blocked"] == 1
+
+        status_denylisted = await controller.process('{"action":"delete_all","args":{}}', {})
+        assert status_denylisted["totals"]["blocked"] == 2
+        assert status_denylisted["totals"]["unknown_blocked"] == 2
+
+    asyncio.run(_scenario())
+
+
+def test_cooldown_blocks_repeat() -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(action_cooldown_s=120.0, now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            return {"ok": True}
+
+        await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        blocked = await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        assert blocked["totals"]["cooldown_blocked"] == 1
+        assert blocked["totals"]["blocked"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_rate_limit_blocks_after_threshold() -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(
+            action_cooldown_s=0.0,
+            action_rate_limit_per_hour=2,
+            now_monotonic=clock.monotonic,
+        )
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            return {"ok": True}
+
+        await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        clock.now += 1.0
+        await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        clock.now += 1.0
+        blocked = await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+
+        assert blocked["totals"]["rate_limited"] == 1
+        assert blocked["totals"]["blocked"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_dead_letter_replay_clamps_limit_and_forces_dry_run() -> None:
+    clock = _Clock()
+    captured: dict[str, object] = {}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(max_replay_limit=50, now_monotonic=clock.monotonic)
+
+        async def _replay(**kwargs: object) -> dict[str, bool]:
+            captured.update(kwargs)
+            return {"ok": True}
+
+        await controller.process(
+            '{"action":"dead_letter_replay_dry_run","args":{"limit":999,"channel":"telegram","dry_run":false}}',
+            {"dead_letter_replay_dry_run": _replay},
+        )
+
+        assert captured["limit"] == 50
+        assert captured["dry_run"] is True
+        assert captured["channel"] == "telegram"
+
+    asyncio.run(_scenario())
+
+
+def test_invalid_json_increments_parse_errors() -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(now_monotonic=clock.monotonic)
+        status = await controller.process("this is not valid action payload", {})
+        assert status["totals"]["parse_errors"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_low_confidence_quality_gate_blocks_action() -> None:
+    clock = _Clock()
+    calls = {"count": 0}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(min_action_confidence=0.8, now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            calls["count"] += 1
+            return {"ok": True}
+
+        status = await controller.process(
+            '{"action":"validate_provider","confidence":0.2,"args":{}}',
+            {"validate_provider": _validate_provider},
+        )
+        assert calls["count"] == 0
+        assert status["totals"]["quality_blocked"] == 1
+        assert status["totals"]["blocked"] == 1
+        assert status["totals"]["executed"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_contextual_penalty_can_block_high_base_confidence() -> None:
+    clock = _Clock()
+    calls = {"count": 0}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(min_action_confidence=0.8, now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            calls["count"] += 1
+            return {"ok": True}
+
+        status = await controller.process(
+            '{"action":"validate_provider","confidence":0.95,"args":{}}',
+            {"validate_provider": _validate_provider},
+            runtime_snapshot={
+                "queue": {"outbound_size": 100, "dead_letter_size": 0},
+                "supervisor": {"incident_count": 0, "consecutive_error_count": 0},
+                "channels": {"enabled_count": 2, "running_count": 1},
+                "provider": {"circuit_open": False},
+                "heartbeat": {"running": True},
+                "cron": {"running": True},
+            },
+        )
+
+        assert calls["count"] == 0
+        assert status["totals"]["quality_blocked"] == 1
+        assert status["totals"]["quality_penalty_applied"] == 1
+        audit = status["last_run"]["audits"][0]
+        assert audit["base_confidence"] == 0.95
+        assert audit["context_penalty"] > 0.0
+        assert audit["effective_confidence"] < 0.8
+
+    asyncio.run(_scenario())
+
+
+def test_contextual_penalty_mild_still_allows_action_and_tracks_penalty() -> None:
+    clock = _Clock()
+    calls = {"count": 0}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(min_action_confidence=0.8, now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            calls["count"] += 1
+            return {"ok": True}
+
+        status = await controller.process(
+            '{"action":"validate_provider","confidence":0.95,"args":{}}',
+            {"validate_provider": _validate_provider},
+            runtime_snapshot={
+                "queue": {"outbound_size": 25, "dead_letter_size": 0},
+                "supervisor": {"incident_count": 0, "consecutive_error_count": 0},
+                "channels": {"enabled_count": 2, "running_count": 2},
+                "provider": {"circuit_open": False},
+                "heartbeat": {"running": True},
+                "cron": {"running": True},
+            },
+        )
+
+        assert calls["count"] == 1
+        assert status["totals"]["executed"] == 1
+        assert status["totals"]["quality_penalty_applied"] == 1
+        audit = status["last_run"]["audits"][0]
+        assert audit["base_confidence"] == 0.95
+        assert audit["context_penalty"] > 0.0
+        assert audit["effective_confidence"] >= 0.8
+
+    asyncio.run(_scenario())
+
+
+def test_degraded_snapshot_blocks_non_diagnostics_and_allows_diagnostics() -> None:
+    clock = _Clock()
+    calls = {"diag": 0, "provider": 0}
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(
+            max_actions_per_run=2,
+            degraded_backlog_threshold=10,
+            degraded_supervisor_error_threshold=3,
+            now_monotonic=clock.monotonic,
+        )
+
+        def _diagnostics_snapshot(**_: object) -> dict[str, bool]:
+            calls["diag"] += 1
+            return {"ok": True}
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            calls["provider"] += 1
+            return {"ok": True}
+
+        payload = json.dumps(
+            {
+                "actions": [
+                    {"action": "validate_provider", "args": {}},
+                    {"action": "diagnostics_snapshot", "args": {}},
+                ]
+            }
+        )
+        status = await controller.process(
+            payload,
+            {
+                "validate_provider": _validate_provider,
+                "diagnostics_snapshot": _diagnostics_snapshot,
+            },
+            runtime_snapshot={
+                "queue": {"outbound_size": 20, "dead_letter_size": 1},
+                "supervisor": {"incident_count": 0, "consecutive_error_count": 0},
+            },
+        )
+
+        assert calls["provider"] == 0
+        assert calls["diag"] == 1
+        assert status["totals"]["degraded_blocked"] == 1
+        assert status["totals"]["executed"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_audit_export_reads_persisted_entries(tmp_path: Path) -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        audit_path = tmp_path / "autonomy-actions-audit.jsonl"
+        controller = AutonomyActionController(audit_path=str(audit_path), now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            return {"ok": True}
+
+        await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+
+        exported = controller.export_audit(limit=10)
+        assert exported["ok"] is True
+        assert exported["path"] == str(audit_path)
+        assert exported["count"] >= 1
+        assert any(str(row.get("action", "")) == "validate_provider" for row in exported["entries"])
+
+    asyncio.run(_scenario())
+
+
+def test_simulate_returns_decision_trace_for_mixed_actions() -> None:
+    clock = _Clock()
+
+    controller = AutonomyActionController(max_actions_per_run=2, now_monotonic=clock.monotonic)
+    payload = json.dumps(
+        {
+            "actions": [
+                {"action": "validate_provider", "confidence": 0.9, "args": {}},
+                {"action": "delete_everything", "confidence": 0.9, "args": {}},
+            ]
+        }
+    )
+    simulation = controller.simulate(payload, executors={"validate_provider": lambda **_: {"ok": True}}, runtime_snapshot={})
+
+    assert simulation["parse_error"] is False
+    assert simulation["proposed"] == 2
+    assert simulation["allowed"] == 1
+    assert simulation["blocked"] == 1
+    assert simulation["policy"] in {"balanced", "conservative"}
+    first = simulation["actions"][0]
+    second = simulation["actions"][1]
+    assert first["decision"] == "allow"
+    assert first["gate"] == "all_gates_passed"
+    assert isinstance(first["trace"], list)
+    assert any(row.get("result") == "pass" for row in first["trace"])
+    assert "base_confidence" in first
+    assert "context_penalty" in first
+    assert "effective_confidence" in first
+    assert second["decision"] == "blocked"
+    assert second["gate"] == "allowlist"
+    assert isinstance(second["trace"], list)
+    assert any(row.get("result") == "block" for row in second["trace"])
+
+
+def test_simulate_is_side_effect_free_for_execution_counters() -> None:
+    clock = _Clock()
+    controller = AutonomyActionController(now_monotonic=clock.monotonic)
+
+    before = controller.status()["totals"]
+    assert before["executed"] == 0
+    assert before["succeeded"] == 0
+    assert before["simulated_runs"] == 0
+
+    controller.simulate('{"action":"validate_provider","args":{}}', executors={"validate_provider": lambda **_: {"ok": True}})
+    after = controller.status()["totals"]
+
+    assert after["executed"] == 0
+    assert after["succeeded"] == 0
+    assert after["simulated_runs"] == 1
+    assert after["simulated_actions"] == 1
+
+
+def test_explain_reports_risk_levels_recommendations_and_counts() -> None:
+    clock = _Clock()
+    controller = AutonomyActionController(max_actions_per_run=3, now_monotonic=clock.monotonic)
+
+    payload = json.dumps(
+        {
+            "actions": [
+                {"action": "validate_provider", "confidence": 0.95, "args": {}},
+                {"action": "validate_channels", "confidence": 0.4, "args": {}},
+                {"action": "delete_all", "confidence": 0.9, "args": {}},
+            ]
+        }
+    )
+    explanation = controller.explain(payload, runtime_snapshot={})
+
+    assert explanation["policy"] in {"balanced", "conservative"}
+    assert explanation["environment_profile"] in {"dev", "staging", "prod"}
+    assert explanation["overall_risk"] == "high"
+    assert explanation["risk_counts"] == {"low": 1, "medium": 1, "high": 1}
+
+    actions = explanation["actions"]
+    assert len(actions) == 3
+    assert actions[0]["risk_level"] == "low"
+    assert actions[1]["risk_level"] == "medium"
+    assert actions[2]["risk_level"] == "high"
+    assert all(isinstance(row["recommendation"], str) and row["recommendation"] for row in actions)
+
+    totals = controller.status()["totals"]
+    assert totals["explain_runs"] == 1
+
+
+def test_set_environment_profile_applies_preset_and_audits_policy_change() -> None:
+    clock = _Clock()
+    controller = AutonomyActionController(now_monotonic=clock.monotonic)
+
+    update = controller.set_environment_profile("prod", actor="ops", reason="tighten for release")
+
+    expected = AutonomyActionController.ENVIRONMENT_PRESETS["prod"]
+    assert update["new"]["environment_profile"] == "prod"
+    assert update["new"]["policy"] == expected["policy"]
+    assert update["new"]["action_cooldown_s"] == expected["action_cooldown_s"]
+    assert update["new"]["action_rate_limit_per_hour"] == expected["action_rate_limit_per_hour"]
+    assert update["new"]["min_action_confidence"] == expected["min_action_confidence"]
+    assert update["new"]["degraded_backlog_threshold"] == expected["degraded_backlog_threshold"]
+    assert update["new"]["degraded_supervisor_error_threshold"] == expected["degraded_supervisor_error_threshold"]
+
+    status = controller.status()
+    assert status["totals"]["policy_switches"] == 1
+    assert status["environment_profile"] == "prod"
+    assert status["policy"] == expected["policy"]
+
+    row = status["recent_audits"][-1]
+    assert row["kind"] == "policy_change"
+    assert row["actor"] == "ops"
+    assert row["reason"] == "tighten for release"
+    assert row["previous"]["environment_profile"] == "dev"
+    assert row["new"]["environment_profile"] == "prod"
+
+
+def test_process_audit_rows_include_trace_and_gate() -> None:
+    clock = _Clock()
+
+    async def _scenario() -> None:
+        controller = AutonomyActionController(now_monotonic=clock.monotonic)
+
+        def _validate_provider(**_: object) -> dict[str, bool]:
+            return {"ok": True}
+
+        status = await controller.process('{"action":"validate_provider","args":{}}', {"validate_provider": _validate_provider})
+        audit = status["last_run"]["audits"][0]
+        assert audit["gate"] == "execution"
+        assert isinstance(audit["trace"], list)
+        assert len(audit["trace"]) >= 1
+
+    asyncio.run(_scenario())

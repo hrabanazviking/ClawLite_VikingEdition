@@ -1,0 +1,61 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  coverage:
+    name: Pytest Coverage (Python 3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if python - <<'PY'
+          import pathlib
+          try:
+              import tomllib
+          except Exception:
+              import tomli as tomllib  # type: ignore
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))
+          optional = (data.get('project', {}) or {}).get('optional-dependencies', {}) or {}
+          raise SystemExit(0 if 'dev' in optional else 1)
+          PY
+          then
+            pip install -e ".[dev]"
+          else
+            pip install -e .
+          fi
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage
+        run: |
+          python -m pytest tests/ -q --tb=short \
+            --cov=clawlite \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
+      - name: Upload to Codecov (non-blocking)
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false

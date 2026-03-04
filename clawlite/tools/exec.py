@@ -15,6 +15,9 @@ setup_logging()
 class ExecTool(Tool):
     name = "exec"
     description = "Run shell command safely (no shell=True)."
+    DEFAULT_MAX_OUTPUT_CHARS = 65536
+    MIN_MAX_OUTPUT_CHARS = 1024
+    MAX_MAX_OUTPUT_CHARS = 1000000
 
     def __init__(
         self,
@@ -27,6 +30,7 @@ class ExecTool(Tool):
         allow_patterns: list[str] | None = None,
         deny_path_patterns: list[str] | None = None,
         allow_path_patterns: list[str] | None = None,
+        max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
     ) -> None:
         self.workspace_path = (Path(workspace_path).expanduser().resolve() if workspace_path else Path.cwd().resolve())
         self.restrict_to_workspace = bool(restrict_to_workspace)
@@ -46,6 +50,7 @@ class ExecTool(Tool):
         self.allow_patterns = [str(pattern) for pattern in (allow_patterns or []) if str(pattern).strip()]
         self.deny_path_patterns = [str(pattern) for pattern in (deny_path_patterns or []) if str(pattern).strip()]
         self.allow_path_patterns = [str(pattern) for pattern in (allow_path_patterns or []) if str(pattern).strip()]
+        self.max_output_chars = self._clamp_max_output_chars(max_output_chars)
 
     def args_schema(self) -> dict:
         return {
@@ -53,9 +58,27 @@ class ExecTool(Tool):
             "properties": {
                 "command": {"type": "string"},
                 "timeout": {"type": "number", "default": self.timeout_seconds},
+                "max_output_chars": {"type": "integer", "default": self.max_output_chars},
+                "maxOutputChars": {"type": "integer"},
             },
             "required": ["command"],
         }
+
+    @classmethod
+    def _clamp_max_output_chars(cls, value: object) -> int:
+        try:
+            resolved = int(float(value))
+        except (TypeError, ValueError):
+            resolved = cls.DEFAULT_MAX_OUTPUT_CHARS
+        resolved = max(cls.MIN_MAX_OUTPUT_CHARS, resolved)
+        return min(cls.MAX_MAX_OUTPUT_CHARS, resolved)
+
+    @staticmethod
+    def _truncate_output(value: str, max_chars: int) -> tuple[str, bool, int]:
+        original_len = len(value)
+        if original_len <= max_chars:
+            return value, False, original_len
+        return value[:max_chars], True, original_len
 
     @staticmethod
     def _is_windows_absolute_path(raw: str) -> bool:
@@ -162,7 +185,14 @@ class ExecTool(Tool):
             raise ValueError("command is required")
 
         timeout = float(arguments.get("timeout", self.timeout_seconds) or self.timeout_seconds)
-        argv = shlex.split(command)
+        max_output_chars = self._clamp_max_output_chars(
+            arguments.get("max_output_chars", arguments.get("maxOutputChars", self.max_output_chars))
+        )
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            log.warning("invalid command syntax blocked")
+            return "exit=-1\nstdout=\nstderr=invalid_command_syntax"
         cwd_path = self.workspace_path if self.restrict_to_workspace else Path.cwd().resolve()
         guard_error = self._guard_command(command, argv, cwd_path)
         if guard_error:
@@ -210,4 +240,11 @@ class ExecTool(Tool):
         stdout = out.decode("utf-8", errors="ignore").strip()
         log.debug("command finished exit_code={}", process.returncode)
         stderr = err.decode("utf-8", errors="ignore").strip()
-        return f"exit={process.returncode}\nstdout={stdout}\nstderr={stderr}"
+        stdout, stdout_truncated, stdout_original_len = self._truncate_output(stdout, max_output_chars)
+        stderr, stderr_truncated, stderr_original_len = self._truncate_output(stderr, max_output_chars)
+        response = f"exit={process.returncode}\nstdout={stdout}\nstderr={stderr}"
+        if stdout_truncated:
+            response += f"\nstdout_truncated=true\nstdout_original_chars={stdout_original_len}"
+        if stderr_truncated:
+            response += f"\nstderr_truncated=true\nstderr_original_chars={stderr_original_len}"
+        return response

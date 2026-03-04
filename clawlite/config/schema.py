@@ -63,12 +63,193 @@ class GatewayDiagnosticsConfig:
 
 
 @dataclass(slots=True)
+class GatewaySupervisorConfig:
+    enabled: bool = True
+    interval_s: int = 20
+    cooldown_s: int = 30
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> GatewaySupervisorConfig:
+        data = dict(raw or {})
+        if "intervalS" in data:
+            interval_raw = data.get("intervalS")
+        else:
+            interval_raw = data.get("interval_s", 20)
+        if "cooldownS" in data:
+            cooldown_raw = data.get("cooldownS")
+        else:
+            cooldown_raw = data.get("cooldown_s", 30)
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            interval_s=max(1, int(interval_raw or 20)),
+            cooldown_s=max(0, int(cooldown_raw or 30)),
+        )
+
+
+@dataclass(slots=True)
+class GatewayAutonomyConfig:
+    enabled: bool = False
+    interval_s: int = 900
+    cooldown_s: int = 300
+    timeout_s: float = 45.0
+    max_queue_backlog: int = 200
+    session_id: str = "autonomy:system"
+    max_actions_per_run: int = 1
+    action_cooldown_s: float = 120.0
+    action_rate_limit_per_hour: int = 20
+    max_replay_limit: int = 50
+    action_policy: str = "balanced"
+    environment_profile: str = "dev"
+    min_action_confidence: float = 0.55
+    degraded_backlog_threshold: int = 300
+    degraded_supervisor_error_threshold: int = 3
+    audit_export_path: str = ""
+    audit_max_entries: int = 200
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
+        data = dict(raw or {})
+        if "environmentProfile" in data:
+            environment_profile_raw = data.get("environmentProfile")
+        else:
+            environment_profile_raw = data.get("environment_profile", "dev")
+        environment_profile = str(environment_profile_raw or "dev").strip().lower()
+        if environment_profile not in {"dev", "staging", "prod"}:
+            environment_profile = "dev"
+
+        policy_explicit = "actionPolicy" in data or "action_policy" in data
+        if "actionPolicy" in data:
+            policy_raw = data.get("actionPolicy")
+        elif "action_policy" in data:
+            policy_raw = data.get("action_policy")
+        else:
+            policy_raw = "conservative" if environment_profile == "prod" else "balanced"
+        policy = str(policy_raw or ("conservative" if environment_profile == "prod" else "balanced")).strip().lower()
+        if policy not in {"balanced", "conservative"}:
+            policy = "conservative" if environment_profile == "prod" and not policy_explicit else "balanced"
+
+        conservative_defaults: dict[str, Any] = {
+            "action_cooldown_s": 300.0,
+            "action_rate_limit_per_hour": 8,
+            "min_action_confidence": 0.75,
+            "degraded_backlog_threshold": 150,
+            "degraded_supervisor_error_threshold": 1,
+        }
+        staging_defaults: dict[str, Any] = {
+            "action_cooldown_s": 180.0,
+            "action_rate_limit_per_hour": 14,
+            "min_action_confidence": 0.65,
+            "degraded_backlog_threshold": 220,
+            "degraded_supervisor_error_threshold": 2,
+        }
+
+        profile_defaults: dict[str, Any]
+        if environment_profile == "prod":
+            profile_defaults = conservative_defaults
+        elif environment_profile == "staging":
+            profile_defaults = staging_defaults
+        else:
+            profile_defaults = {}
+
+        if policy == "conservative":
+            for key, value in conservative_defaults.items():
+                profile_defaults.setdefault(key, value)
+
+        def _raw_with_alias(snake: str, camel: str, default: Any) -> Any:
+            if camel in data:
+                return data.get(camel)
+            if snake in data:
+                return data.get(snake)
+            if snake in profile_defaults:
+                return profile_defaults[snake]
+            return default
+
+        if "intervalS" in data:
+            interval_raw = data.get("intervalS")
+        else:
+            interval_raw = data.get("interval_s", 900)
+        if "cooldownS" in data:
+            cooldown_raw = data.get("cooldownS")
+        else:
+            cooldown_raw = data.get("cooldown_s", 300)
+        if "timeoutS" in data:
+            timeout_raw = data.get("timeoutS")
+        else:
+            timeout_raw = data.get("timeout_s", 45.0)
+        if "maxQueueBacklog" in data:
+            max_backlog_raw = data.get("maxQueueBacklog")
+        else:
+            max_backlog_raw = data.get("max_queue_backlog", 200)
+        if "sessionId" in data:
+            session_raw = data.get("sessionId")
+        else:
+            session_raw = data.get("session_id", "autonomy:system")
+        if "maxActionsPerRun" in data:
+            max_actions_raw = data.get("maxActionsPerRun")
+        else:
+            max_actions_raw = data.get("max_actions_per_run", 1)
+        if "actionCooldownS" in data:
+            action_cooldown_raw = data.get("actionCooldownS")
+        else:
+            action_cooldown_raw = _raw_with_alias("action_cooldown_s", "actionCooldownS", 120.0)
+        if "actionRateLimitPerHour" in data:
+            action_rate_limit_raw = data.get("actionRateLimitPerHour")
+        else:
+            action_rate_limit_raw = _raw_with_alias("action_rate_limit_per_hour", "actionRateLimitPerHour", 20)
+        if "maxReplayLimit" in data:
+            max_replay_limit_raw = data.get("maxReplayLimit")
+        else:
+            max_replay_limit_raw = data.get("max_replay_limit", 50)
+        min_action_confidence_raw = _raw_with_alias("min_action_confidence", "minActionConfidence", 0.55)
+        degraded_backlog_threshold_raw = _raw_with_alias("degraded_backlog_threshold", "degradedBacklogThreshold", 300)
+        degraded_supervisor_error_threshold_raw = _raw_with_alias(
+            "degraded_supervisor_error_threshold",
+            "degradedSupervisorErrorThreshold",
+            3,
+        )
+        audit_export_path_raw = _raw_with_alias("audit_export_path", "auditExportPath", "")
+        audit_max_entries_raw = _raw_with_alias("audit_max_entries", "auditMaxEntries", 200)
+
+        action_cooldown_s = max(0.0, float(action_cooldown_raw or 120.0))
+        action_rate_limit_per_hour = max(1, int(action_rate_limit_raw or 20))
+        min_action_confidence = float(min_action_confidence_raw or 0.55)
+        if min_action_confidence < 0.0:
+            min_action_confidence = 0.0
+        if min_action_confidence > 1.0:
+            min_action_confidence = 1.0
+        degraded_backlog_threshold = max(1, int(degraded_backlog_threshold_raw or 300))
+        degraded_supervisor_error_threshold = max(1, int(degraded_supervisor_error_threshold_raw or 3))
+
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            interval_s=max(1, int(interval_raw or 900)),
+            cooldown_s=max(0, int(cooldown_raw or 300)),
+            timeout_s=max(0.1, float(timeout_raw or 45.0)),
+            max_queue_backlog=max(0, int(max_backlog_raw or 200)),
+            session_id=str(session_raw or "autonomy:system").strip() or "autonomy:system",
+            max_actions_per_run=max(1, int(max_actions_raw or 1)),
+            action_cooldown_s=action_cooldown_s,
+            action_rate_limit_per_hour=action_rate_limit_per_hour,
+            max_replay_limit=max(1, int(max_replay_limit_raw or 50)),
+            action_policy=policy,
+            environment_profile=environment_profile,
+            min_action_confidence=min_action_confidence,
+            degraded_backlog_threshold=degraded_backlog_threshold,
+            degraded_supervisor_error_threshold=degraded_supervisor_error_threshold,
+            audit_export_path=str(audit_export_path_raw or "").strip(),
+            audit_max_entries=max(1, int(audit_max_entries_raw or 200)),
+        )
+
+
+@dataclass(slots=True)
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     heartbeat: GatewayHeartbeatConfig = field(default_factory=GatewayHeartbeatConfig)
     auth: GatewayAuthConfig = field(default_factory=GatewayAuthConfig)
     diagnostics: GatewayDiagnosticsConfig = field(default_factory=GatewayDiagnosticsConfig)
+    supervisor: GatewaySupervisorConfig = field(default_factory=GatewaySupervisorConfig)
+    autonomy: GatewayAutonomyConfig = field(default_factory=GatewayAutonomyConfig)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayConfig:
@@ -79,6 +260,8 @@ class GatewayConfig:
             heartbeat=GatewayHeartbeatConfig.from_dict(dict(data.get("heartbeat") or {})),
             auth=GatewayAuthConfig.from_dict(dict(data.get("auth") or {})),
             diagnostics=GatewayDiagnosticsConfig.from_dict(dict(data.get("diagnostics") or {})),
+            supervisor=GatewaySupervisorConfig.from_dict(dict(data.get("supervisor") or {})),
+            autonomy=GatewayAutonomyConfig.from_dict(dict(data.get("autonomy") or {})),
         )
 
 
@@ -87,6 +270,13 @@ class ProviderConfig:
     model: str = "gemini/gemini-2.5-flash"
     litellm_base_url: str = "https://api.openai.com/v1"
     litellm_api_key: str = ""
+    retry_max_attempts: int = 3
+    retry_initial_backoff_s: float = 0.5
+    retry_max_backoff_s: float = 8.0
+    retry_jitter_s: float = 0.2
+    circuit_failure_threshold: int = 3
+    circuit_cooldown_s: float = 30.0
+    fallback_model: str = ""
 
 
 @dataclass(slots=True)
@@ -197,8 +387,27 @@ class ChannelConfig(BaseChannelConfig):
 @dataclass(slots=True)
 class TelegramChannelConfig(BaseChannelConfig):
     token: str = ""
+    mode: str = "polling"
+    webhook_enabled: bool = False
+    webhook_secret: str = ""
+    webhook_path: str = "/api/webhooks/telegram"
     poll_interval_s: float = 1.0
     poll_timeout_s: int = 20
+    reconnect_initial_s: float = 2.0
+    reconnect_max_s: float = 30.0
+    send_timeout_s: float = 15.0
+    send_retry_attempts: int = 3
+    send_backoff_base_s: float = 0.35
+    send_backoff_max_s: float = 8.0
+    send_backoff_jitter: float = 0.2
+    send_circuit_failure_threshold: int = 1
+    send_circuit_cooldown_s: float = 60.0
+    typing_enabled: bool = True
+    typing_interval_s: float = 2.5
+    typing_max_ttl_s: float = 120.0
+    typing_timeout_s: float = 5.0
+    typing_circuit_failure_threshold: int = 1
+    typing_circuit_cooldown_s: float = 60.0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> TelegramChannelConfig:
@@ -207,8 +416,31 @@ class TelegramChannelConfig(BaseChannelConfig):
             enabled=bool(data.get("enabled", False)),
             allow_from=cls._allow_from(data),
             token=str(data.get("token", "") or ""),
+            mode=str(data.get("mode", "polling") or "polling"),
+            webhook_enabled=bool(data.get("webhook_enabled", data.get("webhookEnabled", False))),
+            webhook_secret=str(data.get("webhook_secret", data.get("webhookSecret", "")) or ""),
+            webhook_path=str(data.get("webhook_path", data.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram"),
             poll_interval_s=float(data.get("poll_interval_s", data.get("pollIntervalS", 1.0)) or 1.0),
             poll_timeout_s=int(data.get("poll_timeout_s", data.get("pollTimeoutS", 20)) or 20),
+            reconnect_initial_s=float(data.get("reconnect_initial_s", data.get("reconnectInitialS", 2.0)) or 2.0),
+            reconnect_max_s=float(data.get("reconnect_max_s", data.get("reconnectMaxS", 30.0)) or 30.0),
+            send_timeout_s=float(data.get("send_timeout_s", data.get("sendTimeoutSec", 15.0)) or 15.0),
+            send_retry_attempts=int(data.get("send_retry_attempts", data.get("sendRetryAttempts", 3)) or 3),
+            send_backoff_base_s=float(data.get("send_backoff_base_s", data.get("sendBackoffBaseSec", 0.35)) or 0.35),
+            send_backoff_max_s=float(data.get("send_backoff_max_s", data.get("sendBackoffMaxSec", 8.0)) or 8.0),
+            send_backoff_jitter=float(data.get("send_backoff_jitter", data.get("sendBackoffJitter", 0.2)) or 0.2),
+            send_circuit_failure_threshold=int(
+                data.get("send_circuit_failure_threshold", data.get("sendCircuitFailureThreshold", 1)) or 1
+            ),
+            send_circuit_cooldown_s=float(data.get("send_circuit_cooldown_s", data.get("sendCircuitCooldownSec", 60.0)) or 60.0),
+            typing_enabled=bool(data.get("typing_enabled", data.get("typingEnabled", True))),
+            typing_interval_s=float(data.get("typing_interval_s", data.get("typingIntervalS", 2.5)) or 2.5),
+            typing_max_ttl_s=float(data.get("typing_max_ttl_s", data.get("typingMaxTtlS", 120.0)) or 120.0),
+            typing_timeout_s=float(data.get("typing_timeout_s", data.get("typingTimeoutS", 5.0)) or 5.0),
+            typing_circuit_failure_threshold=int(
+                data.get("typing_circuit_failure_threshold", data.get("typingCircuitFailureThreshold", 1)) or 1
+            ),
+            typing_circuit_cooldown_s=float(data.get("typing_circuit_cooldown_s", data.get("typingCircuitCooldownS", 60.0)) or 60.0),
         )
 
 
@@ -610,6 +842,25 @@ class AppConfig:
                 model=str(payload.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
                 litellm_base_url=str(payload.get("litellm_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"),
                 litellm_api_key=str(payload.get("litellm_api_key", "") or ""),
+                retry_max_attempts=max(1, int(payload.get("retry_max_attempts", payload.get("retryMaxAttempts", 3)) or 3)),
+                retry_initial_backoff_s=max(
+                    0.0,
+                    float(payload.get("retry_initial_backoff_s", payload.get("retryInitialBackoffS", 0.5)) or 0.5),
+                ),
+                retry_max_backoff_s=max(
+                    0.0,
+                    float(payload.get("retry_max_backoff_s", payload.get("retryMaxBackoffS", 8.0)) or 8.0),
+                ),
+                retry_jitter_s=max(0.0, float(payload.get("retry_jitter_s", payload.get("retryJitterS", 0.2)) or 0.2)),
+                circuit_failure_threshold=max(
+                    1,
+                    int(payload.get("circuit_failure_threshold", payload.get("circuitFailureThreshold", 3)) or 3),
+                ),
+                circuit_cooldown_s=max(
+                    0.0,
+                    float(payload.get("circuit_cooldown_s", payload.get("circuitCooldownS", 30.0)) or 30.0),
+                ),
+                fallback_model=str(payload.get("fallback_model", payload.get("fallbackModel", "")) or "").strip(),
             )
         if isinstance(self.providers, dict):
             self.providers = ProvidersConfig.from_dict(self.providers)
@@ -647,10 +898,55 @@ class AppConfig:
         defaults = cls()
 
         provider_raw = dict(raw.get("provider") or {})
+        def _provider_value(snake: str, camel: str, default: Any) -> Any:
+            if camel in provider_raw:
+                return provider_raw.get(camel)
+            return provider_raw.get(snake, default)
+
         provider = ProviderConfig(
-            model=str(provider_raw.get("model", defaults.provider.model) or defaults.provider.model),
-            litellm_base_url=str(provider_raw.get("litellm_base_url", defaults.provider.litellm_base_url) or defaults.provider.litellm_base_url),
-            litellm_api_key=str(provider_raw.get("litellm_api_key", defaults.provider.litellm_api_key) or defaults.provider.litellm_api_key),
+            model=str(_provider_value("model", "model", defaults.provider.model) or defaults.provider.model),
+            litellm_base_url=str(
+                _provider_value("litellm_base_url", "litellmBaseUrl", defaults.provider.litellm_base_url)
+                or defaults.provider.litellm_base_url
+            ),
+            litellm_api_key=str(
+                _provider_value("litellm_api_key", "litellmApiKey", defaults.provider.litellm_api_key)
+                or defaults.provider.litellm_api_key
+            ),
+            retry_max_attempts=max(
+                1,
+                int(_provider_value("retry_max_attempts", "retryMaxAttempts", defaults.provider.retry_max_attempts) or defaults.provider.retry_max_attempts),
+            ),
+            retry_initial_backoff_s=max(
+                0.0,
+                float(
+                    _provider_value("retry_initial_backoff_s", "retryInitialBackoffS", defaults.provider.retry_initial_backoff_s)
+                    or defaults.provider.retry_initial_backoff_s
+                ),
+            ),
+            retry_max_backoff_s=max(
+                0.0,
+                float(
+                    _provider_value("retry_max_backoff_s", "retryMaxBackoffS", defaults.provider.retry_max_backoff_s)
+                    or defaults.provider.retry_max_backoff_s
+                ),
+            ),
+            retry_jitter_s=max(
+                0.0,
+                float(_provider_value("retry_jitter_s", "retryJitterS", defaults.provider.retry_jitter_s) or defaults.provider.retry_jitter_s),
+            ),
+            circuit_failure_threshold=max(
+                1,
+                int(
+                    _provider_value("circuit_failure_threshold", "circuitFailureThreshold", defaults.provider.circuit_failure_threshold)
+                    or defaults.provider.circuit_failure_threshold
+                ),
+            ),
+            circuit_cooldown_s=max(
+                0.0,
+                float(_provider_value("circuit_cooldown_s", "circuitCooldownS", defaults.provider.circuit_cooldown_s) or defaults.provider.circuit_cooldown_s),
+            ),
+            fallback_model=str(_provider_value("fallback_model", "fallbackModel", defaults.provider.fallback_model) or defaults.provider.fallback_model).strip(),
         )
 
         agents = AgentsConfig.from_dict(dict(raw.get("agents") or {}))

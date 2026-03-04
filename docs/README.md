@@ -1,6 +1,6 @@
 # ClawLite Docs
 
-Documentação técnica do runtime novo do ClawLite.
+Technical documentation for the new ClawLite runtime.
 
 - [Quickstart](./QUICKSTART.md)
 - [Architecture](./ARCHITECTURE.md)
@@ -8,3 +8,4 @@ Documentação técnica do runtime novo do ClawLite.
 - [API (Gateway)](./API.md)
 - [Skills](./SKILLS.md)
 - [Operations](./OPERATIONS.md)
+- [Telegram Reliability Semantics](./TELEGRAM_RELIABILITY_SEMANTICS.md)

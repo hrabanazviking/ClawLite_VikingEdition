@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import asyncio
+
+from clawlite.runtime.autonomy import AutonomyService
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_autonomy_backlog_skip_increments_counter_and_skips_callback() -> None:
+    clock = _Clock()
+    calls = {"run": 0}
+
+    async def _snapshot() -> dict[str, dict[str, int]]:
+        return {
+            "queue": {"outbound_size": 5, "dead_letter_size": 6},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        calls["run"] += 1
+        return "should_not_run"
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=30,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+        status = await service.run_once(force=False)
+        assert status["ticks"] == 1
+        assert status["run_attempts"] == 0
+        assert status["skipped_backlog"] == 1
+        assert calls["run"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_success_updates_excerpt_and_cooldown_skip() -> None:
+    clock = _Clock()
+    calls = {"run": 0}
+
+    async def _snapshot() -> dict[str, dict[str, int]]:
+        return {
+            "queue": {"outbound_size": 0, "dead_letter_size": 0},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        calls["run"] += 1
+        return "AUTONOMY_IDLE"
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=30,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+        first = await service.run_once(force=False)
+        assert first["run_attempts"] == 1
+        assert first["run_success"] == 1
+        assert first["run_failures"] == 0
+        assert first["last_result_excerpt"] == "AUTONOMY_IDLE"
+        assert first["consecutive_error_count"] == 0
+
+        second = await service.run_once(force=False)
+        assert second["run_attempts"] == 1
+        assert second["skipped_cooldown"] == 1
+        assert calls["run"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_failed_run_updates_failure_counters_and_error() -> None:
+    clock = _Clock()
+
+    async def _snapshot() -> dict[str, dict[str, int]]:
+        return {
+            "queue": {"outbound_size": 0, "dead_letter_size": 0},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        raise RuntimeError("autonomy_boom")
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=1,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+        status = await service.run_once(force=False)
+        assert status["run_attempts"] == 1
+        assert status["run_success"] == 0
+        assert status["run_failures"] == 1
+        assert status["consecutive_error_count"] == 1
+        assert "autonomy_boom" in status["last_error"]
+
+    asyncio.run(_scenario())

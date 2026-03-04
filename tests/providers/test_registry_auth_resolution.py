@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from clawlite.providers.codex import CodexProvider
+from clawlite.providers.failover import FailoverProvider
 from clawlite.providers.litellm import LiteLLMProvider
 from clawlite.providers.registry import build_provider, resolve_litellm_provider
 
@@ -182,3 +183,25 @@ def test_build_provider_custom_accepts_extra_headers() -> None:
     assert provider.base_url == "http://127.0.0.1:5000/v1"
     assert provider.api_key == "c-key"
     assert provider.extra_headers == {"X-App": "claw"}
+
+
+def test_build_provider_wraps_with_failover_when_fallback_model_is_configured() -> None:
+    provider = build_provider(
+        {
+            "model": "openai/gpt-4.1-mini",
+            "fallback_model": "openai/gpt-4o-mini",
+            "providers": {"litellm": {"api_key": "sk-test", "base_url": "https://api.openai.com/v1"}},
+        }
+    )
+    assert isinstance(provider, FailoverProvider)
+
+
+def test_build_provider_does_not_wrap_with_failover_when_same_model() -> None:
+    provider = build_provider(
+        {
+            "model": "openai/gpt-4.1-mini",
+            "fallback_model": "openai/gpt-4.1-mini",
+            "providers": {"litellm": {"api_key": "sk-test", "base_url": "https://api.openai.com/v1"}},
+        }
+    )
+    assert isinstance(provider, LiteLLMProvider)

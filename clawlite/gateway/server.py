@@ -76,7 +76,7 @@ class DiagnosticsResponse(BaseModel):
     generated_at: str
     uptime_s: int
     control_plane: ControlPlaneResponse
-    queue: dict[str, int]
+    queue: dict[str, Any]
     channels: dict[str, Any]
     cron: dict[str, Any]
     heartbeat: dict[str, Any]

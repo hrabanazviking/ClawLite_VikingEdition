@@ -1,28 +1,28 @@
 # Architecture
 
-Arquitetura atual (runtime novo), sem legado:
+Current architecture (new runtime), no legacy:
 
 ```text
 clawlite/
 ├── core/         # engine, prompt, memory, skills, subagent
-├── tools/        # tool abc, registry e tools builtin
-├── bus/          # eventos e fila assíncrona
-├── channels/     # manager + canais (telegram completo, demais adapters)
+├── tools/        # tool abc, registry, and built-in tools
+├── bus/          # events and async queue
+├── channels/     # manager + channels (full telegram, other adapters)
 ├── gateway/      # FastAPI + WebSocket
 ├── scheduler/    # cron + heartbeat
 ├── providers/    # litellm/custom/codex/transcription
-├── session/      # store JSONL por sessão
+├── session/      # JSONL store per session
 ├── config/       # schema + loader
-├── workspace/    # loader + templates de identidade
-├── skills/       # skills markdown builtin (SKILL.md)
-├── cli/          # comandos start/run/onboard/cron
-└── utils/        # helpers compartilhados
+├── workspace/    # loader + identity templates
+├── skills/       # built-in markdown skills (SKILL.md)
+├── cli/          # start/run/onboard/cron commands
+└── utils/        # shared helpers
 ```
 
-## Fluxo principal
+## Main flow
 
-1. Mensagem entra por `channels` ou `gateway`.
-2. `core.engine` monta prompt (workspace + memória + histórico + skills).
-3. Provider responde; se houver tool calls, `tools.registry` executa.
-4. Resposta final é persistida em `session.store` e consolidada em `core.memory`.
-5. `scheduler.cron` e `scheduler.heartbeat` disparam execuções proativas.
+1. Message enters through `channels` or `gateway`.
+2. `core.engine` builds prompt (workspace + memory + history + skills).
+3. Provider responds; if there are tool calls, `tools.registry` executes them.
+4. Final response is delivered first; persistence (`session.store` append + `core.memory` consolidate) runs in best-effort mode and logs degraded storage failures without aborting the turn.
+5. `scheduler.cron` and `scheduler.heartbeat` trigger proactive runs.

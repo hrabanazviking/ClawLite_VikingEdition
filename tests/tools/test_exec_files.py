@@ -112,6 +112,36 @@ def test_exec_tool_timeout_reports_telemetry() -> None:
     asyncio.run(_scenario())
 
 
+def test_exec_tool_invalid_command_syntax_returns_deterministic_marker() -> None:
+    async def _scenario() -> None:
+        out = await ExecTool().run(
+            {"command": 'echo "unterminated'},
+            ToolContext(session_id="s"),
+        )
+        assert "exit=-1" in out
+        assert "stderr=invalid_command_syntax" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_output_truncation_telemetry_for_stdout_and_stderr() -> None:
+    async def _scenario() -> None:
+        out = await ExecTool(max_output_chars=256).run(
+            {
+                "command": "python3 -c \"import sys; print('a' * 1200); sys.stderr.write('b' * 1300)\"",
+                "max_output_chars": 256,
+            },
+            ToolContext(session_id="s"),
+        )
+        assert "exit=0" in out
+        assert "stdout_truncated=true" in out
+        assert "stderr_truncated=true" in out
+        assert "stdout_original_chars=1200" in out
+        assert "stderr_original_chars=1300" in out
+
+    asyncio.run(_scenario())
+
+
 def test_file_tools_restrict_to_workspace_blocks_outside_path(tmp_path: Path) -> None:
     async def _scenario() -> None:
         outside = tmp_path.parent / "outside.txt"
