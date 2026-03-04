@@ -157,6 +157,27 @@ def test_gateway_chat_provider_http_400_returns_graceful_message(tmp_path: Path)
         app.state.runtime.engine.provider = FakeProvider()
 
 
+def test_gateway_provider_error_payload_codex_missing_token_guidance(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    async def _raise_codex(*, session_id: str, user_text: str):
+        raise RuntimeError("codex_auth_error:missing_access_token")
+
+    app.state.runtime.engine.run = _raise_codex
+
+    with TestClient(app) as client:
+        chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert chat.status_code == 400
+        payload = chat.json()
+        assert "provider login openai-codex" in str(payload.get("error", "")).lower()
+
+
 def test_run_heartbeat_contract_skips_on_heartbeat_ok() -> None:
     class _Engine:
         async def run(self, *, session_id: str, user_text: str):

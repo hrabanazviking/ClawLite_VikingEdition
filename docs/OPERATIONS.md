@@ -80,6 +80,19 @@ Campos esperados no JSON:
 - `diagnostics` (contadores de reparo/dedup/recovery)
 - `schema` (hints de versão/chaves para curated e checkpoints)
 
+## Codex provider auth lifecycle
+
+```bash
+clawlite provider login openai-codex --access-token "..." --account-id "org_..." --set-model
+clawlite provider status openai-codex
+clawlite validate provider
+clawlite provider logout openai-codex
+```
+
+Notas:
+- `openai-codex/*` usa caminho dedicado Codex (sem fallback silencioso para OpenAI LiteLLM).
+- Em erro de token ausente/expirado, gateway retorna orientação explícita para `clawlite provider login openai-codex`.
+
 ## Incident checklist
 
 1. Confirmar `/health`.

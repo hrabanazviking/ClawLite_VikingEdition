@@ -69,6 +69,7 @@
   plus deterministic operator command `clawlite memory eval` for synthetic
   retrieval regression checks.
 - Provider telemetry visibility added to gateway diagnostics (`engine.provider`) with config/env control and secret-safe provider contracts.
+- Codex auth UX hardened: typed `auth.providers.openai_codex`, deterministic `openai-codex/*` provider path, CLI login/status/logout, and explicit auth guidance on failures.
 
 ### FUTURE (Scale + polish)
 

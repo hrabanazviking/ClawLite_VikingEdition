@@ -324,6 +324,60 @@ class ProvidersConfig:
 
 
 @dataclass(slots=True)
+class AuthProviderTokenConfig:
+    access_token: str = ""
+    account_id: str = ""
+    source: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> AuthProviderTokenConfig:
+        data = dict(raw or {})
+        access_token = str(
+            data.get("access_token", data.get("accessToken", data.get("token", ""))) or ""
+        ).strip()
+        account_id = str(
+            data.get(
+                "account_id",
+                data.get(
+                    "accountId",
+                    data.get("org_id", data.get("orgId", data.get("organization", ""))),
+                ),
+            )
+            or ""
+        ).strip()
+        source = str(data.get("source", "") or "").strip()
+        return cls(access_token=access_token, account_id=account_id, source=source)
+
+
+@dataclass(slots=True)
+class AuthProvidersConfig:
+    openai_codex: AuthProviderTokenConfig = field(default_factory=AuthProviderTokenConfig)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> AuthProvidersConfig:
+        data = dict(raw or {})
+        codex_payload: dict[str, Any] = {}
+        for key in ("openai_codex", "openai-codex", "codex", "openaiCodex"):
+            candidate = data.get(key)
+            if isinstance(candidate, dict):
+                codex_payload = dict(candidate)
+                break
+        return cls(openai_codex=AuthProviderTokenConfig.from_dict(codex_payload))
+
+
+@dataclass(slots=True)
+class AuthConfig:
+    providers: AuthProvidersConfig = field(default_factory=AuthProvidersConfig)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> AuthConfig:
+        data = dict(raw or {})
+        providers_raw = data.get("providers")
+        providers = AuthProvidersConfig.from_dict(dict(providers_raw) if isinstance(providers_raw, dict) else {})
+        return cls(providers=providers)
+
+
+@dataclass(slots=True)
 class AgentDefaultsConfig:
     model: str = "gemini/gemini-2.5-flash"
     provider: str = "auto"
@@ -848,6 +902,7 @@ class AppConfig:
     state_path: str = str(Path.home() / ".clawlite" / "state")
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -883,6 +938,8 @@ class AppConfig:
             )
         if isinstance(self.providers, dict):
             self.providers = ProvidersConfig.from_dict(self.providers)
+        if isinstance(self.auth, dict):
+            self.auth = AuthConfig.from_dict(self.auth)
         if isinstance(self.agents, dict):
             self.agents = AgentsConfig.from_dict(self.agents)
         if isinstance(self.gateway, dict):
@@ -904,6 +961,7 @@ class AppConfig:
             "state_path": self.state_path,
             "provider": asdict(self.provider),
             "providers": asdict(self.providers),
+            "auth": asdict(self.auth),
             "agents": asdict(self.agents),
             "gateway": asdict(self.gateway),
             "scheduler": asdict(self.scheduler),
@@ -971,6 +1029,7 @@ class AppConfig:
         agents = AgentsConfig.from_dict(dict(raw.get("agents") or {}))
 
         providers = ProvidersConfig.from_dict(dict(raw.get("providers") or {}))
+        auth = AuthConfig.from_dict(dict(raw.get("auth") or {}))
         gateway_raw = dict(raw.get("gateway") or {})
         gateway = GatewayConfig.from_dict(gateway_raw)
         scheduler_raw = dict(raw.get("scheduler") or {})
@@ -1001,6 +1060,7 @@ class AppConfig:
             state_path=str(raw.get("state_path") or defaults.state_path),
             provider=provider,
             providers=providers,
+            auth=auth,
             agents=agents,
             gateway=gateway,
             scheduler=scheduler,

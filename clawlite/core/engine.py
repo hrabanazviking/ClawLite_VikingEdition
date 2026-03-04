@@ -691,6 +691,8 @@ class AgentEngine:
             return ProviderNetworkError(reason.partition(":")[-1].strip())
         if reason.startswith("provider_config_error:"):
             return ProviderConfigError(reason.partition(":")[-1].strip())
+        if reason.startswith("codex_auth_error:"):
+            return ProviderAuthError("openai_codex")
         if reason.startswith("codex_http_error:"):
             _, _, status_raw = reason.partition("codex_http_error:")
             status_code: int | None = None

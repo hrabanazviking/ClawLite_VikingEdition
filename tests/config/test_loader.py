@@ -360,3 +360,39 @@ def test_load_config_gateway_diagnostics_include_provider_telemetry_env_override
     monkeypatch.setenv("CLAWLITE_GATEWAY_DIAGNOSTICS_INCLUDE_PROVIDER_TELEMETRY", "false")
     cfg = load_config(path)
     assert cfg.gateway.diagnostics.include_provider_telemetry is False
+
+
+def test_load_config_auth_providers_alias_parsing(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "auth": {
+                    "providers": {
+                        "openaiCodex": {
+                            "token": "oauth-token",
+                            "organization": "org-123",
+                            "source": "config:test",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.auth.providers.openai_codex.access_token == "oauth-token"
+    assert cfg.auth.providers.openai_codex.account_id == "org-123"
+    assert cfg.auth.providers.openai_codex.source == "config:test"
+
+
+def test_load_config_auth_env_overrides_codex(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"auth": {"providers": {"openai_codex": {}}}}), encoding="utf-8")
+    monkeypatch.setenv("CLAWLITE_CODEX_ACCESS_TOKEN", "tok-a")
+    monkeypatch.setenv("CLAWLITE_CODEX_ACCOUNT_ID", "org-a")
+
+    cfg = load_config(path)
+    assert cfg.auth.providers.openai_codex.access_token == "tok-a"
+    assert cfg.auth.providers.openai_codex.account_id == "org-a"

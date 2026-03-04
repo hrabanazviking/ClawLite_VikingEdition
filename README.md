@@ -111,6 +111,8 @@ Common environment overrides:
 - `CLAWLITE_LITELLM_API_KEY`
 - `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`
 - `CLAWLITE_GATEWAY_HOST`, `CLAWLITE_GATEWAY_PORT`, `CLAWLITE_GATEWAY_TOKEN`
+- `CLAWLITE_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_ACCESS_TOKEN`
+- `CLAWLITE_CODEX_ACCOUNT_ID`, `OPENAI_ORG_ID`
 
 Gateway auth hardening behavior:
 - On non-loopback hosts, if a token is configured and auth mode is weaker, runtime posture auto-hardens to `required`.
@@ -144,6 +146,9 @@ Core commands:
 - `clawlite status`
 - `clawlite onboard`
 - `clawlite validate provider|channels|onboarding [--fix]`
+- `clawlite provider login openai-codex [--access-token ...] [--account-id ...] [--set-model] [--no-interactive]`
+- `clawlite provider status [openai-codex]`
+- `clawlite provider logout [openai-codex]`
 - `clawlite diagnostics [--gateway-url ...]`
 - `clawlite memory doctor [--repair]`
 - `clawlite memory eval [--limit N]`
@@ -171,6 +176,10 @@ Core commands:
 | Anthropic (routing) | `anthropic/claude-3-7-sonnet` | `ANTHROPIC_API_KEY` |
 | OpenAI Codex | `openai-codex/codex-mini-latest` | Provider token |
 | Custom OpenAI-compatible | `custom/<model>` | Configured key/base URL |
+
+Codex auth note:
+- `openai-codex/*` now resolves deterministically through Codex provider path.
+- Missing/expired Codex auth returns explicit errors and guidance to run `clawlite provider login openai-codex`.
 
 ## Operations and Testing
 Run locally:

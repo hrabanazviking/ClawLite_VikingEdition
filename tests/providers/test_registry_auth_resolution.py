@@ -73,7 +73,7 @@ def test_build_provider_uses_groq_env_key(monkeypatch) -> None:
     assert provider.base_url == "https://api.groq.com/openai/v1"
 
 
-def test_build_provider_openai_codex_falls_back_to_litellm_without_codex_auth(monkeypatch) -> None:
+def test_build_provider_openai_codex_is_deterministic_even_without_codex_auth(monkeypatch) -> None:
     monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
@@ -85,8 +85,7 @@ def test_build_provider_openai_codex_falls_back_to_litellm_without_codex_auth(mo
         }
     )
 
-    assert isinstance(provider, LiteLLMProvider)
-    assert provider.provider_name == "openai"
+    assert isinstance(provider, CodexProvider)
     assert provider.model == "codex-5.3"
 
 

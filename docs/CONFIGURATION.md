@@ -5,6 +5,7 @@ Default file: `~/.clawlite/config.json`
 Main fields (summary):
 - `workspace_path`, `state_path`
 - `provider` and `providers` (active model, credentials/base per provider)
+- `auth.providers.openai_codex` (OAuth token/account for Codex provider path)
 - `provider` reliability controls: retry (`retry_*`), circuit breaker (`circuit_*`), optional `fallback_model`
 - `agents.defaults` (model, limits, temperature)
 - `gateway.host`, `gateway.port`
@@ -30,6 +31,11 @@ Main fields (summary):
 - `CLAWLITE_GATEWAY_DIAGNOSTICS_ENABLED` (`true/false`)
 - `CLAWLITE_GATEWAY_DIAGNOSTICS_REQUIRE_AUTH` (`true/false`)
 - `CLAWLITE_GATEWAY_DIAGNOSTICS_INCLUDE_PROVIDER_TELEMETRY` (`true/false`)
+- `CLAWLITE_CODEX_ACCESS_TOKEN`
+- `OPENAI_CODEX_ACCESS_TOKEN`
+- `OPENAI_ACCESS_TOKEN`
+- `CLAWLITE_CODEX_ACCOUNT_ID`
+- `OPENAI_ORG_ID`
 
 Note: provider-specific key variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, etc.) are still valid for provider credential resolution.
 
@@ -135,6 +141,29 @@ Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gate
   - `retry_max_attempts`, `retry_initial_backoff_s`, `retry_max_backoff_s`, `retry_jitter_s`
   - `circuit_failure_threshold`, `circuit_cooldown_s`
   - `fallback_model` (optional second model path for retryable provider failures)
+
+## Codex OAuth auth block
+
+Use this block to persist Codex OAuth credentials (same values can be overridden by env vars):
+
+```json
+{
+  "auth": {
+    "providers": {
+      "openai_codex": {
+        "access_token": "<oauth-access-token>",
+        "account_id": "org_123",
+        "source": "cli:access_token"
+      }
+    }
+  }
+}
+```
+
+Accepted aliases in config parsing:
+- provider keys: `openai_codex`, `openai-codex`, `codex`, `openaiCodex`
+- token keys: `access_token`, `accessToken`, `token`
+- account keys: `account_id`, `accountId`, `org_id`, `orgId`, `organization`
 
 ## Telegram (main options)
 

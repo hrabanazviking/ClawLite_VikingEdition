@@ -367,6 +367,15 @@ def _provider_config(config: AppConfig) -> dict[str, Any]:
 
     return {
         "model": active_model,
+        "auth": {
+            "providers": {
+                "openai_codex": {
+                    "access_token": config.auth.providers.openai_codex.access_token,
+                    "account_id": config.auth.providers.openai_codex.account_id,
+                    "source": config.auth.providers.openai_codex.source,
+                }
+            }
+        },
         "providers": {
             "litellm": {
                 "base_url": selected_api_base or config.provider.litellm_base_url,
@@ -703,6 +712,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return (503, "Provedor remoto indisponivel no momento (erro de rede).")
         if message.startswith("codex_http_error:401"):
             return (502, "Falha de autenticacao no Codex (401). Refaça login OAuth do provedor Codex.")
+        if message == "codex_auth_error:missing_access_token":
+            return (
+                400,
+                "Token OAuth do Codex ausente. Execute 'clawlite provider login openai-codex' para autenticar.",
+            )
+        if message.startswith("codex_auth_error:401"):
+            return (
+                502,
+                "Sessao OAuth do Codex invalida ou expirada (401). Execute 'clawlite provider login openai-codex' novamente.",
+            )
         if message.startswith("codex_http_error:429") or message == "codex_429_exhausted":
             return (429, "Limite de requisicoes no Codex. Tente novamente em instantes.")
         if message.startswith("codex_http_error:"):

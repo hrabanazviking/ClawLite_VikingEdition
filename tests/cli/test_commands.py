@@ -400,3 +400,136 @@ def test_cli_memory_eval_does_not_import_gateway_runtime(tmp_path: Path, capsys)
     assert rc == 0
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()
+
+
+def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_login = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "login",
+            "openai-codex",
+            "--access-token",
+            "codex-token-1234",
+            "--account-id",
+            "org-123",
+            "--set-model",
+            "--no-interactive",
+        ]
+    )
+    assert rc_login == 0
+    login_payload = json.loads(capsys.readouterr().out)
+    assert login_payload["ok"] is True
+    assert login_payload["configured"] is True
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    assert rc_status == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["configured"] is True
+    assert status_payload["provider"] == "openai_codex"
+    assert status_payload["model"] == "openai-codex/gpt-5.3-codex"
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["auth"]["providers"]["openai_codex"]["access_token"] == "codex-token-1234"
+    assert persisted["auth"]["providers"]["openai_codex"]["account_id"] == "org-123"
+
+    rc_logout = main(["--config", str(config_path), "provider", "logout", "openai-codex"])
+    assert rc_logout == 0
+    logout_payload = json.loads(capsys.readouterr().out)
+    assert logout_payload["configured"] is False
+
+    persisted_after = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted_after["auth"]["providers"]["openai_codex"]["access_token"] == ""
+    assert persisted_after["auth"]["providers"]["openai_codex"]["account_id"] == ""
+
+
+def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    assert rc_status in {0, 2}
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_login = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "login",
+            "openai-codex",
+            "--access-token",
+            "codex-token-5678",
+            "--no-interactive",
+        ]
+    )
+    assert rc_login == 0
+    assert "clawlite.gateway.server" not in sys.modules
+
+
+def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+                "auth": {"providers": {"openai_codex": {"access_token": ""}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_missing = main(["--config", str(config_path), "validate", "provider"])
+    assert rc_missing == 2
+    missing_payload = json.loads(capsys.readouterr().out)
+    assert missing_payload["ok"] is False
+    assert any("oauth_access_token" == check.get("name") and check.get("status") == "error" for check in missing_payload["checks"])
+
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+                "auth": {"providers": {"openai_codex": {"access_token": "tok-codex-999"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_ok = main(["--config", str(config_path), "validate", "provider"])
+    assert rc_ok == 0
+    ok_payload = json.loads(capsys.readouterr().out)
+    assert ok_payload["ok"] is True
+    assert ok_payload["oauth_token_masked"]

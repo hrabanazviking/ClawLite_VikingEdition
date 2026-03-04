@@ -180,6 +180,18 @@ def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
     diag_provider_telemetry = _parse_bool(os.getenv("CLAWLITE_GATEWAY_DIAGNOSTICS_INCLUDE_PROVIDER_TELEMETRY", ""))
     if diag_provider_telemetry is not None:
         out.setdefault("gateway", {}).setdefault("diagnostics", {})["include_provider_telemetry"] = diag_provider_telemetry
+
+    codex_access_token = (
+        os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
+        or os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
+        or os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
+    )
+    if codex_access_token:
+        out.setdefault("auth", {}).setdefault("providers", {}).setdefault("openai_codex", {})["access_token"] = codex_access_token
+
+    codex_account_id = os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip() or os.getenv("OPENAI_ORG_ID", "").strip()
+    if codex_account_id:
+        out.setdefault("auth", {}).setdefault("providers", {}).setdefault("openai_codex", {})["account_id"] = codex_account_id
     return out
 
 

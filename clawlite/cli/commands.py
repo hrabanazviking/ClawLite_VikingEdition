@@ -13,6 +13,9 @@ from clawlite.cli.ops import memory_eval_snapshot
 from clawlite.cli.ops import memory_doctor_snapshot
 from clawlite.cli.ops import onboarding_validation
 from clawlite.cli.ops import provider_validation
+from clawlite.cli.ops import provider_login_openai_codex
+from clawlite.cli.ops import provider_logout_openai_codex
+from clawlite.cli.ops import provider_status
 from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
 from clawlite.core.skills import SkillsLoader
@@ -108,6 +111,42 @@ def cmd_onboard(args: argparse.Namespace) -> int:
 def cmd_validate_provider(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     payload = provider_validation(cfg)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_provider_login(args: argparse.Namespace) -> int:
+    provider = str(args.provider).strip().lower().replace("_", "-")
+    if provider != "openai-codex":
+        _print_json({"ok": False, "error": f"unsupported_provider:{provider}"})
+        return 2
+    cfg = load_config(args.config)
+    payload = provider_login_openai_codex(
+        cfg,
+        config_path=args.config,
+        access_token=str(args.access_token or ""),
+        account_id=str(args.account_id or ""),
+        set_model=bool(args.set_model),
+        interactive=not bool(args.no_interactive),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_provider_status(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = provider_status(cfg, provider=str(args.provider or "openai-codex"))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_provider_logout(args: argparse.Namespace) -> int:
+    provider = str(args.provider or "openai-codex").strip().lower().replace("_", "-")
+    if provider != "openai-codex":
+        _print_json({"ok": False, "error": f"unsupported_provider:{provider}"})
+        return 2
+    cfg = load_config(args.config)
+    payload = provider_logout_openai_codex(cfg, config_path=args.config)
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
 
@@ -347,6 +386,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_onboarding = validate_sub.add_parser("onboarding", help="Validate workspace onboarding templates")
     p_validate_onboarding.add_argument("--fix", action="store_true", help="Generate missing workspace templates")
     p_validate_onboarding.set_defaults(handler=cmd_validate_onboarding)
+
+    p_provider = sub.add_parser("provider", help="Provider auth lifecycle commands")
+    provider_sub = p_provider.add_subparsers(dest="provider_command", required=True)
+
+    p_provider_login = provider_sub.add_parser("login", help="Login and persist provider auth")
+    p_provider_login.add_argument("provider", choices=["openai-codex"])
+    p_provider_login.add_argument("--access-token", default="", help="Explicit Codex access token")
+    p_provider_login.add_argument("--account-id", default="", help="Optional OpenAI account/org id")
+    p_provider_login.add_argument("--set-model", action="store_true", help="Set active model to openai-codex/gpt-5.3-codex")
+    p_provider_login.add_argument("--no-interactive", action="store_true", help="Disable interactive OAuth fallback")
+    p_provider_login.set_defaults(handler=cmd_provider_login)
+
+    p_provider_status = provider_sub.add_parser("status", help="Show provider auth status")
+    p_provider_status.add_argument("provider", nargs="?", default="openai-codex", choices=["openai-codex"])
+    p_provider_status.set_defaults(handler=cmd_provider_status)
+
+    p_provider_logout = provider_sub.add_parser("logout", help="Clear provider auth from config")
+    p_provider_logout.add_argument("provider", nargs="?", default="openai-codex", choices=["openai-codex"])
+    p_provider_logout.set_defaults(handler=cmd_provider_logout)
 
     p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
     p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")

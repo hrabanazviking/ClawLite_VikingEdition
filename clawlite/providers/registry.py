@@ -352,8 +352,8 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
             break
 
     token = (
-        _cfg_value(codex_payload, "token", "token")
-        or _cfg_value(codex_payload, "access_token", "accessToken")
+        _cfg_value(codex_payload, "access_token", "accessToken")
+        or _cfg_value(codex_payload, "token", "token")
         or os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
         or os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
         or os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
@@ -404,25 +404,7 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
     if model_lower.startswith(("openai-codex/", "openai_codex/")):
         model_name = model.split("/", 1)[1] if "/" in model else model
         token, account_id = _resolve_codex_oauth(config)
-        if token:
-            return CodexProvider(model=model_name, access_token=token, account_id=account_id, **reliability)
-
-        openai_cfg = _provider_cfg(providers_cfg, "openai")
-        resolved = resolve_litellm_provider(
-            model=f"openai/{model_name}",
-            api_key=_cfg_value(openai_cfg, "api_key", "apiKey") or _cfg_value(litellm_cfg, "api_key", "apiKey"),
-            base_url=_cfg_value(openai_cfg, "api_base", "apiBase") or _cfg_value(litellm_cfg, "base_url", "baseUrl"),
-            provider_name="openai",
-        )
-        return LiteLLMProvider(
-            base_url=resolved.base_url,
-            api_key=resolved.api_key,
-            model=resolved.model,
-            provider_name=resolved.name,
-            openai_compatible=resolved.openai_compatible,
-            extra_headers={},
-            **reliability,
-        )
+        return CodexProvider(model=model_name, access_token=token, account_id=account_id, **reliability)
 
     if model_lower.startswith("custom/"):
         custom_cfg = _provider_cfg(providers_cfg, "custom")
