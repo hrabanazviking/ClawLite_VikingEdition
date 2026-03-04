@@ -101,6 +101,21 @@ class FakeMemory:
         return None
 
 
+class FakePlannerMemory:
+    def __init__(self, routes: dict[str, list[MemoryRecord]] | None = None) -> None:
+        self.routes = routes or {}
+        self.search_calls: list[str] = []
+
+    def search(self, query: str, *, limit: int = 5) -> list[MemoryRecord]:
+        del limit
+        self.search_calls.append(query)
+        return self.routes.get(query, [])
+
+    def consolidate(self, messages, *, source: str = "session"):
+        del messages, source
+        return None
+
+
 class FakeProviderWithReasoningCapture:
     def __init__(self) -> None:
         self.last_reasoning_effort: str | None = None
@@ -356,6 +371,82 @@ def test_engine_formats_memory_snippets_with_ref_and_source_marker() -> None:
         section = str(memory_sections[0].get("content", ""))
         assert "mem:a1b2c3d4" in section
         assert "[src:session:telegram:42]" in section
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_no_retrieve_skips_lookup_for_trivial_input() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        memory = FakePlannerMemory()
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:no-retrieve", user_text="ok")
+        assert out.text == "ok"
+        assert memory.search_calls == []
+
+        first_prompt = provider.snapshots[0]
+        memory_sections = [row for row in first_prompt if row.get("role") == "system" and "[Memory]" in str(row.get("content", ""))]
+        assert memory_sections == []
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_retrieve_uses_original_query() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        query = "what is my timezone preference"
+        memory = FakePlannerMemory(
+            {
+                query: [
+                    MemoryRecord(
+                        id="abc123456789",
+                        text="User timezone is America/Sao_Paulo.",
+                        source="session:cli:tz",
+                        created_at="2026-03-04T12:00:00+00:00",
+                    )
+                ]
+            }
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:retrieve", user_text=query)
+        assert out.text == "ok"
+        assert memory.search_calls == [query]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_next_query_rewrites_after_insufficient_first_hit() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        original_query = "what did we decide about deployment schedule yesterday"
+        rewritten_query = "did decide about deployment schedule yesterday"
+        memory = FakePlannerMemory(
+            {
+                original_query: [
+                    MemoryRecord(
+                        id="insuff000000",
+                        text="Random reminder unrelated to request.",
+                        source="session:cli:x",
+                        created_at="2026-03-04T12:00:00+00:00",
+                    )
+                ],
+                rewritten_query: [
+                    MemoryRecord(
+                        id="suff00000001",
+                        text="We decided to deploy on Fridays at 17:00 UTC.",
+                        source="session:cli:deploy",
+                        created_at="2026-03-04T12:05:00+00:00",
+                    )
+                ],
+            }
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:next-query", user_text=original_query)
+        assert out.text == "ok"
+        assert memory.search_calls == [original_query, rewritten_query]
 
     asyncio.run(_scenario())
 

@@ -180,6 +180,68 @@ class AgentEngine:
         "out of credits",
         "billing exhausted",
     )
+    _MEMORY_ROUTE_NO_RETRIEVE = "NO_RETRIEVE"
+    _MEMORY_ROUTE_RETRIEVE = "RETRIEVE"
+    _MEMORY_ROUTE_NEXT_QUERY = "NEXT_QUERY"
+    _MEMORY_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+    _MEMORY_TRIVIAL_RE = re.compile(
+        r"^(ok|okay|kk|thanks|thank you|got it|noted|done|cool|yes|no|right|understood|hi|hello|hey)[.!?]*$",
+        re.IGNORECASE,
+    )
+    _MEMORY_HINT_TOKENS: frozenset[str] = frozenset(
+        {
+            "remember",
+            "memory",
+            "context",
+            "preference",
+            "prefer",
+            "preferred",
+            "earlier",
+            "previous",
+            "before",
+            "yesterday",
+            "deadline",
+            "project",
+            "name",
+            "timezone",
+            "discussed",
+            "said",
+            "recall",
+        }
+    )
+    _MEMORY_STOPWORDS: frozenset[str] = frozenset(
+        {
+            "a",
+            "an",
+            "and",
+            "are",
+            "at",
+            "be",
+            "for",
+            "from",
+            "how",
+            "i",
+            "in",
+            "is",
+            "it",
+            "me",
+            "my",
+            "of",
+            "on",
+            "or",
+            "please",
+            "the",
+            "to",
+            "we",
+            "what",
+            "when",
+            "where",
+            "who",
+            "why",
+            "you",
+            "your",
+        }
+    )
 
     def __init__(
         self,
@@ -369,6 +431,102 @@ class AgentEngine:
         text = str(record.text or "").strip()
         return f"{cls._memory_ref(record.id)} [src:{source}] {text}"
 
+    @classmethod
+    def _tokenize_retrieval_text(cls, text: str) -> list[str]:
+        return [match.group(0).lower() for match in cls._MEMORY_TOKEN_RE.finditer(str(text or ""))]
+
+    @classmethod
+    def _memory_query_terms(cls, text: str) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+        for token in cls._tokenize_retrieval_text(text):
+            if len(token) <= 2:
+                continue
+            if token in cls._MEMORY_STOPWORDS:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            terms.append(token)
+        return terms
+
+    @classmethod
+    def _is_memory_retrieval_candidate(cls, user_text: str) -> bool:
+        compact = " ".join(str(user_text or "").split()).strip()
+        if not compact:
+            return False
+        if cls._MEMORY_TRIVIAL_RE.match(compact):
+            return False
+        tokens = cls._tokenize_retrieval_text(compact)
+        if not tokens:
+            return False
+        if len(tokens) == 1:
+            return len(tokens[0]) >= 5
+        token_set = set(tokens)
+        if token_set.intersection(cls._MEMORY_HINT_TOKENS):
+            return True
+        if len(tokens) == 2:
+            return compact.endswith("?")
+        if compact.endswith("?") and len(tokens) >= 4:
+            return True
+        return len(cls._memory_query_terms(compact)) >= 3
+
+    @classmethod
+    def _memory_result_sufficient(cls, query: str, rows: list[MemoryRecord]) -> bool:
+        if not rows:
+            return False
+        query_terms = cls._memory_query_terms(query)
+        if not query_terms:
+            return True
+        if len(query_terms) <= 2:
+            return True
+        query_set = set(query_terms)
+        best_overlap = 0
+        for row in rows[:3]:
+            row_terms = set(cls._memory_query_terms(row.text))
+            overlap = len(query_set.intersection(row_terms))
+            best_overlap = max(best_overlap, overlap)
+            if overlap >= 2:
+                return True
+        return best_overlap >= max(1, min(2, len(query_set) - 1))
+
+    @classmethod
+    def _rewrite_memory_query(cls, user_text: str) -> str:
+        terms = cls._memory_query_terms(user_text)
+        if not terms:
+            return ""
+        rewritten = " ".join(terms[:8]).strip()
+        original = " ".join(str(user_text or "").split()).strip().lower()
+        return "" if rewritten.lower() == original else rewritten
+
+    def _plan_memory_snippets(self, *, user_text: str, run_log: Any) -> list[str]:
+        route = self._MEMORY_ROUTE_NO_RETRIEVE
+        selected_query = ""
+        try:
+            if not self._is_memory_retrieval_candidate(user_text):
+                run_log.debug("memory planner route={} query=- rows=0", route)
+                return []
+
+            route = self._MEMORY_ROUTE_RETRIEVE
+            selected_query = " ".join(str(user_text or "").split()).strip()
+            first_rows = self.memory.search(selected_query, limit=6)
+            selected_rows = first_rows
+
+            if not self._memory_result_sufficient(selected_query, first_rows):
+                rewritten = self._rewrite_memory_query(selected_query)
+                if rewritten:
+                    route = self._MEMORY_ROUTE_NEXT_QUERY
+                    selected_query = rewritten
+                    second_rows = self.memory.search(rewritten, limit=6)
+                    if second_rows:
+                        selected_rows = second_rows
+
+            run_log.debug("memory planner route={} query={} rows={}", route, selected_query or "-", len(selected_rows))
+            return [self._format_memory_snippet(row) for row in selected_rows]
+        except Exception as exc:
+            run_log.warning("memory planner failed route={} query={} error={}", route, selected_query or "-", exc)
+            return []
+
     def request_stop(self, session_id: str) -> bool:
         normalized = str(session_id or "").strip()
         if not normalized:
@@ -547,8 +705,7 @@ class AgentEngine:
         budget = self._resolve_turn_budget(turn_budget)
         progress_counter = [0]
         history = self.sessions.read(session_id, limit=self.memory_window)
-        memory_rows = self.memory.search(user_text, limit=6)
-        memories = [self._format_memory_snippet(row) for row in memory_rows]
+        memories = self._plan_memory_snippets(user_text=user_text, run_log=run_log)
         skills = self.skills_loader.render_for_prompt()
         always_names = [item.name for item in self.skills_loader.always_on()]
         skills_context = self.skills_loader.load_skills_for_context(always_names)
