@@ -53,6 +53,22 @@ def test_cli_skills_list_and_show(capsys) -> None:
     assert "Schedule" in one.get("description", "")
 
 
+def test_cli_skills_check_returns_diagnostics_report(capsys) -> None:
+    rc = main(["skills", "check"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload.keys()) == {
+        "summary",
+        "execution_kinds",
+        "sources",
+        "missing_requirements",
+        "contract_issues",
+        "skills",
+    }
+    summary = payload["summary"]
+    assert summary["total"] == summary["available"] + summary["unavailable"]
+
+
 def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     state_path = tmp_path / "state"

@@ -394,6 +394,12 @@ def cmd_skills_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skills_check(args: argparse.Namespace) -> int:
+    loader = SkillsLoader()
+    _print_json(loader.diagnostics_report())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clawlite",
@@ -545,6 +551,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills_show = skills_sub.add_parser("show", help="Show one skill body + metadata")
     p_skills_show.add_argument("name")
     p_skills_show.set_defaults(handler=cmd_skills_show)
+
+    p_skills_check = skills_sub.add_parser("check", help="Emit aggregated deterministic skills diagnostics")
+    p_skills_check.set_defaults(handler=cmd_skills_check)
 
     return parser
 

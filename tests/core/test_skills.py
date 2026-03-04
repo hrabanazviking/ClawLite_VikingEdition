@@ -185,3 +185,93 @@ def test_skills_loader_normalizes_requirement_schema_and_reports_invalid_env_nam
     assert "GOOD_ENV" in row.requirements["env"]
     assert any(issue.startswith("requirements:invalid_env_name:bad-env") for issue in row.contract_issues)
     assert row.available is False
+
+
+def test_skills_loader_diagnostics_report_aggregates_deterministically(tmp_path: Path) -> None:
+    command_dir = tmp_path / "command-ok"
+    command_dir.mkdir(parents=True, exist_ok=True)
+    (command_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: command-ok\n"
+        "description: command skill\n"
+        "always: true\n"
+        "command: sh -c 'echo ok'\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    missing_dir = tmp_path / "missing-reqs"
+    missing_dir.mkdir(parents=True, exist_ok=True)
+    (missing_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: missing-reqs\n"
+        "description: missing requirements\n"
+        'requirements: {"bins": ["definitely-missing-bin-xyz"], "env": ["SKILL_TEST_MISSING_ENV"]}\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    invalid_dir = tmp_path / "invalid-contract"
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    (invalid_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: invalid-contract\n"
+        "description: invalid contract\n"
+        "command: echo hi\n"
+        "script: web_search\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    report = loader.diagnostics_report()
+
+    assert set(report.keys()) == {
+        "summary",
+        "execution_kinds",
+        "sources",
+        "missing_requirements",
+        "contract_issues",
+        "skills",
+    }
+
+    summary = report["summary"]
+    assert summary == {
+        "total": 3,
+        "available": 1,
+        "unavailable": 2,
+        "always_on_available": 1,
+        "always_on_unavailable": 0,
+    }
+
+    assert report["execution_kinds"] == {
+        "command": 1,
+        "script": 0,
+        "none": 1,
+        "invalid": 1,
+    }
+    assert report["sources"] == {
+        "builtin": 3,
+        "workspace": 0,
+        "marketplace": 0,
+    }
+
+    missing_requirements = report["missing_requirements"]
+    assert missing_requirements["bin"]["count"] == 1
+    assert missing_requirements["bin"]["items"] == ["bin:definitely-missing-bin-xyz"]
+    assert missing_requirements["env"]["count"] == 1
+    assert missing_requirements["env"]["items"] == ["env:SKILL_TEST_MISSING_ENV"]
+    assert missing_requirements["os"] == {"count": 0, "items": []}
+    assert missing_requirements["other"] == {"count": 0, "items": []}
+
+    contract_issues = report["contract_issues"]
+    assert contract_issues["total"] == 1
+    assert contract_issues["by_key"] == {
+        "contract:command_and_script_are_mutually_exclusive": 1,
+    }
+
+    skills = report["skills"]
+    assert [row["name"] for row in skills] == ["command-ok", "invalid-contract", "missing-reqs"]

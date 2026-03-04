@@ -421,6 +421,109 @@ class SkillsLoader:
             return rows
         return [item for item in rows if item.available]
 
+    def diagnostics_report(self) -> dict[str, object]:
+        rows = self.discover(include_unavailable=True)
+
+        execution_kinds: dict[str, int] = {
+            "command": 0,
+            "script": 0,
+            "none": 0,
+            "invalid": 0,
+        }
+        source_counts: dict[str, int] = {
+            "builtin": 0,
+            "workspace": 0,
+            "marketplace": 0,
+        }
+        missing_groups: dict[str, dict[str, object]] = {
+            "bin": {"count": 0, "items": []},
+            "env": {"count": 0, "items": []},
+            "os": {"count": 0, "items": []},
+            "other": {"count": 0, "items": []},
+        }
+        missing_seen: dict[str, set[str]] = {
+            "bin": set(),
+            "env": set(),
+            "os": set(),
+            "other": set(),
+        }
+        contract_issue_counts: dict[str, int] = {}
+
+        available_count = 0
+        unavailable_count = 0
+        always_on_available_count = 0
+        always_on_unavailable_count = 0
+        contract_total = 0
+
+        skill_rows: list[dict[str, object]] = []
+
+        for row in rows:
+            if row.available:
+                available_count += 1
+                if row.always:
+                    always_on_available_count += 1
+            else:
+                unavailable_count += 1
+                if row.always:
+                    always_on_unavailable_count += 1
+
+            kind = row.execution_kind if row.execution_kind in execution_kinds else "invalid"
+            execution_kinds[kind] += 1
+
+            source = row.source if row.source in source_counts else "marketplace"
+            source_counts[source] += 1
+
+            if not row.available:
+                for item in row.missing:
+                    if item.startswith("bin:"):
+                        prefix = "bin"
+                    elif item.startswith("env:"):
+                        prefix = "env"
+                    elif item.startswith("os:"):
+                        prefix = "os"
+                    else:
+                        prefix = "other"
+                    if item not in missing_seen[prefix]:
+                        missing_seen[prefix].add(item)
+                        missing_groups[prefix]["items"].append(item)
+                    missing_groups[prefix]["count"] = int(missing_groups[prefix]["count"]) + 1
+
+            for issue in row.contract_issues:
+                contract_total += 1
+                contract_issue_counts[issue] = contract_issue_counts.get(issue, 0) + 1
+
+            skill_rows.append(
+                {
+                    "name": row.name,
+                    "available": row.available,
+                    "source": row.source,
+                    "execution_kind": row.execution_kind,
+                    "missing": sorted(row.missing),
+                    "contract_issues": sorted(row.contract_issues),
+                }
+            )
+
+        for prefix in ("bin", "env", "os", "other"):
+            missing_groups[prefix]["items"] = sorted(str(item) for item in missing_groups[prefix]["items"])
+
+        return {
+            "summary": {
+                "total": len(rows),
+                "available": available_count,
+                "unavailable": unavailable_count,
+                "always_on_available": always_on_available_count,
+                "always_on_unavailable": always_on_unavailable_count,
+            },
+            "execution_kinds": execution_kinds,
+            "sources": source_counts,
+            "missing_requirements": missing_groups,
+            "contract_issues": {
+                "total": contract_total,
+                "by_key": {key: contract_issue_counts[key] for key in sorted(contract_issue_counts)},
+            },
+            "skills": sorted(skill_rows, key=lambda item: str(item["name"]).lower()),
+        }
+
     def always_on(self, *, only_available: bool = True) -> list[SkillSpec]:
         rows = self.discover(include_unavailable=not only_available)
         return [item for item in rows if item.always and (item.available or not only_available)]

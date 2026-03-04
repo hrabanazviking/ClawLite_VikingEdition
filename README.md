@@ -217,6 +217,7 @@ Provider lifecycle:
 Memory and scheduler:
 - `clawlite memory doctor [--repair]`
 - `clawlite memory eval [--limit N]`
+- `clawlite skills check`
 - `clawlite cron add --session-id <id> --expression "<expr>" --prompt "<text>" [--name <name>]`
 - `clawlite cron list --session-id <id>`
 - `clawlite cron remove --job-id <id>`
