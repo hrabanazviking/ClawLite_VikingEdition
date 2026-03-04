@@ -22,6 +22,13 @@ from clawlite.config.schema import ChannelConfig
 from clawlite.utils.logging import setup_logging
 
 MAX_MESSAGE_LEN = 4000
+TELEGRAM_ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "callback_query",
+    "channel_post",
+    "edited_channel_post",
+]
 
 setup_logging()
 
@@ -559,7 +566,7 @@ class TelegramChannel(BaseChannel):
             await bot.set_webhook(
                 url=self.webhook_url,
                 secret_token=self.webhook_secret,
-                allowed_updates=["message", "edited_message", "callback_query"],
+                allowed_updates=TELEGRAM_ALLOWED_UPDATES,
             )
             self._signals["webhook_set_count"] += 1
             self._connected = True
@@ -674,7 +681,7 @@ class TelegramChannel(BaseChannel):
                 updates = await self.bot.get_updates(
                     offset=self._offset,
                     timeout=0,
-                    allowed_updates=["message", "edited_message", "callback_query"],
+                    allowed_updates=TELEGRAM_ALLOWED_UPDATES,
                 )
                 if not updates:
                     break
@@ -732,7 +739,7 @@ class TelegramChannel(BaseChannel):
                 updates = await self.bot.get_updates(
                     offset=self._offset,
                     timeout=self.poll_timeout_s,
-                    allowed_updates=["message", "edited_message", "callback_query"],
+                    allowed_updates=TELEGRAM_ALLOWED_UPDATES,
                 )
                 if not self._connected:
                     self._connected = True
@@ -848,6 +855,12 @@ class TelegramChannel(BaseChannel):
         is_edit = False
         if message is None:
             message = getattr(item, "edited_message", None)
+            is_edit = message is not None
+        if message is None:
+            message = getattr(item, "channel_post", None)
+            is_edit = False
+        if message is None:
+            message = getattr(item, "edited_channel_post", None)
             is_edit = message is not None
         if message is None:
             message = getattr(item, "effective_message", None)

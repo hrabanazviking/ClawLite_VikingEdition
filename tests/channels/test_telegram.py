@@ -1586,7 +1586,13 @@ def test_telegram_webhook_mode_start_sets_webhook_and_stop_deletes_webhook() -> 
             assert len(bot.set_calls) == 1
             assert bot.set_calls[0]["url"] == "https://example.com/hook"
             assert bot.set_calls[0]["secret_token"] == "secret-1"
-            assert bot.set_calls[0]["allowed_updates"] == ["message", "edited_message", "callback_query"]
+            assert bot.set_calls[0]["allowed_updates"] == [
+                "message",
+                "edited_message",
+                "callback_query",
+                "channel_post",
+                "edited_channel_post",
+            ]
             await channel.stop()
 
         assert len(bot.delete_calls) == 1
@@ -1672,5 +1678,123 @@ def test_telegram_handle_webhook_update_normalizes_callback_payload_and_dedupes(
         signals = channel.signals()
         assert signals["webhook_update_received_count"] == 2
         assert signals["webhook_update_duplicate_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_channel_post_is_forwarded() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+        chat = SimpleNamespace(type="channel")
+        post = SimpleNamespace(
+            text="channel hello",
+            caption=None,
+            chat_id=-100123,
+            from_user=None,
+            message_id=30,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        update = SimpleNamespace(
+            update_id=201,
+            message=None,
+            edited_message=None,
+            channel_post=post,
+            edited_channel_post=None,
+            effective_message=None,
+        )
+
+        processed = await channel._handle_update(update)
+
+        assert processed is True
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:-100123"
+        assert user_id == "-100123"
+        assert text == "channel hello"
+        assert metadata["channel"] == "telegram"
+        assert metadata["chat_id"] == "-100123"
+        assert metadata["is_edit"] is False
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_edited_channel_post_is_forwarded_as_edit() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+        chat = SimpleNamespace(type="channel")
+        post = SimpleNamespace(
+            text="channel edit",
+            caption=None,
+            chat_id=-100124,
+            from_user=None,
+            message_id=31,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        update = SimpleNamespace(
+            update_id=202,
+            message=None,
+            edited_message=None,
+            channel_post=None,
+            edited_channel_post=post,
+            effective_message=None,
+        )
+
+        processed = await channel._handle_update(update)
+
+        assert processed is True
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:-100124"
+        assert user_id == "-100124"
+        assert text == "channel edit"
+        assert metadata["chat_id"] == "-100124"
+        assert metadata["is_edit"] is True
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_handle_webhook_update_normalizes_channel_post_payload() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict[str, object]) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+        payload = {
+            "update_id": 901,
+            "channel_post": {
+                "message_id": 90,
+                "chat": {"id": -100222, "type": "channel"},
+                "text": "raw channel",
+            },
+        }
+
+        processed = await channel.handle_webhook_update(payload)
+
+        assert processed is True
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:-100222"
+        assert user_id == "-100222"
+        assert text == "raw channel"
+        assert metadata["chat_id"] == "-100222"
+        assert metadata["is_edit"] is False
 
     asyncio.run(_scenario())

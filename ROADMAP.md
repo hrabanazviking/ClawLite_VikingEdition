@@ -85,6 +85,7 @@
 - Telegram parity increment: inbound `callback_query` updates now flow through allowlist+ack path with channel signals, and outbound supports metadata-driven inline keyboards.
 - Message tool parity increment: `message` now accepts `metadata` + `buttons` and bridges inline keyboard payloads to Telegram via gateway/channel metadata path.
 - Telegram parity increment: webhook runtime mode now active with secret-token validation on configurable webhook endpoint and safe fallback to polling when webhook activation fails.
+- Telegram parity increment: inbound channel updates (`channel_post`, `edited_channel_post`) now flow end-to-end in polling and webhook using the existing Telegram message pipeline.
 
 ### FUTURE (Scale + polish)
 
