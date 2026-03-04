@@ -10,6 +10,13 @@ from clawlite.cli.ops import channels_validation
 from clawlite.cli.ops import diagnostics_snapshot
 from clawlite.cli.ops import fetch_gateway_diagnostics
 from clawlite.cli.ops import memory_eval_snapshot
+from clawlite.cli.ops import memory_export_snapshot
+from clawlite.cli.ops import memory_import_snapshot
+from clawlite.cli.ops import memory_privacy_snapshot
+from clawlite.cli.ops import memory_profile_snapshot
+from clawlite.cli.ops import memory_snapshot_create
+from clawlite.cli.ops import memory_snapshot_rollback
+from clawlite.cli.ops import memory_suggest_snapshot
 from clawlite.cli.ops import memory_doctor_snapshot
 from clawlite.cli.ops import onboarding_validation
 from clawlite.cli.ops import provider_validation
@@ -261,6 +268,55 @@ def cmd_memory_eval(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok", False) else 2
 
 
+def cmd_memory_profile(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_profile_snapshot(cfg)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_suggest(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_suggest_snapshot(cfg, refresh=not bool(args.no_refresh))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_snapshot(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_snapshot_create(cfg, tag=str(args.tag or ""))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_rollback(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_snapshot_rollback(cfg, version_id=str(args.id or ""))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_privacy(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_privacy_snapshot(cfg)
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_export(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_export_snapshot(cfg, out_path=str(args.out or ""))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_memory_import(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_import_snapshot(cfg, file_path=str(args.file or ""))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
 def cmd_cron_add(args: argparse.Namespace) -> int:
     from clawlite.gateway.server import build_runtime
 
@@ -501,6 +557,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_memory_eval = memory_sub.add_parser("eval", help="Run deterministic synthetic memory retrieval evaluation")
     p_memory_eval.add_argument("--limit", type=int, default=5, help="Top-k retrieval limit per synthetic query")
     p_memory_eval.set_defaults(handler=cmd_memory_eval)
+
+    p_memory_profile = memory_sub.add_parser("profile", help="Show memory profile snapshot")
+    p_memory_profile.set_defaults(handler=cmd_memory_profile)
+
+    p_memory_suggest = memory_sub.add_parser("suggest", help="Show proactive memory suggestions snapshot")
+    p_memory_suggest.add_argument("--no-refresh", action="store_true", help="Read pending suggestions without running a scan")
+    p_memory_suggest.set_defaults(handler=cmd_memory_suggest)
+
+    p_memory_snapshot = memory_sub.add_parser("snapshot", help="Create memory snapshot version")
+    p_memory_snapshot.add_argument("--tag", default="", help="Optional tag to append to snapshot id")
+    p_memory_snapshot.set_defaults(handler=cmd_memory_snapshot)
+
+    p_memory_rollback = memory_sub.add_parser("rollback", help="Rollback memory state to snapshot id")
+    p_memory_rollback.add_argument("id")
+    p_memory_rollback.set_defaults(handler=cmd_memory_rollback)
+
+    p_memory_privacy = memory_sub.add_parser("privacy", help="Show memory privacy rules snapshot")
+    p_memory_privacy.set_defaults(handler=cmd_memory_privacy)
+
+    p_memory_export = memory_sub.add_parser("export", help="Export memory snapshot payload")
+    p_memory_export.add_argument("--out", default="", help="Write export payload to file path")
+    p_memory_export.set_defaults(handler=cmd_memory_export)
+
+    p_memory_import = memory_sub.add_parser("import", help="Import memory payload from file path")
+    p_memory_import.add_argument("file")
+    p_memory_import.set_defaults(handler=cmd_memory_import)
 
     p_cron = sub.add_parser("cron", help="Manage scheduled jobs")
     cron_sub = p_cron.add_subparsers(dest="cron_command", required=True)

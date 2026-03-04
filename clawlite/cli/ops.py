@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import asyncio
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ import httpx
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
+from clawlite.core.memory_monitor import MemoryMonitor
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.workspace.loader import TEMPLATE_FILES
 from clawlite.workspace.loader import WorkspaceLoader
@@ -906,3 +908,184 @@ def memory_doctor_snapshot(config: AppConfig, repair: bool = False) -> dict[str,
             "message": str(exc),
         }
     return payload
+
+
+def _build_memory_store(config: AppConfig) -> MemoryStore:
+    semantic_enabled = bool(
+        getattr(config.agents.defaults.memory, "semantic_search", config.agents.defaults.semantic_memory)
+    )
+    auto_categorize = bool(
+        getattr(config.agents.defaults.memory, "auto_categorize", config.agents.defaults.memory_auto_categorize)
+    )
+    return MemoryStore(
+        db_path=Path(config.state_path).expanduser() / "memory.jsonl",
+        semantic_enabled=semantic_enabled,
+        memory_auto_categorize=auto_categorize,
+    )
+
+
+def memory_profile_snapshot(config: AppConfig) -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        profile = store._load_json_dict(store.profile_path, store._default_profile())
+        return {
+            "ok": True,
+            "profile": profile,
+            "path": str(store.profile_path),
+            "keys": sorted(profile.keys()),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_suggest_snapshot(config: AppConfig, refresh: bool = True) -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        monitor = MemoryMonitor(store)
+        source = "pending"
+        if refresh:
+            try:
+                suggestions = asyncio.run(monitor.scan())
+                source = "scan"
+            except Exception:
+                suggestions = monitor.pending()
+                source = "pending_fallback"
+        else:
+            suggestions = monitor.pending()
+        rows = [item.to_payload() for item in suggestions]
+        rows.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
+        return {
+            "ok": True,
+            "refresh": bool(refresh),
+            "source": source,
+            "count": len(rows),
+            "suggestions": rows,
+            "pending_path": str(monitor.suggestions_path),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_snapshot_create(config: AppConfig, tag: str = "") -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        version_id = store.snapshot(tag=tag)
+        version_path = store.versions_path / f"{version_id}.json.gz"
+        return {
+            "ok": True,
+            "version_id": version_id,
+            "tag": str(tag or ""),
+            "version_path": str(version_path),
+            "exists": version_path.exists(),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_snapshot_rollback(config: AppConfig, version_id: str) -> dict[str, Any]:
+    clean_id = str(version_id or "").strip()
+    if not clean_id:
+        return {"ok": False, "error": {"type": "ValueError", "message": "version_id_required"}}
+    try:
+        store = _build_memory_store(config)
+        before = len(store.all()) + len(store.curated())
+        store.rollback(clean_id)
+        after = len(store.all()) + len(store.curated())
+        return {
+            "ok": True,
+            "version_id": clean_id,
+            "counts": {"before": before, "after": after},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "version_id": clean_id,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_privacy_snapshot(config: AppConfig) -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        privacy = store._load_json_dict(store.privacy_path, store._default_privacy())
+        return {
+            "ok": True,
+            "privacy": privacy,
+            "path": str(store.privacy_path),
+            "keys": sorted(privacy.keys()),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_export_snapshot(config: AppConfig, out_path: str = "") -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        payload = store.export_payload()
+        output_path = str(out_path or "").strip()
+        if output_path:
+            target = Path(output_path).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return {
+                "ok": True,
+                "out_path": str(target),
+                "written": True,
+                "version": payload.get("version"),
+                "counts": {
+                    "history": len(payload.get("history", [])),
+                    "curated": len(payload.get("curated", [])),
+                },
+            }
+        return {
+            "ok": True,
+            "written": False,
+            "export": payload,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
+def memory_import_snapshot(config: AppConfig, file_path: str) -> dict[str, Any]:
+    source_path = Path(str(file_path or "").strip()).expanduser()
+    if not str(file_path or "").strip():
+        return {"ok": False, "error": {"type": "ValueError", "message": "file_path_required"}}
+    if not source_path.exists():
+        return {
+            "ok": False,
+            "error": {"type": "FileNotFoundError", "message": str(source_path)},
+        }
+    try:
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
+        payload = raw if isinstance(raw, dict) else {}
+        store = _build_memory_store(config)
+        before = len(store.all()) + len(store.curated())
+        store.import_payload(payload)
+        after = len(store.all()) + len(store.curated())
+        return {
+            "ok": True,
+            "file_path": str(source_path),
+            "imported": True,
+            "counts": {"before": before, "after": after},
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "file_path": str(source_path),
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }

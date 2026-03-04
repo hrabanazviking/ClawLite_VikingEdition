@@ -525,6 +525,221 @@ def test_cli_memory_eval_does_not_import_gateway_runtime(tmp_path: Path, capsys)
     capsys.readouterr()
 
 
+def test_cli_memory_profile_returns_schema_fields(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "memory", "profile"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert "profile" in payload
+    assert payload["profile"]["timezone"]
+    assert payload["profile"]["language"]
+    assert payload["profile"]["response_length_preference"]
+
+
+def test_cli_memory_suggest_returns_list_without_crashing_on_empty(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "memory", "suggest"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert isinstance(payload["suggestions"], list)
+    assert payload["count"] == len(payload["suggestions"])
+
+
+def test_cli_memory_snapshot_and_rollback_restores_previous_state(tmp_path: Path, capsys) -> None:
+    state_path = tmp_path / "state"
+    state_path.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(state_path),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    history_path = state_path / "memory.jsonl"
+    row_a = {
+        "id": "row-a",
+        "text": "baseline memory",
+        "source": "session:a",
+        "created_at": "2026-03-04T00:00:00+00:00",
+    }
+    row_b = {
+        "id": "row-b",
+        "text": "new memory",
+        "source": "session:b",
+        "created_at": "2026-03-04T00:01:00+00:00",
+    }
+    history_path.write_text(json.dumps(row_a) + "\n", encoding="utf-8")
+
+    rc_snapshot = main(["--config", str(config_path), "memory", "snapshot", "--tag", "baseline"])
+    assert rc_snapshot == 0
+    snapshot_payload = json.loads(capsys.readouterr().out)
+    version_id = snapshot_payload["version_id"]
+    assert version_id
+
+    history_path.write_text("\n".join([json.dumps(row_a), json.dumps(row_b)]) + "\n", encoding="utf-8")
+
+    rc_rollback = main(["--config", str(config_path), "memory", "rollback", version_id])
+    assert rc_rollback == 0
+    rollback_payload = json.loads(capsys.readouterr().out)
+    assert rollback_payload["ok"] is True
+    restored = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    restored_ids = {item["id"] for item in restored}
+    assert "row-a" in restored_ids
+    assert "row-b" not in restored_ids
+
+
+def test_cli_memory_privacy_returns_config_keys(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "memory", "privacy"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert "privacy" in payload
+    assert "never_memorize_patterns" in payload["privacy"]
+    assert "ephemeral_ttl_days" in payload["privacy"]
+
+
+def test_cli_memory_export_and_import_roundtrip(tmp_path: Path, capsys) -> None:
+    state_path = tmp_path / "state"
+    state_path.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(state_path),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    history_path = state_path / "memory.jsonl"
+    history_path.write_text(
+        json.dumps(
+            {
+                "id": "exp-a",
+                "text": "export baseline",
+                "source": "session:export",
+                "created_at": "2026-03-04T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    export_path = tmp_path / "memory-export.json"
+    rc_export = main(["--config", str(config_path), "memory", "export", "--out", str(export_path)])
+    assert rc_export == 0
+    export_payload = json.loads(capsys.readouterr().out)
+    assert export_payload["ok"] is True
+    assert export_payload["written"] is True
+    assert export_path.exists()
+
+    history_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": "exp-a",
+                        "text": "export baseline",
+                        "source": "session:export",
+                        "created_at": "2026-03-04T00:00:00+00:00",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": "exp-b",
+                        "text": "to be rolled back by import",
+                        "source": "session:export",
+                        "created_at": "2026-03-04T00:01:00+00:00",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc_import = main(["--config", str(config_path), "memory", "import", str(export_path)])
+    assert rc_import == 0
+    import_payload = json.loads(capsys.readouterr().out)
+    assert import_payload["ok"] is True
+    rows_after_import = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    ids = {row["id"] for row in rows_after_import}
+    assert ids == {"exp-a"}
+
+
+def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_profile = main(["--config", str(config_path), "memory", "profile"])
+    assert rc_profile == 0
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_suggest = main(["--config", str(config_path), "memory", "suggest", "--no-refresh"])
+    assert rc_suggest == 0
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    export_path = tmp_path / "portable.json"
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_export = main(["--config", str(config_path), "memory", "export", "--out", str(export_path)])
+    assert rc_export == 0
+    assert "clawlite.gateway.server" not in sys.modules
+
+
 def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

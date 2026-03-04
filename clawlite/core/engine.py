@@ -942,6 +942,21 @@ class AgentEngine:
             messages.append({"role": "system", "content": prompt.memory_section})
         if prompt.skills_context:
             messages.append({"role": "system", "content": f"[Skill Guides]\n{prompt.skills_context}"})
+        emotion_guidance_fn = getattr(self.memory, "emotion_guidance", None)
+        if callable(emotion_guidance_fn):
+            try:
+                guidance = emotion_guidance_fn(user_text, session_id=session_id)
+            except TypeError:
+                try:
+                    guidance = emotion_guidance_fn(user_text)
+                except Exception as exc:
+                    run_log.warning("emotional guidance failed session={} error={}", session_id or "-", exc)
+                    guidance = ""
+            except Exception as exc:
+                run_log.warning("emotional guidance failed session={} error={}", session_id or "-", exc)
+                guidance = ""
+            if str(guidance or "").strip():
+                messages.append({"role": "system", "content": str(guidance).strip()})
         if prompt.history_messages:
             messages.extend(prompt.history_messages)
         if prompt.runtime_context:
@@ -1189,10 +1204,23 @@ class AgentEngine:
         self.sessions.append(session_id, "user", user_text)
         if not graceful_error:
             self.sessions.append(session_id, "assistant", final.text)
-            self.memory.consolidate(
-                [{"role": "user", "content": user_text}, {"role": "assistant", "content": final.text}],
-                source=f"session:{session_id}",
-            )
+            memory_messages = [{"role": "user", "content": user_text}, {"role": "assistant", "content": final.text}]
+            memorize_fn = getattr(self.memory, "memorize", None)
+            if callable(memorize_fn):
+                try:
+                    memorize_result = memorize_fn(messages=memory_messages, source=f"session:{session_id}")
+                    if inspect.isawaitable(memorize_result):
+                        await memorize_result
+                except Exception as exc:
+                    run_log.warning("memory memorize failed session={} error={}", session_id or "-", exc)
+            else:
+                try:
+                    self.memory.consolidate(
+                        memory_messages,
+                        source=f"session:{session_id}",
+                    )
+                except Exception as exc:
+                    run_log.warning("memory consolidate failed session={} error={}", session_id or "-", exc)
         else:
             run_log.info("skipping assistant persistence after provider failure")
         if final.model == "engine/stop":

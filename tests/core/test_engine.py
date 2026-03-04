@@ -103,6 +103,28 @@ class FakeMemory:
         return None
 
 
+class FakeMemoryWithEmotionGuidance(FakeMemory):
+    def emotion_guidance(self, user_text: str, *, session_id: str = "") -> str:
+        del user_text, session_id
+        return "User seems frustrated. Be more empathetic and brief."
+
+
+class FakeMemoryWithAsyncMemorize(FakeMemory):
+    def __init__(self, rows: list[MemoryRecord] | None = None) -> None:
+        super().__init__(rows)
+        self.memorize_calls: list[dict[str, Any]] = []
+        self.consolidate_calls = 0
+
+    async def memorize(self, *, messages=None, source: str = "session", text: str | None = None):
+        self.memorize_calls.append({"messages": messages, "source": source, "text": text})
+        return {"status": "ok"}
+
+    def consolidate(self, messages, *, source: str = "session"):
+        del messages, source
+        self.consolidate_calls += 1
+        return None
+
+
 class FakePlannerMemory:
     def __init__(
         self,
@@ -394,6 +416,44 @@ def test_engine_formats_memory_snippets_with_ref_and_source_marker() -> None:
         section = str(memory_sections[0].get("content", ""))
         assert "mem:a1b2c3d4" in section
         assert "[src:session:telegram:42]" in section
+
+    asyncio.run(_scenario())
+
+
+def test_engine_injects_emotional_guidance_as_system_message() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        memory = FakeMemoryWithEmotionGuidance()
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:emotion", user_text="I am blocked")
+        assert out.text == "ok"
+
+        first_prompt = provider.snapshots[0]
+        guidance_rows = [
+            row
+            for row in first_prompt
+            if row.get("role") == "system"
+            and "User seems frustrated. Be more empathetic and brief." in str(row.get("content", ""))
+        ]
+        assert guidance_rows
+
+    asyncio.run(_scenario())
+
+
+def test_engine_prefers_async_memorize_over_consolidate() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        memory = FakeMemoryWithAsyncMemorize()
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:memorize", user_text="remember this")
+        assert out.text == "ok"
+        assert len(memory.memorize_calls) == 1
+        call = memory.memorize_calls[0]
+        assert call["source"] == "session:cli:memorize"
+        assert isinstance(call["messages"], list)
+        assert memory.consolidate_calls == 0
 
     asyncio.run(_scenario())
 
