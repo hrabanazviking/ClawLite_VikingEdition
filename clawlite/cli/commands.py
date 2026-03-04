@@ -45,6 +45,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "workspace_path": cfg.workspace_path,
             "provider_model": cfg.agents.defaults.model,
             "memory_window": cfg.agents.defaults.memory_window,
+            "session_retention_messages": cfg.agents.defaults.session_retention_messages,
             "channels_enabled": channels_enabled,
             "cron_jobs_count": jobs_count,
             "heartbeat_interval_seconds": cfg.gateway.heartbeat.interval_s,

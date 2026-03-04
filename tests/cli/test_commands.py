@@ -64,7 +64,7 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
                 "workspace_path": str(workspace_path),
                 "state_path": str(state_path),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "agents": {"defaults": {"memory_window": 17}},
+                "agents": {"defaults": {"memory_window": 17, "session_retention_messages": 77}},
                 "channels": {"telegram": {"enabled": True}, "discord": {"enabled": False}},
                 "scheduler": {"heartbeat_interval_seconds": 1234},
             }
@@ -78,6 +78,7 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     assert payload["provider_model"] == "openai/gpt-4o-mini"
     assert payload["heartbeat_interval_seconds"] == 1234
     assert payload["memory_window"] == 17
+    assert payload["session_retention_messages"] == 77
     assert payload["channels_enabled"] == ["telegram"]
     assert payload["gateway_auth_mode"] == "off"
     assert payload["gateway_auth_token_configured"] is False
@@ -189,7 +190,7 @@ def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> 
                 "workspace_path": str(workspace_path),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "gemini/gemini-2.5-flash"},
-                "agents": {"defaults": {"memory_window": 29}},
+                "agents": {"defaults": {"memory_window": 29, "session_retention_messages": 111}},
             }
         ),
         encoding="utf-8",
@@ -212,7 +213,9 @@ def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> 
     diagnostics = json.loads(capsys.readouterr().out)
     assert diagnostics["local"]["gateway"]["diagnostics_enabled"] is True
     assert diagnostics["local"]["memory_window"] == 29
+    assert diagnostics["local"]["session_retention_messages"] == 111
     assert diagnostics["local"]["agent_defaults"]["memory_window"] == 29
+    assert diagnostics["local"]["agent_defaults"]["session_retention_messages"] == 111
     assert "validation" not in diagnostics["local"]
 
 

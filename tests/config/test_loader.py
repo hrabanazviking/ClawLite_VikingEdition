@@ -293,3 +293,41 @@ def test_load_config_tool_loop_detection_settings(tmp_path: Path) -> None:
     assert cfg.tools.loop_detection.history_size == 12
     assert cfg.tools.loop_detection.repeat_threshold == 2
     assert cfg.tools.loop_detection.critical_threshold == 4
+
+
+def test_load_config_agent_defaults_session_retention_messages_snake_case(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "session_retention_messages": 321,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.agents.defaults.session_retention_messages == 321
+
+
+def test_load_config_agent_defaults_session_retention_messages_camel_case(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "sessionRetentionMessages": 654,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.agents.defaults.session_retention_messages == 654

@@ -30,15 +30,20 @@ class SessionStore:
     ~/.clawlite/state/sessions/<session_id>.jsonl
     """
 
-    def __init__(self, root: str | Path | None = None) -> None:
+    def __init__(self, root: str | Path | None = None, max_messages_per_session: int | None = 2000) -> None:
         base = Path(root) if root else (Path.home() / ".clawlite" / "state" / "sessions")
         self.root = base
         self.root.mkdir(parents=True, exist_ok=True)
+        configured_limit = None if max_messages_per_session is None else int(max_messages_per_session)
+        self.max_messages_per_session = configured_limit if configured_limit and configured_limit > 0 else None
         self._diagnostics: dict[str, int | str] = {
             "append_attempts": 0,
             "append_retries": 0,
             "append_failures": 0,
             "append_success": 0,
+            "compaction_runs": 0,
+            "compaction_trimmed_lines": 0,
+            "compaction_failures": 0,
             "read_corrupt_lines": 0,
             "read_repaired_files": 0,
             "last_error": "",
@@ -84,6 +89,7 @@ class SessionStore:
                 self._append_once(path, payload)
                 self._diagnostics["append_success"] = int(self._diagnostics["append_success"]) + 1
                 self._diagnostics["last_error"] = ""
+                self._compact_session_file(path)
                 return
             except OSError as exc:
                 self._diagnostics["last_error"] = str(exc)
@@ -141,12 +147,45 @@ class SessionStore:
         except Exception as exc:
             self._diagnostics["last_error"] = str(exc)
 
+    def _compact_session_file(self, path: Path) -> None:
+        limit = self.max_messages_per_session
+        if limit is None:
+            return
+        self._diagnostics["compaction_runs"] = int(self._diagnostics["compaction_runs"]) + 1
+        try:
+            valid_lines: list[str] = []
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                valid_lines.append(raw)
+
+            keep = valid_lines[-limit:]
+            trimmed = max(0, len(valid_lines) - len(keep))
+            rewritten = "\n".join(keep)
+            if rewritten:
+                rewritten = f"{rewritten}\n"
+            path.write_text(rewritten, encoding="utf-8")
+            if trimmed:
+                self._diagnostics["compaction_trimmed_lines"] = int(self._diagnostics["compaction_trimmed_lines"]) + trimmed
+            self._diagnostics["last_error"] = ""
+        except Exception as exc:
+            self._diagnostics["compaction_failures"] = int(self._diagnostics["compaction_failures"]) + 1
+            self._diagnostics["last_error"] = str(exc)
+
     def diagnostics(self) -> dict[str, int | str]:
         return {
             "append_attempts": int(self._diagnostics["append_attempts"]),
             "append_retries": int(self._diagnostics["append_retries"]),
             "append_failures": int(self._diagnostics["append_failures"]),
             "append_success": int(self._diagnostics["append_success"]),
+            "compaction_runs": int(self._diagnostics["compaction_runs"]),
+            "compaction_trimmed_lines": int(self._diagnostics["compaction_trimmed_lines"]),
+            "compaction_failures": int(self._diagnostics["compaction_failures"]),
             "read_corrupt_lines": int(self._diagnostics["read_corrupt_lines"]),
             "read_repaired_files": int(self._diagnostics["read_repaired_files"]),
             "last_error": str(self._diagnostics["last_error"]),

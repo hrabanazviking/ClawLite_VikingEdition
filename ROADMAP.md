@@ -136,6 +136,7 @@
 - Progress (2026-03-04): retrieval ranking now adds bounded temporal awareness (recency/decay + temporal-intent marker boost) and planner sufficiency requires temporal relevance before accepting first-pass hits.
 - Progress (2026-03-04): added guarded deterministic memory control/inspection tools `memory_forget` and `memory_analyze` (selector/query validation, bounded delete limit, compact stats + refs).
 - Progress (2026-03-04): delivered `clawlite memory doctor` CLI snapshot with JSON diagnostics, schema hints, and optional safe repair path.
+- Progress (2026-03-04): delivered per-session retention + append-time compaction (`agents.defaults.session_retention_messages`) with operator visibility in `clawlite status`/`clawlite diagnostics`.
 
 ### Vision and differentiation
 - Build **ClawMemory** as a proactive memory engine that adapts ideas from

@@ -394,7 +394,10 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     skills = SkillsLoader()
     tools.register(SkillTool(loader=skills, registry=tools))
 
-    sessions = SessionStore(root=Path(config.state_path) / "sessions")
+    sessions = SessionStore(
+        root=Path(config.state_path) / "sessions",
+        max_messages_per_session=config.agents.defaults.session_retention_messages,
+    )
     memory = MemoryStore(db_path=Path(config.state_path) / "memory.jsonl")
     tools.register(MemoryRecallTool(memory))
     tools.register(MemoryLearnTool(memory))

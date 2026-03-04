@@ -243,9 +243,11 @@ def diagnostics_snapshot(config: AppConfig, *, config_path: str, include_validat
         "state_path": config.state_path,
         "provider_model": config.agents.defaults.model,
         "memory_window": config.agents.defaults.memory_window,
+        "session_retention_messages": config.agents.defaults.session_retention_messages,
         "agent_defaults": {
             "provider_model": config.agents.defaults.model,
             "memory_window": config.agents.defaults.memory_window,
+            "session_retention_messages": config.agents.defaults.session_retention_messages,
         },
         "gateway": {
             "host": config.gateway.host,

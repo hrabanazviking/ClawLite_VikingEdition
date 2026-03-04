@@ -68,3 +68,57 @@ def test_session_store_read_recovers_from_malformed_json_and_repairs_file(tmp_pa
     diag = store.diagnostics()
     assert diag["read_corrupt_lines"] == 1
     assert diag["read_repaired_files"] == 1
+
+
+def test_session_store_compacts_to_keep_last_n_messages(tmp_path: Path) -> None:
+    store = SessionStore(root=tmp_path / "sessions", max_messages_per_session=3)
+    for idx in range(6):
+        store.append("telegram:4", "user", f"m{idx}")
+
+    rows = store.read("telegram:4", limit=10)
+    assert [row["content"] for row in rows] == ["m3", "m4", "m5"]
+
+
+def test_session_store_compaction_preserves_order_and_latest_messages(tmp_path: Path) -> None:
+    store = SessionStore(root=tmp_path / "sessions", max_messages_per_session=4)
+    payloads = [
+        ("user", "first"),
+        ("assistant", "second"),
+        ("user", "third"),
+        ("assistant", "fourth"),
+        ("user", "fifth"),
+        ("assistant", "sixth"),
+    ]
+    for role, content in payloads:
+        store.append("telegram:5", role, content)
+
+    rows = store.read("telegram:5", limit=10)
+    assert [(row["role"], row["content"]) for row in rows] == payloads[-4:]
+
+
+def test_session_store_compaction_updates_diagnostics_counters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = SessionStore(root=tmp_path / "sessions", max_messages_per_session=2)
+    store.append("telegram:6", "user", "one")
+    store.append("telegram:6", "user", "two")
+    store.append("telegram:6", "user", "three")
+
+    diag = store.diagnostics()
+    assert diag["compaction_runs"] == 3
+    assert diag["compaction_trimmed_lines"] == 1
+    assert diag["compaction_failures"] == 0
+
+    target = tmp_path / "sessions" / "telegram:6.jsonl"
+
+    original_read_text = Path.read_text
+
+    def _boom(self: Path, *args, **kwargs) -> str:
+        if self == target:
+            raise OSError("compaction exploded")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    store.append("telegram:6", "user", "four")
+    diag_after = store.diagnostics()
+    assert diag_after["append_success"] == 4
+    assert diag_after["compaction_failures"] == 1
+    assert target.exists()

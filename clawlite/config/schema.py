@@ -327,11 +327,25 @@ class AgentDefaultsConfig:
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
+    session_retention_messages: int | None = 2000
     reasoning_effort: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> AgentDefaultsConfig:
         data = dict(raw or {})
+        if "sessionRetentionMessages" in data:
+            session_retention_raw = data.get("sessionRetentionMessages")
+        elif "session_retention_messages" in data:
+            session_retention_raw = data.get("session_retention_messages")
+        else:
+            session_retention_raw = 2000
+        if session_retention_raw is None:
+            session_retention_messages: int | None = None
+        else:
+            normalized_retention_raw = session_retention_raw
+            if isinstance(normalized_retention_raw, str) and not normalized_retention_raw.strip():
+                normalized_retention_raw = 2000
+            session_retention_messages = max(1, int(normalized_retention_raw))
         return cls(
             model=str(data.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
             provider=str(data.get("provider", "auto") or "auto"),
@@ -339,6 +353,7 @@ class AgentDefaultsConfig:
             temperature=float(data.get("temperature", 0.1) or 0.1),
             max_tool_iterations=max(1, int(data.get("max_tool_iterations", data.get("maxToolIterations", 40)) or 40)),
             memory_window=max(1, int(data.get("memory_window", data.get("memoryWindow", 100)) or 100)),
+            session_retention_messages=session_retention_messages,
             reasoning_effort=(str(data.get("reasoning_effort", data.get("reasoningEffort", "")) or "").strip() or None),
         )
 
