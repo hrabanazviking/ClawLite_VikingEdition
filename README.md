@@ -12,22 +12,25 @@
   </p>
 </div>
 
-## ⚡ What Is ClawLite
-ClawLite is a practical autonomous assistant focused on execution: it receives messages, runs tools, stores memory, schedules jobs, and sends proactive updates through channels.
-Unlike heavier alternatives, ClawLite is intentionally compact: around **4.2k lines of focused Python core code** designed for personal operation and fast iteration.
+## What ClawLite Is
+ClawLite is a practical autonomous assistant focused on execution. It can receive messages, run tools, schedule work, keep persistent memory, and proactively deliver updates through channels.
 
-## ✨ Main Features
-- 🧠 **Unified agent engine** for CLI, HTTP API, WebSocket, scheduler, and channels.
-- 💬 **Telegram-first channel support** with allowlist validation and long-message chunking.
-- 📤 **Outbound-active adapters** for Discord, Slack, and WhatsApp over HTTP APIs.
-- 🧩 **Skills via `SKILL.md`** with autoload and executable `command/script` actions.
-- 🗓️ **Autonomous scheduling** with Cron jobs and heartbeat loops.
-- 🗂️ **Persistent memory + sessions** stored under `~/.clawlite/state`.
-- 🔌 **Multi-provider LLM support** (Gemini, OpenAI, OpenRouter, Groq, DeepSeek, Anthropic routing, Codex, custom OpenAI-compatible endpoints).
-- 🛠️ **Tool execution** for shell, files, web, cron, message routing, skills, and subagents.
+The same core engine powers CLI, gateway, scheduler, and channel workflows for a single operational model.
 
-## 🚀 Quick Start (4 Steps)
-1. **Clone and install**
+## Key Capabilities
+- Unified runtime for CLI, HTTP API, WebSocket, scheduler, and channels.
+- Telegram inbound support with allowlist and resilient polling.
+- Active outbound adapters for Discord, Slack, and WhatsApp.
+- Memory tooling for learn/recall/forget/analyze plus `clawlite memory doctor` diagnostics and safe repair path.
+- Scheduler with cron jobs and heartbeat loop (`HEARTBEAT_OK` contract + persisted heartbeat state).
+- Session controls including `agents.defaults.memory_window` and `agents.defaults.session_retention_messages`.
+- Gateway compatibility aliases aligned with OpenClaw-style surface.
+- Channel-aware tool safety policy for risky tools (`exec`, `web_fetch`, `web_search`, `mcp`).
+- Control-plane endpoints for diagnostics, heartbeat trigger, autonomy trigger/simulate/explain/policy, and dead-letter replay.
+
+## Quickstart
+1. Clone and install:
+
 ```bash
 git clone https://github.com/eobarretooo/ClawLite.git
 cd ClawLite
@@ -37,50 +40,29 @@ pip install -U pip
 pip install -e .
 ```
 
-2. **Initialize workspace identity files**
+2. Bootstrap workspace templates:
+
 ```bash
 clawlite onboard
 ```
 
-3. **Create minimal config** (`~/.clawlite/config.json`)
-```json
-{
-  "provider": {
-    "model": "gemini/gemini-2.5-flash"
-  },
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "token": "123456789:AA...",
-      "allow_from": ["1850513297"]
-    }
-  }
-}
-```
+3. Create `~/.clawlite/config.json` (minimal example below).
 
-4. **Export API key and start gateway**
+4. Export provider key and start the gateway:
+
 ```bash
-export GEMINI_API_KEY="AIza..."
+export GEMINI_API_KEY="..."
 clawlite start --host 127.0.0.1 --port 8787
 ```
 
-Health check:
+5. Smoke check:
+
 ```bash
-curl -s http://127.0.0.1:8787/health
+curl -sS http://127.0.0.1:8787/health | python -m json.tool
 ```
 
-Gateway compatibility aliases (OpenClaw-style surface):
-- `GET /api/status` (alias de `GET /v1/status`)
-- `POST /api/message` (alias de `POST /v1/chat`)
-- `GET /api/token` (diagnóstico com token mascarado)
-- `WS /ws` (alias de `WS /v1/ws`)
-- `GET /` (entrypoint HTML leve e determinístico)
-- Progress 2026-03-04: gateway auth now auto-hardens to `required` on non-loopback hosts when a token is configured (localhost behavior unchanged); env fallback `CLAWLITE_GATEWAY_TOKEN` is also accepted.
-- Progress 2026-03-04: `agents.defaults.memory_window` now controls how much session history the engine injects per turn and is visible in CLI `status`/`diagnostics`.
-- Progress 2026-03-04: `agents.defaults.session_retention_messages` now controls per-session JSONL retention with append-time compaction and is visible in CLI `status`/`diagnostics`.
-
-## 🔧 Minimal Config (Gemini + Telegram)
-ClawLite loads config from `~/.clawlite/config.json` by default.
+## Minimal Config
+Default config path: `~/.clawlite/config.json`
 
 ```json
 {
@@ -91,7 +73,16 @@ ClawLite loads config from `~/.clawlite/config.json` by default.
   },
   "gateway": {
     "host": "127.0.0.1",
-    "port": 8787
+    "port": 8787,
+    "auth": {
+      "mode": "off"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "memory_window": 30,
+      "session_retention_messages": 200
+    }
   },
   "scheduler": {
     "heartbeat_interval_seconds": 1800,
@@ -101,108 +92,74 @@ ClawLite loads config from `~/.clawlite/config.json` by default.
     "telegram": {
       "enabled": true,
       "token": "123456789:AA...",
-      "allow_from": ["1850513297"],
-      "poll_timeout_s": 20,
-      "poll_interval_s": 1.0
+      "allow_from": ["1850513297"]
+    }
+  },
+  "tools": {
+    "safety": {
+      "enabled": true,
+      "risky_tools": ["exec", "web_fetch", "web_search", "mcp"],
+      "blocked_channels": ["telegram", "discord", "slack", "whatsapp"],
+      "allowed_channels": []
     }
   }
 }
 ```
 
-Environment overrides supported:
+Common environment overrides:
 - `CLAWLITE_MODEL`
 - `CLAWLITE_LITELLM_API_KEY`
 - `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`
-- `CLAWLITE_GATEWAY_HOST`, `CLAWLITE_GATEWAY_PORT`
+- `CLAWLITE_GATEWAY_HOST`, `CLAWLITE_GATEWAY_PORT`, `CLAWLITE_GATEWAY_TOKEN`
 
-Tool safety defaults (channel-aware, additive over tool-level guards):
-- `tools.safety.enabled: true`
-- `tools.safety.risky_tools: ["exec", "web_fetch", "web_search", "mcp"]`
-- `tools.safety.blocked_channels: ["telegram", "discord", "slack", "whatsapp"]`
-- `tools.safety.allowed_channels: []` (optional explicit override)
+Gateway auth hardening behavior:
+- On non-loopback hosts, if a token is configured and auth mode is weaker, runtime posture auto-hardens to `required`.
+- Loopback (`127.0.0.1` / localhost) behavior stays unchanged unless explicitly configured otherwise.
 
-## 📡 Supported Channels
+## API Highlights
+Base URL (default): `http://127.0.0.1:8787`
+
+- `GET /health`: readiness and queue snapshot.
+- `POST /v1/chat`: chat execution.
+- `WS /v1/ws`: WebSocket chat.
+- `GET /v1/status`: control-plane status + auth posture.
+- `GET /v1/diagnostics`: operational diagnostics snapshot.
+- `POST /v1/control/*`: heartbeat/autonomy/dead-letter control endpoints.
+- `POST /v1/cron/add`, `GET /v1/cron/list`, `DELETE /v1/cron/{job_id}`: scheduler API.
+
+Compatibility aliases:
+- `GET /api/status` -> `GET /v1/status`
+- `POST /api/message` -> `POST /v1/chat`
+- `GET /api/diagnostics` -> `GET /v1/diagnostics`
+- `WS /ws` -> `WS /v1/ws`
+- `GET /api/token`: token diagnostics with masked token only
+- `GET /`: lightweight deterministic gateway entrypoint
+
+Full reference: [`docs/API.md`](docs/API.md)
+
+## CLI Highlights
+Core commands:
+- `clawlite start` (alias: `clawlite gateway`)
+- `clawlite run "<prompt>" --session-id <id>`
+- `clawlite status`
+- `clawlite onboard`
+- `clawlite validate provider|channels|onboarding [--fix]`
+- `clawlite diagnostics [--gateway-url ...]`
+- `clawlite memory doctor [--repair]`
+- `clawlite cron add|list|remove|enable|disable|run ...`
+- `clawlite skills list|show ...`
+
+## Channels and Providers
+### Channels
 | Channel | Status | Notes |
 |---|---|---|
-| Telegram | ✅ Implemented | Polling, reconnection/backoff, allowlist, chunked outbound |
-| Discord | ✅ Outbound active | REST send implemented; inbound parity is future work |
-| Slack | ✅ Outbound active | `chat.postMessage` outbound implemented; inbound parity is future work |
-| WhatsApp | ✅ Outbound active | Bridge `/send` outbound implemented; inbound parity is future work |
-| Signal | ⚠️ Skeleton | Passive adapter placeholder |
-| Google Chat | ⚠️ Skeleton | Passive adapter placeholder |
-| Email | ⚠️ Skeleton | Passive adapter placeholder |
-| Matrix | ⚠️ Skeleton | Passive adapter placeholder |
-| IRC | ⚠️ Skeleton | Passive adapter placeholder |
-| iMessage | ⚠️ Skeleton | Passive adapter placeholder |
-| DingTalk | ⚠️ Skeleton | Passive adapter placeholder |
-| Feishu | ⚠️ Skeleton | Passive adapter placeholder |
-| Mochat | ⚠️ Skeleton | Passive adapter placeholder |
-| QQ | ⚠️ Skeleton | Passive adapter placeholder |
+| Telegram | Implemented | Inbound polling + outbound delivery, allowlist, chunking |
+| Discord | Outbound active | HTTP outbound adapter |
+| Slack | Outbound active | `chat.postMessage` outbound adapter |
+| WhatsApp | Outbound active | Bridge `/send` outbound adapter |
+| Signal, Google Chat, Email, Matrix, IRC, iMessage, DingTalk, Feishu, Mochat, QQ | Skeleton | Passive placeholders |
 
-## 🧰 CLI Commands
-| Command | Purpose |
-|---|---|
-| `clawlite start [--host --port --config]` | Start FastAPI + WebSocket gateway |
-| `clawlite run "<prompt>" [--session-id]` | Run one prompt through the engine |
-| `clawlite onboard [--overwrite ...]` | Generate workspace identity templates |
-| `clawlite validate provider|channels|onboarding [--fix]` | Validate operator readiness for provider/channel/workspace |
-| `clawlite diagnostics [--gateway-url --token --timeout]` | Emit local diagnostics and optional gateway probes |
-| `clawlite memory doctor [--repair]` | Emit script-friendly memory health snapshot and optional safe repair |
-| `clawlite skills list [--all]` | List discovered skills |
-| `clawlite skills show <name>` | Show metadata/body of one skill |
-| `clawlite cron add --session-id --expression --prompt [--name]` | Create scheduled job |
-| `clawlite cron list --session-id` | List jobs for session |
-| `clawlite cron remove --job-id` | Remove scheduled job |
-
-## 🫀 Heartbeat + Cron (Real Examples)
-Create a recurring cron job every 2 minutes:
-```bash
-clawlite cron add \
-  --session-id telegram:1850513297 \
-  --expression "every 120" \
-  --prompt "Send me a concise project status update" \
-  --name "status-ping"
-```
-
-Create a one-time reminder:
-```bash
-clawlite cron add \
-  --session-id telegram:1850513297 \
-  --expression "at 2026-03-02T20:00:00+00:00" \
-  --prompt "Remind me to review release notes" \
-  --name "release-reminder"
-```
-
-List active jobs:
-```bash
-clawlite cron list --session-id telegram:1850513297
-```
-
-Heartbeat interval is controlled by:
-```json
-{
-  "scheduler": {
-    "heartbeat_interval_seconds": 1800
-  }
-}
-```
-
-Heartbeat check-state is persisted in `workspace/memory/heartbeat-state.json` on every tick, including `last_check_iso`, `last_action`, `last_reason`, `last_ok_iso`, and `last_actionable_iso` (plus optional bounded actionable excerpt).
-
-## 🐳 Docker
-No official image is published yet. You can run ClawLite in a Python container:
-
-```bash
-docker run --rm -it \
-  -p 8787:8787 \
-  -v "$HOME/.clawlite:/root/.clawlite" \
-  -v "$PWD:/app" \
-  -w /app \
-  python:3.12-bullseye \
-  bash -lc "pip install -U pip && pip install -e . && clawlite start --host 0.0.0.0 --port 8787"
-```
-
-## 🤖 Supported Providers
+### Providers
 | Provider | Model prefix example | Auth |
 |---|---|---|
 | Gemini | `gemini/gemini-2.5-flash` | `GEMINI_API_KEY` |
@@ -211,57 +168,55 @@ docker run --rm -it \
 | Groq | `groq/llama-3.3-70b-versatile` | `GROQ_API_KEY` |
 | DeepSeek | `deepseek/deepseek-chat` | `DEEPSEEK_API_KEY` |
 | Anthropic (routing) | `anthropic/claude-3-7-sonnet` | `ANTHROPIC_API_KEY` |
-| OpenAI Codex | `openai-codex/codex-mini-latest` | Provider auth token |
+| OpenAI Codex | `openai-codex/codex-mini-latest` | Provider token |
 | Custom OpenAI-compatible | `custom/<model>` | Configured key/base URL |
 
-## 🏗️ Architecture
-```text
-clawlite/
-├── core/         # engine, prompt builder, memory, skills, subagent loop
-├── tools/        # tool abstractions and executable tools
-├── bus/          # inbound/outbound events and async queue
-├── channels/     # Telegram implementation + channel adapters
-├── gateway/      # FastAPI app and WebSocket endpoint
-├── scheduler/    # cron service and heartbeat service
-├── providers/    # model provider resolution and HTTP adapters
-├── session/      # session history store
-├── workspace/    # bootstrap + prompt template files
-├── skills/       # built-in SKILL.md files
-├── config/       # schema + config loader
-├── cli/          # command-line interface
-└── utils/        # helpers and logging setup
+## Operations and Testing
+Run locally:
+
+```bash
+clawlite start --host 127.0.0.1 --port 8787
 ```
 
-## 🛣️ Roadmap
-- **P0 Core Stability**
-- [ ] Consolidate one execution path across CLI, gateway, and channels.
-- [ ] Expand integration tests for scheduler and channel dispatch.
-- [ ] Harden input validation for channel webhooks and external I/O tools.
-- [ ] Keep `pytest -q tests` green in CI for Python 3.10 and 3.12.
-- **P1 Operational Autonomy**
-- [ ] Finalize 24/7 supervised runtime on Linux with automatic recovery.
-- [ ] Improve proactive outbound delivery reliability for Telegram.
-- [ ] Strengthen long-term memory retrieval quality across sessions.
-- [ ] Add clearer operational logs and failure runbooks.
-- **P2 Ecosystem**
-- [ ] Improve user skill experience (discovery, execution diagnostics).
-- [ ] Expand MCP integration and specialized provider support.
-- [ ] Publish objective release/deploy guides with pass/fail checklists.
+Smoke test:
 
-See full plan in [`ROADMAP.md`](ROADMAP.md).
+```bash
+bash scripts/smoke_test.sh
+```
 
-## 🤝 Contributing
-PRs are welcome and encouraged.
+Test suite:
 
-- Read [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- Check open issues: <https://github.com/eobarretooo/ClawLite/issues>
-- Run tests before PR: `pytest -q tests`
-- Keep docs aligned with runtime behavior
+```bash
+pytest -q tests
+```
 
-## 🙏 Acknowledgements
-ClawLite is its own implementation.
+Operational runbook: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
 
-Thanks to the open-source projects **nanobot** and **OpenClaw** for architectural inspiration and practical reference points.
+## Architecture
+```text
+clawlite/
+├── core/         # engine, prompts, memory, skills, autonomy wiring
+├── tools/        # tool abstractions and executable tools
+├── bus/          # inbound/outbound events and queueing
+├── channels/     # Telegram + channel adapters
+├── gateway/      # FastAPI app, HTTP API, WebSocket, control-plane
+├── scheduler/    # cron and heartbeat services
+├── providers/    # model provider resolution and HTTP adapters
+├── session/      # per-session history store
+├── workspace/    # workspace templates and bootstrap files
+├── skills/       # built-in `SKILL.md` assets
+├── config/       # schema and config loader
+├── cli/          # command-line interface
+└── utils/        # logging and shared helpers
+```
 
-## 📄 License
-This project is licensed under the MIT License. See [`LICENSE`](LICENSE).
+## Roadmap
+Current priorities are tracked in [`ROADMAP.md`](ROADMAP.md):
+- P0: core stability and contract hardening
+- P1: operational autonomy and reliability
+- P2: ecosystem and operator experience
+
+## Contributing and License
+- Contribution guide: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Issues: <https://github.com/eobarretooo/ClawLite/issues>
+- License: MIT, see [`LICENSE`](LICENSE)
