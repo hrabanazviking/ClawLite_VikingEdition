@@ -46,6 +46,9 @@ def test_failover_provider_uses_fallback_for_retryable_primary_failure() -> None
         assert diag["fallback_attempts"] == 1
         assert diag["fallback_success"] == 1
         assert diag["fallback_failures"] == 0
+        assert diag["last_primary_error_class"] == "http_transient"
+        assert diag["primary_retryable_failures"] == 1
+        assert diag["primary_non_retryable_failures"] == 0
 
     asyncio.run(_scenario())
 
@@ -64,6 +67,10 @@ def test_failover_provider_does_not_use_fallback_for_non_retryable_error() -> No
             raise AssertionError("expected auth error")
 
         assert fallback.calls == 0
+        diag = provider.diagnostics()
+        assert diag["last_primary_error_class"] == "auth"
+        assert diag["primary_retryable_failures"] == 0
+        assert diag["primary_non_retryable_failures"] == 1
 
     asyncio.run(_scenario())
 
@@ -85,6 +92,8 @@ def test_failover_provider_tracks_fallback_failures() -> None:
         assert diag["fallback_attempts"] == 1
         assert diag["fallback_success"] == 0
         assert diag["fallback_failures"] == 1
+        assert diag["last_primary_error_class"] == "network"
+        assert diag["last_fallback_error_class"] == "http_transient"
 
     asyncio.run(_scenario())
 
@@ -98,6 +107,8 @@ def test_failover_provider_diagnostics_contract_and_secret_safety() -> None:
     assert diag["provider_name"] == "failover"
     assert diag["fallback_model"] == "openai/gpt-4.1-mini"
     assert isinstance(diag["counters"], dict)
+    assert "last_primary_error_class" in diag["counters"]
+    assert "last_fallback_error_class" in diag["counters"]
     assert "primary" in diag
     assert "fallback" in diag
     assert "token" not in diag["primary"]

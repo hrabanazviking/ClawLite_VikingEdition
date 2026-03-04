@@ -74,3 +74,44 @@ def is_retryable_error(error_message: str) -> bool:
     if status == 429:
         return not is_quota_429_error(text)
     return 500 <= status <= 599
+
+
+def classify_provider_error(error_message: str) -> str:
+    text = str(error_message or "").strip()
+    lowered = text.lower()
+    if not lowered:
+        return "unknown"
+
+    if lowered.startswith("provider_circuit_open:"):
+        return "circuit_open"
+
+    if lowered.startswith("provider_config_error:") or lowered.startswith("codex_config_error:"):
+        return "config"
+
+    if lowered.startswith("provider_auth_error:") or lowered.startswith("codex_auth_error:"):
+        return "auth"
+
+    if lowered.startswith("provider_network_error:") or lowered.startswith("codex_network_error:"):
+        return "network"
+
+    if lowered.endswith("_exhausted") or "retry_exhausted" in lowered:
+        return "retry_exhausted"
+
+    status = parse_http_status(text)
+    if status in {401, 403}:
+        return "auth"
+    if status == 429:
+        if is_quota_429_error(text):
+            return "quota"
+        return "rate_limit"
+    if status is not None and (status == 408 or 500 <= status <= 599):
+        return "http_transient"
+
+    if any(token in lowered for token in ("quota", "billing", "insufficient_quota", "out of credits", "payment required")):
+        return "quota"
+    if any(token in lowered for token in ("rate limit", "too many requests", "throttl")):
+        return "rate_limit"
+    if any(token in lowered for token in ("timeout", "timed out", "connection", "dns", "socket", "refused", "unreachable")):
+        return "network"
+
+    return "unknown"

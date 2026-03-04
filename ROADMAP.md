@@ -75,6 +75,7 @@
 - Provider ops status expanded beyond Codex in CLI (`clawlite provider status`) with deterministic, secret-safe status for API-key providers (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`).
 - Strict CLI config preflight added via `clawlite validate config` with structured JSON and deterministic exit semantics (`0` ok, `2` invalid/parse/validation).
 - Prompt/memory pipeline now injects session-aware recovery snippets when retrieval returns no hits, preserving fail-soft turn execution.
+- Structured provider error-class telemetry added for diagnostics (`last_error_class`, `error_class_counts`, failover primary/fallback error classes and retryable/non-retryable primary failure counters).
 
 ### FUTURE (Scale + polish)
 

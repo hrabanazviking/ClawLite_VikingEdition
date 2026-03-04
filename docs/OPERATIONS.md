@@ -52,6 +52,7 @@ Notas:
 - `/v1/diagnostics` e `/api/diagnostics` expõem `generated_at`, `uptime_s` e `contract_version`.
 - `/v1/diagnostics` e `/api/diagnostics` incluem `bootstrap` com estado persistido (`pending`, `last_status`, `completed_at`, etc.).
 - `/v1/diagnostics` e `/api/diagnostics` incluem `http` com contadores de requisicoes em memoria (`total_requests`, `in_flight`, `by_method`, `by_path`, `by_status`, `latency_ms`).
+- Telemetria de provider/failover inclui classificacao de erro (`last_error_class`, `error_class_counts`, `last_primary_error_class`, `last_fallback_error_class`) para diagnostico operacional.
 
 ## Bootstrap one-shot lifecycle
 

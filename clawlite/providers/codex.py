@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from clawlite.providers.base import LLMProvider, LLMResult
-from clawlite.providers.reliability import ReliabilitySettings, parse_retry_after_seconds
+from clawlite.providers.reliability import ReliabilitySettings, classify_provider_error, parse_retry_after_seconds
 
 
 class CodexProvider(LLMProvider):
@@ -58,6 +58,8 @@ class CodexProvider(LLMProvider):
             "circuit_close_count": 0,
             "consecutive_failures": 0,
             "last_error": "",
+            "last_error_class": "",
+            "error_class_counts": {},
             "last_status_code": 0,
         }
 
@@ -94,10 +96,18 @@ class CodexProvider(LLMProvider):
         self._consecutive_failures = 0
         self._diagnostics["consecutive_failures"] = 0
         self._diagnostics["last_error"] = ""
+        self._diagnostics["last_error_class"] = ""
         self._diagnostics["last_status_code"] = 0
 
     def _record_failure(self, *, error: str, status_code: int | None = None) -> None:
         self._diagnostics["last_error"] = str(error)
+        error_class = classify_provider_error(str(error))
+        self._diagnostics["last_error_class"] = error_class
+        counts = self._diagnostics.get("error_class_counts")
+        if not isinstance(counts, dict):
+            counts = {}
+            self._diagnostics["error_class_counts"] = counts
+        counts[error_class] = int(counts.get(error_class, 0)) + 1
         self._diagnostics["last_status_code"] = int(status_code or 0)
         self._consecutive_failures += 1
         self._diagnostics["consecutive_failures"] = self._consecutive_failures

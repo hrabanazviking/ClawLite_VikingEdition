@@ -131,6 +131,23 @@ def test_codex_provider_passes_reasoning_effort() -> None:
     asyncio.run(_scenario())
 
 
+def test_codex_provider_classifies_auth_failure() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(model="codex-5.3", access_token="", retry_max_attempts=1)
+        try:
+            await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+        except RuntimeError as exc:
+            assert str(exc) == "codex_auth_error:missing_access_token"
+        else:
+            raise AssertionError("expected auth error")
+
+        diag = provider.diagnostics()
+        assert diag["last_error_class"] == "auth"
+        assert diag["error_class_counts"]["auth"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_codex_provider_diagnostics_contract_and_secret_safety() -> None:
     provider = CodexProvider(model="codex-5.3", access_token="test_access_token_value", account_id="org-abc")
     diag = provider.diagnostics()
@@ -139,6 +156,8 @@ def test_codex_provider_diagnostics_contract_and_secret_safety() -> None:
     assert diag["model"] == "codex-5.3"
     assert isinstance(diag["counters"], dict)
     assert "requests" in diag["counters"]
+    assert "last_error_class" in diag["counters"]
+    assert isinstance(diag["counters"]["error_class_counts"], dict)
     encoded = json.dumps(diag).lower()
     assert "access_token" not in encoded
     assert "test_access_token_value" not in encoded

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from clawlite.providers.base import LLMProvider, LLMResult
-from clawlite.providers.reliability import is_retryable_error
+from clawlite.providers.reliability import classify_provider_error, is_retryable_error
 
 
 class FailoverProvider(LLMProvider):
@@ -16,6 +16,10 @@ class FailoverProvider(LLMProvider):
             "fallback_success": 0,
             "fallback_failures": 0,
             "last_error": "",
+            "last_primary_error_class": "",
+            "last_fallback_error_class": "",
+            "primary_retryable_failures": 0,
+            "primary_non_retryable_failures": 0,
         }
 
     def diagnostics(self) -> dict[str, Any]:
@@ -76,8 +80,12 @@ class FailoverProvider(LLMProvider):
         except Exception as exc:
             primary_error = str(exc)
             self._diagnostics["last_error"] = primary_error
+            primary_error_class = classify_provider_error(primary_error)
+            self._diagnostics["last_primary_error_class"] = primary_error_class
             if not is_retryable_error(primary_error):
+                self._diagnostics["primary_non_retryable_failures"] = int(self._diagnostics["primary_non_retryable_failures"]) + 1
                 raise
+            self._diagnostics["primary_retryable_failures"] = int(self._diagnostics["primary_retryable_failures"]) + 1
 
         self._diagnostics["fallback_attempts"] = int(self._diagnostics["fallback_attempts"]) + 1
         try:
@@ -91,6 +99,7 @@ class FailoverProvider(LLMProvider):
         except Exception as exc:
             self._diagnostics["fallback_failures"] = int(self._diagnostics["fallback_failures"]) + 1
             self._diagnostics["last_error"] = str(exc)
+            self._diagnostics["last_fallback_error_class"] = classify_provider_error(str(exc))
             raise
 
         self._diagnostics["fallback_success"] = int(self._diagnostics["fallback_success"]) + 1

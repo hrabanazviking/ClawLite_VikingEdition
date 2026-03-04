@@ -114,6 +114,9 @@ def test_litellm_provider_quota_429_fails_fast_without_retry() -> None:
 
         assert post_mock.call_count == 1
         sleep_mock.assert_not_called()
+        diag = provider.diagnostics()
+        assert diag["last_error_class"] == "quota"
+        assert diag["error_class_counts"]["quota"] == 1
 
     asyncio.run(_scenario())
 
@@ -225,6 +228,8 @@ def test_litellm_provider_diagnostics_contract_and_secret_safety() -> None:
     assert diag["model"] == "gpt-test"
     assert isinstance(diag["counters"], dict)
     assert "requests" in diag["counters"]
+    assert "last_error_class" in diag["counters"]
+    assert isinstance(diag["counters"]["error_class_counts"], dict)
     encoded = json.dumps(diag).lower()
     assert "api_key" not in encoded
     assert "access_token" not in encoded
