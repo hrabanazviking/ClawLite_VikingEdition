@@ -378,6 +378,50 @@ class AuthConfig:
 
 
 @dataclass(slots=True)
+class AgentMemoryConfig:
+    semantic_search: bool = False
+    auto_categorize: bool = False
+    proactive: bool = False
+    emotional_tracking: bool = False
+    backend: str = "sqlite"
+    pgvector_url: str = ""
+
+    @classmethod
+    def from_dict(
+        cls,
+        raw: dict[str, Any] | None,
+        *,
+        legacy_semantic: bool = False,
+        legacy_auto_categorize: bool = False,
+    ) -> AgentMemoryConfig:
+        data = dict(raw or {})
+
+        def _value(snake: str, camel: str, default: Any) -> Any:
+            if snake in data:
+                return data.get(snake)
+            if camel in data:
+                return data.get(camel)
+            return default
+
+        backend_raw = str(_value("backend", "backend", "sqlite") or "sqlite").strip().lower()
+        if backend_raw == "jsonl":
+            backend = "sqlite"
+        elif backend_raw in {"sqlite", "pgvector"}:
+            backend = backend_raw
+        else:
+            backend = "sqlite"
+
+        return cls(
+            semantic_search=bool(_value("semantic_search", "semanticSearch", legacy_semantic)),
+            auto_categorize=bool(_value("auto_categorize", "autoCategorize", legacy_auto_categorize)),
+            proactive=bool(_value("proactive", "proactive", False)),
+            emotional_tracking=bool(_value("emotional_tracking", "emotionalTracking", False)),
+            backend=backend,
+            pgvector_url=str(_value("pgvector_url", "pgvectorUrl", "") or ""),
+        )
+
+
+@dataclass(slots=True)
 class AgentDefaultsConfig:
     model: str = "gemini/gemini-2.5-flash"
     provider: str = "auto"
@@ -387,6 +431,9 @@ class AgentDefaultsConfig:
     memory_window: int = 100
     session_retention_messages: int | None = 2000
     reasoning_effort: str | None = None
+    semantic_memory: bool = False
+    memory_auto_categorize: bool = False
+    memory: AgentMemoryConfig = field(default_factory=AgentMemoryConfig)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> AgentDefaultsConfig:
@@ -404,6 +451,14 @@ class AgentDefaultsConfig:
             if isinstance(normalized_retention_raw, str) and not normalized_retention_raw.strip():
                 normalized_retention_raw = 2000
             session_retention_messages = max(1, int(normalized_retention_raw))
+        legacy_semantic = bool(data.get("semantic_memory", data.get("semanticMemory", False)))
+        legacy_auto_categorize = bool(data.get("memory_auto_categorize", data.get("memoryAutoCategorize", False)))
+        memory_cfg = AgentMemoryConfig.from_dict(
+            dict(data.get("memory") or {}),
+            legacy_semantic=legacy_semantic,
+            legacy_auto_categorize=legacy_auto_categorize,
+        )
+
         return cls(
             model=str(data.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
             provider=str(data.get("provider", "auto") or "auto"),
@@ -413,6 +468,9 @@ class AgentDefaultsConfig:
             memory_window=max(1, int(data.get("memory_window", data.get("memoryWindow", 100)) or 100)),
             session_retention_messages=session_retention_messages,
             reasoning_effort=(str(data.get("reasoning_effort", data.get("reasoningEffort", "")) or "").strip() or None),
+            semantic_memory=bool(memory_cfg.semantic_search),
+            memory_auto_categorize=bool(memory_cfg.auto_categorize),
+            memory=memory_cfg,
         )
 
 

@@ -542,7 +542,15 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         root=Path(config.state_path) / "sessions",
         max_messages_per_session=config.agents.defaults.session_retention_messages,
     )
-    memory = MemoryStore(db_path=Path(config.state_path) / "memory.jsonl")
+    memory = MemoryStore(
+        db_path=Path(config.state_path) / "memory.jsonl",
+        semantic_enabled=bool(
+            getattr(config.agents.defaults.memory, "semantic_search", config.agents.defaults.semantic_memory)
+        ),
+        memory_auto_categorize=bool(
+            getattr(config.agents.defaults.memory, "auto_categorize", config.agents.defaults.memory_auto_categorize)
+        ),
+    )
     tools.register(MemoryRecallTool(memory))
     tools.register(MemoryLearnTool(memory))
     tools.register(MemoryForgetTool(memory))

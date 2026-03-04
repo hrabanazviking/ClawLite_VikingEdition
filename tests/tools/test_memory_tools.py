@@ -163,6 +163,8 @@ def test_memory_analyze_base_stats_fields(tmp_path) -> None:
         assert set(payload["recent"].keys()) == {"last_24h", "last_7d", "last_30d"}
         assert "temporal_marked_count" in payload
         assert isinstance(payload["top_sources"], list)
+        assert isinstance(payload["categories"], dict)
+        assert payload["categories"]["context"] >= 2
 
     asyncio.run(_scenario())
 
@@ -178,5 +180,103 @@ def test_memory_analyze_query_returns_matches_with_refs(tmp_path) -> None:
         assert payload["query"] == "python"
         assert payload["matches"]
         assert payload["matches"][0]["ref"] == f"mem:{row.id[:8]}"
+
+    asyncio.run(_scenario())
+
+
+def test_memory_analyze_includes_semantic_coverage_metadata(tmp_path, monkeypatch) -> None:
+    async def _scenario() -> None:
+        def _fake_embedding(self: MemoryStore, text: str) -> list[float] | None:
+            return [0.3, 0.7] if text else None
+
+        monkeypatch.setattr(MemoryStore, "_generate_embedding", _fake_embedding)
+
+        store = MemoryStore(db_path=tmp_path / "memory.jsonl", semantic_enabled=True)
+        store.add("semantic coverage row", source="seed:test")
+        tool = MemoryAnalyzeTool(store)
+
+        payload = json.loads(await tool.run({}, ToolContext(session_id="s1")))
+        assert payload["status"] == "ok"
+        assert "semantic" in payload
+        assert payload["semantic"]["enabled"] is True
+        assert payload["semantic"]["total_records"] >= 1
+        assert payload["semantic"]["embedded_records"] >= 1
+        assert payload["semantic"]["missing_records"] == 0
+        assert payload["semantic"]["coverage_ratio"] == 1.0
+        assert payload["semantic"]["coverage_percent"] == 100.0
+
+    asyncio.run(_scenario())
+
+
+def test_memory_recall_prefers_async_retrieve_and_preserves_response_shape() -> None:
+    class _AsyncMemory:
+        def __init__(self) -> None:
+            self.retrieve_calls: list[tuple[str, int, str]] = []
+
+        async def retrieve(self, query: str, *, limit: int = 5, method: str = "rag") -> dict[str, object]:
+            self.retrieve_calls.append((query, limit, method))
+            return {
+                "status": "ok",
+                "hits": [
+                    {
+                        "id": "abc12345def",
+                        "text": "async hit",
+                        "source": "seed",
+                        "created_at": "2026-03-04T00:00:00+00:00",
+                    }
+                ],
+            }
+
+        def search(self, query: str, *, limit: int = 5):
+            raise AssertionError(f"search fallback should not run for query={query} limit={limit}")
+
+    async def _scenario() -> None:
+        memory = _AsyncMemory()
+        tool = MemoryRecallTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(await tool.run({"query": "async", "limit": 4}, ToolContext(session_id="s1")))
+        assert payload["status"] == "ok"
+        assert payload["query"] == "async"
+        assert payload["count"] == 1
+        assert payload["results"][0]["ref"] == "mem:abc12345"
+        assert payload["results"][0]["text"] == "async hit"
+        assert payload["results"][0]["id"] == "abc12345def"
+        assert memory.retrieve_calls == [("async", 4, "rag")]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_learn_prefers_async_memorize_and_preserves_response_shape() -> None:
+    class _AsyncMemory:
+        def __init__(self) -> None:
+            self.memorize_calls: list[tuple[str, str]] = []
+
+        async def memorize(self, *, text: str | None = None, source: str = "session", messages=None) -> dict[str, object]:
+            del messages
+            self.memorize_calls.append((str(text), source))
+            return {
+                "status": "ok",
+                "record": {
+                    "id": "learn12345678",
+                    "text": str(text),
+                    "source": source,
+                    "created_at": "2026-03-04T00:00:00+00:00",
+                    "category": "context",
+                },
+            }
+
+        def add(self, text: str, *, source: str = "user"):
+            raise AssertionError(f"add fallback should not run for text={text} source={source}")
+
+    async def _scenario() -> None:
+        memory = _AsyncMemory()
+        tool = MemoryLearnTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(await tool.run({"text": "saved async"}, ToolContext(session_id="cli:99")))
+        assert payload["status"] == "ok"
+        assert payload["ref"] == "mem:learn123"
+        assert payload["id"] == "learn12345678"
+        assert payload["source"] == "memory_learn:cli:99"
+        assert payload["created_at"] == "2026-03-04T00:00:00+00:00"
+        assert payload["chars"] == len("saved async")
+        assert memory.memorize_calls == [("saved async", "memory_learn:cli:99")]
 
     asyncio.run(_scenario())

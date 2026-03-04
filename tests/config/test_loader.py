@@ -396,3 +396,98 @@ def test_load_config_auth_env_overrides_codex(tmp_path: Path, monkeypatch) -> No
     cfg = load_config(path)
     assert cfg.auth.providers.openai_codex.access_token == "tok-a"
     assert cfg.auth.providers.openai_codex.account_id == "org-a"
+
+
+def test_load_config_agent_defaults_semantic_flags_default_false(tmp_path: Path) -> None:
+    cfg = load_config(tmp_path / "missing.json")
+    assert cfg.agents.defaults.semantic_memory is False
+    assert cfg.agents.defaults.memory_auto_categorize is False
+    assert cfg.agents.defaults.memory.backend == "sqlite"
+
+
+def test_load_config_agent_defaults_semantic_flags_camel_case(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "semanticMemory": True,
+                        "memoryAutoCategorize": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.agents.defaults.semantic_memory is True
+    assert cfg.agents.defaults.memory_auto_categorize is True
+
+
+def test_load_config_agent_memory_nested_snake_case_and_legacy_interop(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "semantic_memory": False,
+                        "memory_auto_categorize": False,
+                        "memory": {
+                            "semantic_search": True,
+                            "auto_categorize": True,
+                            "proactive": True,
+                            "emotional_tracking": True,
+                            "backend": "pgvector",
+                            "pgvector_url": "postgresql://memory-db",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.agents.defaults.memory.semantic_search is True
+    assert cfg.agents.defaults.memory.auto_categorize is True
+    assert cfg.agents.defaults.memory.proactive is True
+    assert cfg.agents.defaults.memory.emotional_tracking is True
+    assert cfg.agents.defaults.memory.backend == "pgvector"
+    assert cfg.agents.defaults.memory.pgvector_url == "postgresql://memory-db"
+    assert cfg.agents.defaults.semantic_memory is True
+    assert cfg.agents.defaults.memory_auto_categorize is True
+
+
+def test_load_config_agent_memory_nested_camel_case_and_legacy_fallback(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "semanticMemory": True,
+                        "memoryAutoCategorize": True,
+                        "memory": {
+                            "proactive": True,
+                            "emotionalTracking": True,
+                            "backend": "jsonl",
+                            "pgvectorUrl": "postgresql://ignored",
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.agents.defaults.memory.semantic_search is True
+    assert cfg.agents.defaults.memory.auto_categorize is True
+    assert cfg.agents.defaults.memory.proactive is True
+    assert cfg.agents.defaults.memory.emotional_tracking is True
+    assert cfg.agents.defaults.memory.backend == "sqlite"
+    assert cfg.agents.defaults.memory.pgvector_url == "postgresql://ignored"
+    assert cfg.agents.defaults.semantic_memory is True
+    assert cfg.agents.defaults.memory_auto_categorize is True

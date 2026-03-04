@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +19,114 @@ def test_memory_store_add_and_search(tmp_path: Path) -> None:
     found = store.search("python", limit=3)
     assert found
     assert "python" in found[0].text.lower()
+
+
+def test_memory_semantic_add_writes_embedding_file_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    def _fake_embedding(self: MemoryStore, text: str) -> list[float] | None:
+        assert text
+        return [0.25, 0.75]
+
+    monkeypatch.setattr(MemoryStore, "_generate_embedding", _fake_embedding)
+
+    store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+    row = store.add("Semantic candidate memory", source="user")
+
+    lines = [line for line in store.embeddings_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["id"] == row.id
+    assert payload["embedding"] == [0.25, 0.75]
+    assert payload["source"] == "user"
+    assert payload["created_at"] == row.created_at
+
+
+def test_memory_semantic_backfill_populates_missing_embeddings_without_duplicates(tmp_path: Path, monkeypatch) -> None:
+    def _fake_embedding(self: MemoryStore, text: str) -> list[float] | None:
+        lowered = text.lower()
+        if "history" in lowered:
+            return [1.0, 0.0]
+        if "curated" in lowered:
+            return [0.0, 1.0]
+        return [0.5, 0.5]
+
+    monkeypatch.setattr(MemoryStore, "_generate_embedding", _fake_embedding)
+
+    store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+    store.history_path.write_text(
+        json.dumps(
+            {
+                "id": "hist001",
+                "text": "history semantic row",
+                "source": "seed:history",
+                "created_at": "2026-03-01T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    store.curated_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "facts": [
+                    {
+                        "id": "cur001",
+                        "text": "curated semantic row",
+                        "source": "curated:seed",
+                        "created_at": "2026-03-01T00:00:01+00:00",
+                        "last_seen_at": "2026-03-01T00:00:01+00:00",
+                        "mentions": 1,
+                        "session_count": 1,
+                        "sessions": ["session:a"],
+                        "importance": 1.0,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    first = store.backfill_embeddings(limit=10)
+    second = store.backfill_embeddings(limit=10)
+
+    lines = [line for line in store.embeddings_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    ids = [json.loads(line)["id"] for line in lines]
+    assert first["created"] == 2
+    assert first["failed"] == 0
+    assert second["created"] == 0
+    assert second["skipped_existing"] == 2
+    assert sorted(ids) == ["cur001", "hist001"]
+
+
+def test_memory_search_hybrid_semantic_and_bm25_ranks_by_combined_score(tmp_path: Path, monkeypatch) -> None:
+    class _FakeBM25:
+        def __init__(self, _corpus: object) -> None:
+            pass
+
+        def get_scores(self, _query_tokens: object) -> list[float]:
+            return [0.2, 0.8]
+
+    def _fake_embedding(self: MemoryStore, text: str) -> list[float] | None:
+        lowered = text.lower()
+        if "alpha" in lowered:
+            return [1.0, 0.0]
+        if "beta" in lowered:
+            return [0.0, 1.0]
+        if "which" in lowered:
+            return [1.0, 0.0]
+        return [0.0, 0.0]
+
+    monkeypatch.setattr("clawlite.core.memory.BM25Okapi", _FakeBM25)
+    monkeypatch.setattr(MemoryStore, "_generate_embedding", _fake_embedding)
+
+    store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+    store.add("alpha project memory", source="user")
+    store.add("beta project memory", source="user")
+
+    found = store.search("which project should I pick", limit=2)
+    assert found
+    assert "alpha" in found[0].text.lower()
 
 
 def test_memory_consolidate(tmp_path: Path) -> None:
@@ -439,6 +550,32 @@ def test_memory_delete_by_prefixes_removes_from_history_and_curated(tmp_path: Pa
     assert "curdrop001" not in curated_ids
 
 
+def test_memory_delete_by_prefixes_prunes_embedding_rows_for_deleted_ids(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+    keep = store.add("keep history row", source="session:keep")
+    drop = store.add("drop history row", source="session:drop")
+    store.embeddings_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": keep.id, "embedding": [1.0, 0.0], "created_at": keep.created_at, "source": keep.source}),
+                json.dumps({"id": drop.id, "embedding": [0.0, 1.0], "created_at": drop.created_at, "source": drop.source}),
+                json.dumps({"id": drop.id, "embedding": [0.1, 0.9], "created_at": drop.created_at, "source": drop.source}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    deleted = store.delete_by_prefixes([drop.id[:8]], limit=1)
+
+    assert deleted["deleted_count"] == 1
+    assert deleted["history_deleted"] == 1
+    assert deleted["embeddings_deleted"] == 2
+    lines = [line for line in store.embeddings_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    remaining_ids = [json.loads(line)["id"] for line in lines]
+    assert remaining_ids == [keep.id]
+
+
 def test_memory_delete_by_prefixes_is_limit_bounded_and_keeps_repair_behavior(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     old = {
@@ -468,3 +605,92 @@ def test_memory_delete_by_prefixes_is_limit_bounded_and_keeps_repair_behavior(tm
     kept_ids = {item["id"] for item in kept_payloads}
     assert "aaa11111drop" in kept_ids
     assert "bbb22222drop" not in kept_ids
+
+
+def test_memory_record_normalization_fills_defaults_for_legacy_rows(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.history_path.write_text(
+        json.dumps(
+            {
+                "id": "legacy-1",
+                "text": "legacy row",
+                "source": "seed",
+                "created_at": "2026-03-01T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = store.all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.user_id == "default"
+    assert row.layer == "item"
+    assert row.modality == "text"
+    assert row.updated_at == ""
+    assert row.confidence == 1.0
+    assert row.decay_rate == 0.0
+    assert row.emotional_tone == "neutral"
+
+
+def test_generate_embedding_fallback_order_tries_openai_after_gemini_failure(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def _fake_aembedding(*, model: str, input: list[str]):
+        del input
+        calls.append(model)
+        if model == "gemini/text-embedding-004":
+            raise RuntimeError("gemini down")
+        return {"data": [{"embedding": [0.11, 0.22]}]}
+
+    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(aembedding=_fake_aembedding))
+
+    store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+    embedding = store._generate_embedding("fallback test")
+    assert embedding == [0.11, 0.22]
+    assert calls == ["gemini/text-embedding-004", "openai/text-embedding-3-small"]
+
+
+def test_memory_async_memorize_supports_text_and_messages(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        learned = await store.memorize(text="remember this from async", source="session:async")
+        assert learned["status"] == "ok"
+        assert learned["mode"] == "add"
+
+        consolidated = await store.memorize(
+            messages=[
+                {"role": "user", "content": "remember my timezone is UTC-3"},
+                {"role": "assistant", "content": "noted timezone UTC-3"},
+            ],
+            source="session:async",
+        )
+        assert consolidated["status"] == "ok"
+        assert consolidated["mode"] == "consolidate"
+
+    asyncio.run(_scenario())
+
+
+def test_memory_async_retrieve_rag_and_llm_fallback(tmp_path: Path, monkeypatch) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.add("project alpha deploys on friday", source="session:a")
+
+        rag = await store.retrieve("project alpha", method="rag", limit=3)
+        assert rag["method"] == "rag"
+        assert rag["count"] >= 1
+        assert rag["hits"]
+        assert rag["metadata"]["fallback_to_rag"] is False
+
+        async def _broken_completion(**kwargs):
+            del kwargs
+            raise RuntimeError("llm unavailable")
+
+        monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(acompletion=_broken_completion))
+        llm = await store.retrieve("project alpha", method="llm", limit=3)
+        assert llm["method"] == "llm"
+        assert llm["hits"]
+        assert llm["metadata"]["fallback_to_rag"] is True
+
+    asyncio.run(_scenario())

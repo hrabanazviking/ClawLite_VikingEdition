@@ -4,11 +4,14 @@ import json
 import hashlib
 import math
 import re
+import asyncio
+import threading
 import uuid
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -39,6 +42,20 @@ class MemoryRecord:
     text: str
     source: str
     created_at: str
+    category: str = "context"
+    user_id: str = "default"
+    layer: str = "item"
+    modality: str = "text"
+    updated_at: str = ""
+    confidence: float = 1.0
+    decay_rate: float = 0.0
+    emotional_tone: str = "neutral"
+
+
+class MemoryLayer(str, Enum):
+    RESOURCE = "resource"
+    ITEM = "item"
+    CATEGORY = "category"
 
 
 class MemoryStore:
@@ -139,6 +156,55 @@ class MemoryStore:
         r"(?:\b\d{1,2}:\d{2}\b|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b\d{1,2}\s*(?:am|pm)\b)",
         re.IGNORECASE,
     )
+    _SEMANTIC_BM25_WEIGHT = 0.4
+    _SEMANTIC_VECTOR_WEIGHT = 0.6
+    _MEMORY_CATEGORIES: tuple[str, ...] = (
+        "preferences",
+        "facts",
+        "decisions",
+        "skills",
+        "context",
+        "relationships",
+    )
+
+    @staticmethod
+    def _normalize_layer(value: Any) -> str:
+        if isinstance(value, MemoryLayer):
+            return value.value
+        normalized = str(value or "").strip().lower()
+        if normalized in {MemoryLayer.RESOURCE.value, MemoryLayer.ITEM.value, MemoryLayer.CATEGORY.value}:
+            return normalized
+        return MemoryLayer.ITEM.value
+
+    @classmethod
+    def _record_from_payload(cls, payload: dict[str, Any]) -> MemoryRecord | None:
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            return None
+
+        try:
+            confidence = float(payload.get("confidence", 1.0) or 1.0)
+        except Exception:
+            confidence = 1.0
+        try:
+            decay_rate = float(payload.get("decay_rate", payload.get("decayRate", 0.0)) or 0.0)
+        except Exception:
+            decay_rate = 0.0
+
+        return MemoryRecord(
+            id=str(payload.get("id", "")),
+            text=text,
+            source=str(payload.get("source", "unknown")),
+            created_at=str(payload.get("created_at", "")),
+            category=str(payload.get("category", "context") or "context"),
+            user_id=str(payload.get("user_id", payload.get("userId", "default")) or "default"),
+            layer=cls._normalize_layer(payload.get("layer", "item")),
+            modality=str(payload.get("modality", "text") or "text"),
+            updated_at=str(payload.get("updated_at", payload.get("updatedAt", "")) or ""),
+            confidence=confidence,
+            decay_rate=decay_rate,
+            emotional_tone=str(payload.get("emotional_tone", payload.get("emotionalTone", "neutral")) or "neutral"),
+        )
 
     def __init__(
         self,
@@ -147,7 +213,10 @@ class MemoryStore:
         history_path: str | Path | None = None,
         curated_path: str | Path | None = None,
         checkpoints_path: str | Path | None = None,
+        embeddings_path: str | Path | None = None,
         split_layers: bool = True,
+        semantic_enabled: bool = False,
+        memory_auto_categorize: bool = False,
     ) -> None:
         base_history = Path(history_path) if history_path else (Path(db_path) if db_path else (Path.home() / ".clawlite" / "state" / "memory.jsonl"))
         self.path = base_history  # Backward-compatible alias.
@@ -165,6 +234,14 @@ class MemoryStore:
         else:
             self.checkpoints_path = self.history_path.with_name("memory_checkpoints.json")
 
+        if embeddings_path:
+            self.embeddings_path = Path(embeddings_path)
+        else:
+            self.embeddings_path = self.history_path.with_name("embeddings.jsonl")
+
+        self.semantic_enabled = bool(semantic_enabled)
+        self.memory_auto_categorize = bool(memory_auto_categorize)
+
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_file(self.history_path, default="")
         if self.curated_path is not None:
@@ -172,6 +249,8 @@ class MemoryStore:
             self._ensure_file(self.curated_path, default='{"version": 2, "facts": []}\n')
         self.checkpoints_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_file(self.checkpoints_path, default="{}\n")
+        self.embeddings_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_file(self.embeddings_path, default="")
         self._diagnostics: dict[str, int | str] = {
             "history_read_corrupt_lines": 0,
             "history_repaired_files": 0,
@@ -346,12 +425,300 @@ class MemoryStore:
             "text": text,
             "source": str(row.get("source", "curated") or "curated"),
             "created_at": created_at,
+            "category": str(row.get("category", "context") or "context"),
             "last_seen_at": last_seen_at,
             "mentions": max(1, mentions),
             "session_count": max(1, session_count),
             "sessions": sessions[-cls._MAX_CURATED_SESSIONS_PER_FACT :],
             "importance": max(0.1, importance),
         }
+
+    @staticmethod
+    def _run_coro_sync(coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result: dict[str, Any] = {"value": None, "error": None}
+
+        def _runner() -> None:
+            try:
+                result["value"] = asyncio.run(coro)
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+        if result["error"] is not None:
+            raise result["error"]
+        return result["value"]
+
+    @staticmethod
+    def _normalize_embedding(raw: Any) -> list[float] | None:
+        if not isinstance(raw, list) or not raw:
+            return None
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                return None
+        return out if out else None
+
+    @classmethod
+    def _extract_embedding_from_response(cls, payload: Any) -> list[float] | None:
+        data = getattr(payload, "data", None)
+        if data is None and isinstance(payload, dict):
+            data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            return None
+        first = data[0]
+        embedding = None
+        if isinstance(first, dict):
+            embedding = first.get("embedding")
+        else:
+            embedding = getattr(first, "embedding", None)
+        return cls._normalize_embedding(embedding)
+
+    def _generate_embedding(self, text: str) -> list[float] | None:
+        if not self.semantic_enabled:
+            return None
+        clean = str(text or "").strip()
+        if not clean:
+            return None
+        try:
+            import litellm  # type: ignore
+        except Exception:
+            return None
+
+        for model_name in ("gemini/text-embedding-004", "openai/text-embedding-3-small"):
+            try:
+                response = self._run_coro_sync(
+                    litellm.aembedding(
+                        model=model_name,
+                        input=[clean],
+                    )
+                )
+                embedding = self._extract_embedding_from_response(response)
+                if embedding is not None:
+                    return embedding
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _cosine_similarity(cls, left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = 0.0
+        left_norm = 0.0
+        right_norm = 0.0
+        for idx in range(len(left)):
+            lval = float(left[idx])
+            rval = float(right[idx])
+            dot += lval * rval
+            left_norm += lval * lval
+            right_norm += rval * rval
+        if left_norm <= 0.0 or right_norm <= 0.0:
+            return 0.0
+        return dot / math.sqrt(left_norm * right_norm)
+
+    def _append_embedding(self, *, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
+        payload = {
+            "id": str(record_id or ""),
+            "embedding": embedding,
+            "created_at": str(created_at or ""),
+            "source": str(source or ""),
+        }
+        with self._locked_file(self.embeddings_path, "a", exclusive=True) as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            fh.flush()
+
+    def _read_embeddings_map(self) -> dict[str, list[float]]:
+        out: dict[str, list[float]] = {}
+        with self._locked_file(self.embeddings_path, "r", exclusive=False) as fh:
+            lines = fh.read().splitlines()
+        for line in lines:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            row_id = str(payload.get("id", "")).strip()
+            if not row_id:
+                continue
+            embedding = self._normalize_embedding(payload.get("embedding"))
+            if embedding is None:
+                continue
+            out[row_id] = embedding
+        return out
+
+    def _prune_embeddings_for_ids(self, removed_ids: set[str]) -> int:
+        if not removed_ids:
+            return 0
+        removed = 0
+        with self._locked_file(self.embeddings_path, "r+", exclusive=True) as fh:
+            lines = fh.read().splitlines()
+            kept_lines: list[str] = []
+            for line in lines:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    kept_lines.append(raw)
+                    continue
+                if not isinstance(payload, dict):
+                    kept_lines.append(raw)
+                    continue
+                row_id = str(payload.get("id", "")).strip()
+                if row_id and row_id in removed_ids:
+                    removed += 1
+                    continue
+                kept_lines.append(raw)
+
+            fh.seek(0)
+            fh.truncate()
+            if kept_lines:
+                fh.write("\n".join(kept_lines) + "\n")
+            fh.flush()
+        return removed
+
+    def backfill_embeddings(self, *, limit: int | None = None) -> dict[str, int | bool]:
+        total_rows = len(self.all()) + len(self.curated())
+        if not self.semantic_enabled:
+            return {
+                "enabled": False,
+                "total_records": total_rows,
+                "processed": 0,
+                "created": 0,
+                "skipped_existing": 0,
+                "failed": 0,
+                "limit": max(1, int(limit)) if limit is not None else 0,
+            }
+
+        bounded_limit = max(1, int(limit)) if limit is not None else None
+        records = self.curated() + self.all()
+        seen_record_ids: set[str] = set()
+        try:
+            existing_embeddings = self._read_embeddings_map()
+        except Exception as exc:
+            self._diagnostics["last_error"] = str(exc)
+            existing_embeddings = {}
+        embedded_ids = set(existing_embeddings.keys())
+
+        processed = 0
+        created = 0
+        skipped_existing = 0
+        failed = 0
+
+        for row in records:
+            row_id = str(row.id or "").strip()
+            if not row_id or row_id in seen_record_ids:
+                continue
+            seen_record_ids.add(row_id)
+            if row_id in embedded_ids:
+                skipped_existing += 1
+                continue
+            if bounded_limit is not None and created >= bounded_limit:
+                break
+
+            processed += 1
+            try:
+                embedding = self._generate_embedding(str(row.text or ""))
+                if embedding is None:
+                    failed += 1
+                    continue
+                self._append_embedding(
+                    record_id=row_id,
+                    embedding=embedding,
+                    created_at=str(row.created_at or ""),
+                    source=str(row.source or ""),
+                )
+                embedded_ids.add(row_id)
+                created += 1
+            except Exception as exc:
+                self._diagnostics["last_error"] = str(exc)
+                failed += 1
+
+        return {
+            "enabled": True,
+            "total_records": len(seen_record_ids),
+            "processed": processed,
+            "created": created,
+            "skipped_existing": skipped_existing,
+            "failed": failed,
+            "limit": bounded_limit or 0,
+        }
+
+    def _classify_category_with_llm(self, text: str) -> str | None:
+        prompt = (
+            "Classifique a memoria em UMA categoria desta lista: "
+            "preferences, facts, decisions, skills, context, relationships. "
+            "Retorne apenas o nome da categoria.\n\n"
+            f"MEMORIA:\n{text.strip()}"
+        )
+        try:
+            import litellm  # type: ignore
+
+            response = self._run_coro_sync(
+                litellm.acompletion(
+                    model="gemini/gemini-2.5-flash",
+                    temperature=0,
+                    max_tokens=12,
+                    messages=[
+                        {"role": "system", "content": "Voce responde somente com uma categoria valida."},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+            )
+            content = ""
+            choices = getattr(response, "choices", None)
+            if choices is None and isinstance(response, dict):
+                choices = response.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0]
+                message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+                if isinstance(message, dict):
+                    content = str(message.get("content", "") or "")
+                else:
+                    content = str(getattr(message, "content", "") or "")
+            candidate = content.strip().lower()
+            if candidate in self._MEMORY_CATEGORIES:
+                return candidate
+            return None
+        except Exception:
+            return None
+
+    def _heuristic_category(self, text: str, source: str) -> str:
+        normalized = str(text or "").lower()
+        source_norm = str(source or "").lower()
+        if any(token in normalized for token in ("prefer", "preference", "always", "never", "gosto", "prefiro")):
+            return "preferences"
+        if any(token in normalized for token in ("decide", "decision", "we will", "vamos", "escolhemos", "resolved")):
+            return "decisions"
+        if any(token in normalized for token in ("can ", "how to", "skill", "know how", "sei ", "consigo")):
+            return "skills"
+        if any(token in normalized for token in ("name is", "works at", "friend", "wife", "husband", "team", "cliente", "parceiro")):
+            return "relationships"
+        if source_norm.startswith("curated:") or any(token in normalized for token in ("timezone", "deadline", "fact", "is ", "sao", "eh ")):
+            return "facts"
+        return "context"
+
+    def _categorize_memory(self, text: str, source: str) -> str:
+        if not self.memory_auto_categorize:
+            return "context"
+        by_llm = self._classify_category_with_llm(text)
+        if by_llm in self._MEMORY_CATEGORIES:
+            return by_llm
+        return self._heuristic_category(text, source)
 
     def _curated_rank(self, row: dict[str, object]) -> tuple[float, int, int, datetime, datetime, str, str]:
         importance = float(row.get("importance", 0.0))
@@ -551,10 +918,23 @@ class MemoryStore:
             text=clean,
             source=source,
             created_at=datetime.now(timezone.utc).isoformat(),
+            category=self._categorize_memory(clean, source),
+            layer=MemoryLayer.ITEM.value,
         )
         with self._locked_file(self.history_path, "a", exclusive=True) as fh:
             fh.write(json.dumps(asdict(row), ensure_ascii=False) + "\n")
             fh.flush()
+        embedding = self._generate_embedding(clean)
+        if embedding is not None:
+            try:
+                self._append_embedding(
+                    record_id=row.id,
+                    embedding=embedding,
+                    created_at=row.created_at,
+                    source=row.source,
+                )
+            except Exception:
+                pass
         self._prune_history()
         return row
 
@@ -577,17 +957,10 @@ class MemoryStore:
                 corrupt_lines += 1
                 continue
             valid_lines.append(raw)
-            text = str(payload.get("text", "")).strip()
-            if not text:
+            row = self._record_from_payload(payload)
+            if row is None:
                 continue
-            out.append(
-                MemoryRecord(
-                    id=str(payload.get("id", "")),
-                    text=text,
-                    source=str(payload.get("source", "unknown")),
-                    created_at=str(payload.get("created_at", "")),
-                )
-            )
+            out.append(row)
 
         if corrupt_lines:
             self._diagnostics["history_read_corrupt_lines"] = int(self._diagnostics["history_read_corrupt_lines"]) + corrupt_lines
@@ -619,10 +992,128 @@ class MemoryStore:
                 text=str(item.get("text", "")).strip(),
                 source=str(item.get("source", "curated")),
                 created_at=str(item.get("created_at", "")),
+                category=str(item.get("category", "context") or "context"),
+                layer=self._normalize_layer(item.get("layer", MemoryLayer.ITEM.value)),
             )
             for item in rows
             if str(item.get("text", "")).strip()
         ]
+
+    async def memorize(
+        self,
+        *,
+        text: str | None = None,
+        messages: Iterable[dict[str, str]] | None = None,
+        source: str = "session",
+    ) -> dict[str, Any]:
+        if messages is not None:
+            record = await asyncio.to_thread(self.consolidate, messages, source=source)
+            if record is None:
+                return {"status": "skipped", "mode": "consolidate", "record": None}
+            return {"status": "ok", "mode": "consolidate", "record": asdict(record)}
+
+        clean = str(text or "").strip()
+        if not clean:
+            raise ValueError("text or messages is required")
+        record = await asyncio.to_thread(self.add, clean, source=source)
+        return {"status": "ok", "mode": "add", "record": asdict(record)}
+
+    @staticmethod
+    def _serialize_hit(row: MemoryRecord) -> dict[str, Any]:
+        return {
+            "id": str(row.id or ""),
+            "text": str(row.text or ""),
+            "source": str(row.source or ""),
+            "created_at": str(row.created_at or ""),
+            "category": str(row.category or "context"),
+            "user_id": str(row.user_id or "default"),
+            "layer": MemoryStore._normalize_layer(getattr(row, "layer", MemoryLayer.ITEM.value)),
+            "modality": str(row.modality or "text"),
+            "updated_at": str(row.updated_at or ""),
+            "confidence": float(row.confidence),
+            "decay_rate": float(row.decay_rate),
+            "emotional_tone": str(row.emotional_tone or "neutral"),
+        }
+
+    def _refine_hits_with_llm(self, query: str, hits: list[dict[str, Any]]) -> str | None:
+        if not hits:
+            return ""
+        prompt = (
+            "Use os trechos de memoria abaixo para responder de forma objetiva. "
+            "Se os trechos nao forem suficientes, diga isso explicitamente.\n\n"
+            f"PERGUNTA:\n{query}\n\n"
+            f"MEMORIAS:\n{json.dumps(hits, ensure_ascii=False)}"
+        )
+        try:
+            import litellm  # type: ignore
+        except Exception:
+            return None
+        try:
+            response = self._run_coro_sync(
+                litellm.acompletion(
+                    model="gemini/gemini-2.5-flash",
+                    temperature=0,
+                    max_tokens=256,
+                    messages=[
+                        {"role": "system", "content": "Responda apenas com base na memoria fornecida."},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+            )
+        except Exception:
+            return None
+        choices = getattr(response, "choices", None)
+        if choices is None and isinstance(response, dict):
+            choices = response.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        first = choices[0]
+        message = first.get("message") if isinstance(first, dict) else getattr(first, "message", None)
+        if isinstance(message, dict):
+            content = str(message.get("content", "") or "")
+        else:
+            content = str(getattr(message, "content", "") or "")
+        return content.strip()
+
+    async def retrieve(self, query: str, *, limit: int = 5, method: str = "rag") -> dict[str, Any]:
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            raise ValueError("query is required")
+        bounded_limit = max(1, int(limit or 1))
+        records = await asyncio.to_thread(self.search, clean_query, limit=bounded_limit)
+        hits = [self._serialize_hit(row) for row in records]
+
+        rag_payload: dict[str, Any] = {
+            "status": "ok",
+            "method": "rag",
+            "query": clean_query,
+            "limit": bounded_limit,
+            "count": len(hits),
+            "hits": hits,
+            "metadata": {"fallback_to_rag": False},
+        }
+        normalized_method = str(method or "rag").strip().lower()
+        if normalized_method == "rag":
+            return rag_payload
+        if normalized_method != "llm":
+            raise ValueError("method must be 'rag' or 'llm'")
+
+        llm_answer = await asyncio.to_thread(self._refine_hits_with_llm, clean_query, hits)
+        if llm_answer is None:
+            rag_payload["method"] = "llm"
+            rag_payload["metadata"] = {"fallback_to_rag": True}
+            return rag_payload
+
+        return {
+            "status": "ok",
+            "method": "llm",
+            "query": clean_query,
+            "limit": bounded_limit,
+            "count": len(hits),
+            "hits": hits,
+            "answer": llm_answer,
+            "metadata": {"fallback_to_rag": False},
+        }
 
     def search(self, query: str, *, limit: int = 5) -> list[MemoryRecord]:
         curated_rows = self._read_curated_facts()
@@ -632,6 +1123,7 @@ class MemoryStore:
                 text=str(item.get("text", "")).strip(),
                 source=str(item.get("source", "curated")),
                 created_at=str(item.get("created_at", "")),
+                category=str(item.get("category", "context") or "context"),
             )
             for item in curated_rows
             if str(item.get("text", "")).strip()
@@ -659,8 +1151,22 @@ class MemoryStore:
             scores = bm25.get_scores(q_tokens)
             bm25_scores = [float(scores[idx]) for idx in range(len(records))]
 
+        semantic_scores = [0.0 for _ in records]
+        semantic_active = False
+        if self.semantic_enabled:
+            query_embedding = self._generate_embedding(query)
+            if query_embedding is not None:
+                embeddings = self._read_embeddings_map()
+                if embeddings:
+                    for idx, row in enumerate(records):
+                        vector = embeddings.get(row.id)
+                        if vector is None:
+                            continue
+                        semantic_scores[idx] = self._cosine_similarity(query_embedding, vector)
+                    semantic_active = True
+
         # Primary key: lexical overlap with query terms.
-        # Secondary key: BM25 score for ordering among matching records.
+        # Secondary key: BM25 or hybrid semantic score.
         scored: list[tuple[float, float, float, int]] = []
         for idx, toks in enumerate(corpus_tokens):
             overlap = len(qset.intersection(toks))
@@ -675,15 +1181,26 @@ class MemoryStore:
                     temporal_score += self._TEMPORAL_INTENT_MATCH_BOOST
                 else:
                     temporal_score -= self._TEMPORAL_INTENT_MISS_PENALTY
-            scored.append((float(overlap) + curated_boost, bm25_scores[idx], temporal_score, idx))
+
+            ranking_score = bm25_scores[idx]
+            tie_breaker = temporal_score
+            if semantic_active:
+                ranking_score = (
+                    self._SEMANTIC_BM25_WEIGHT * bm25_scores[idx]
+                    + self._SEMANTIC_VECTOR_WEIGHT * semantic_scores[idx]
+                )
+                tie_breaker = curated_boost + temporal_score
+                scored.append((float(overlap), ranking_score, tie_breaker, idx))
+            else:
+                scored.append((float(overlap) + curated_boost, ranking_score, tie_breaker, idx))
 
         scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
 
         picked: list[MemoryRecord] = []
-        for overlap_score, bm25_score, _temporal_score, idx in scored:
+        for overlap_score, relevance_score, _tie_breaker, idx in scored:
             if len(picked) >= limit:
                 break
-            if overlap_score <= 0 and bm25_score <= 0.0:
+            if overlap_score <= 0 and relevance_score <= 0.0:
                 continue
             picked.append(records[idx])
 
@@ -865,6 +1382,7 @@ class MemoryStore:
                 "deleted_ids": [],
                 "history_deleted": 0,
                 "curated_deleted": 0,
+                "embeddings_deleted": 0,
                 "deleted_count": 0,
             }
 
@@ -892,12 +1410,14 @@ class MemoryStore:
                 "deleted_ids": [],
                 "history_deleted": 0,
                 "curated_deleted": 0,
+                "embeddings_deleted": 0,
                 "deleted_count": 0,
             }
 
         selected_lookup = set(selected_ids)
         history_deleted = 0
         curated_deleted = 0
+        embeddings_deleted = 0
 
         try:
             with self._locked_file(self.history_path, "r+", exclusive=True) as fh:
@@ -943,11 +1463,17 @@ class MemoryStore:
             except Exception as exc:
                 self._diagnostics["last_error"] = str(exc)
 
+        try:
+            embeddings_deleted = self._prune_embeddings_for_ids(selected_lookup)
+        except Exception as exc:
+            self._diagnostics["last_error"] = str(exc)
+
         deleted_ids = [rid for rid in selected_ids if rid in selected_lookup]
         return {
             "deleted_ids": deleted_ids,
             "history_deleted": history_deleted,
             "curated_deleted": curated_deleted,
+            "embeddings_deleted": embeddings_deleted,
             "deleted_count": len(deleted_ids),
         }
 
@@ -955,6 +1481,11 @@ class MemoryStore:
         history_rows = self.all()
         curated_rows = self.curated()
         combined = history_rows + curated_rows
+        record_ids = {
+            str(row.id or "").strip()
+            for row in combined
+            if str(row.id or "").strip()
+        }
 
         now = datetime.now(timezone.utc)
         cutoff_24h = now.timestamp() - (24 * 3600)
@@ -966,6 +1497,7 @@ class MemoryStore:
         last_30d = 0
         temporal_marked_count = 0
         sources: Counter[str] = Counter()
+        categories: Counter[str] = Counter()
 
         for row in combined:
             text = str(row.text or "")
@@ -981,11 +1513,22 @@ class MemoryStore:
             if self._memory_has_temporal_markers(text):
                 temporal_marked_count += 1
             sources[str(row.source or "unknown")] += 1
+            categories[str(getattr(row, "category", "context") or "context")] += 1
 
         top_sources = [
             {"source": source, "count": count}
             for source, count in sorted(sources.items(), key=lambda item: (-item[1], item[0]))[:8]
         ]
+
+        try:
+            embeddings = self._read_embeddings_map()
+        except Exception as exc:
+            self._diagnostics["last_error"] = str(exc)
+            embeddings = {}
+        embedded_records = len(record_ids.intersection(set(embeddings.keys())))
+        total_records = len(record_ids)
+        missing_records = max(0, total_records - embedded_records)
+        coverage_ratio = float(1.0 if total_records == 0 else embedded_records / total_records)
 
         return {
             "counts": {
@@ -1000,6 +1543,18 @@ class MemoryStore:
             },
             "temporal_marked_count": temporal_marked_count,
             "top_sources": top_sources,
+            "categories": {
+                name: count
+                for name, count in sorted(categories.items(), key=lambda item: (-item[1], item[0]))
+            },
+            "semantic": {
+                "enabled": bool(self.semantic_enabled),
+                "total_records": total_records,
+                "embedded_records": embedded_records,
+                "missing_records": missing_records,
+                "coverage_ratio": round(coverage_ratio, 6),
+                "coverage_percent": round(coverage_ratio * 100.0, 2),
+            },
         }
 
 

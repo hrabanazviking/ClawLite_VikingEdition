@@ -79,19 +79,45 @@ class MemoryRecallTool(Tool):
 
         limit = _clamp_int(arguments.get("limit"), default=6, minimum=1, maximum=20)
         include_metadata = _coerce_bool(arguments.get("include_metadata"), default=True)
-        rows = self.memory.search(query, limit=limit)
+        rows: list[MemoryRecord] = []
+        async_retrieved: list[dict[str, Any]] | None = None
+        retrieve_fn = getattr(self.memory, "retrieve", None)
+        if callable(retrieve_fn):
+            try:
+                payload = await retrieve_fn(query, limit=limit, method="rag")
+                if isinstance(payload, dict):
+                    raw_hits = payload.get("hits", [])
+                    if isinstance(raw_hits, list):
+                        async_retrieved = [item for item in raw_hits if isinstance(item, dict)]
+            except Exception:
+                async_retrieved = None
+        if async_retrieved is None:
+            rows = self.memory.search(query, limit=limit)
 
         results: list[dict[str, Any]] = []
-        for row in rows:
-            item: dict[str, Any] = {
-                "ref": _memory_ref(row.id),
-                "text": str(row.text or ""),
-            }
-            if include_metadata:
-                item["id"] = str(row.id or "")
-                item["source"] = str(row.source or "")
-                item["created_at"] = str(row.created_at or "")
-            results.append(item)
+        if async_retrieved is not None:
+            for row in async_retrieved:
+                row_id = str(row.get("id", "") or "")
+                item: dict[str, Any] = {
+                    "ref": _memory_ref(row_id),
+                    "text": str(row.get("text", "") or ""),
+                }
+                if include_metadata:
+                    item["id"] = row_id
+                    item["source"] = str(row.get("source", "") or "")
+                    item["created_at"] = str(row.get("created_at", "") or "")
+                results.append(item)
+        else:
+            for row in rows:
+                item = {
+                    "ref": _memory_ref(row.id),
+                    "text": str(row.text or ""),
+                }
+                if include_metadata:
+                    item["id"] = str(row.id or "")
+                    item["source"] = str(row.source or "")
+                    item["created_at"] = str(row.created_at or "")
+                results.append(item)
 
         payload = {
             "status": "ok",
@@ -126,7 +152,26 @@ class MemoryLearnTool(Tool):
         text = text[:4000]
 
         source = str(arguments.get("source", "")).strip() or f"memory_learn:{ctx.session_id}"
-        row: MemoryRecord = self.memory.add(text, source=source)
+        row: MemoryRecord
+        memorize_fn = getattr(self.memory, "memorize", None)
+        if callable(memorize_fn):
+            try:
+                payload = await memorize_fn(text=text, source=source)
+                record = payload.get("record") if isinstance(payload, dict) else None
+                if isinstance(record, dict):
+                    row = MemoryRecord(
+                        id=str(record.get("id", "") or ""),
+                        text=str(record.get("text", "") or text),
+                        source=str(record.get("source", "") or source),
+                        created_at=str(record.get("created_at", "") or ""),
+                        category=str(record.get("category", "context") or "context"),
+                    )
+                else:
+                    row = self.memory.add(text, source=source)
+            except Exception:
+                row = self.memory.add(text, source=source)
+        else:
+            row = self.memory.add(text, source=source)
 
         payload = {
             "status": "ok",
@@ -286,6 +331,10 @@ class MemoryAnalyzeTool(Tool):
             "temporal_marked_count": stats["temporal_marked_count"],
             "top_sources": stats["top_sources"],
         }
+        if isinstance(stats.get("categories"), dict):
+            payload["categories"] = stats["categories"]
+        if isinstance(stats.get("semantic"), dict):
+            payload["semantic"] = stats["semantic"]
 
         if query:
             payload["query"] = query
