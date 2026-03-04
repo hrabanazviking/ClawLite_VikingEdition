@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import re
 import uuid
 from contextlib import contextmanager
@@ -47,6 +48,96 @@ class MemoryStore:
     _MAX_CURATED_SESSIONS_PER_FACT = 12
     _MAX_CHECKPOINT_SOURCES = 4096
     _MAX_CHECKPOINT_SIGNATURES = 4096
+    _RECENCY_MAX_BOOST = 0.35
+    _RECENCY_HALF_LIFE_HOURS = 24.0 * 21.0
+    _TEMPORAL_INTENT_MATCH_BOOST = 0.2
+    _TEMPORAL_INTENT_MISS_PENALTY = 0.05
+    _TEMPORAL_RECENCY_RELEVANCE_MIN = 0.1
+    _TEMPORAL_QUERY_TOKENS: frozenset[str] = frozenset(
+        {
+            "today",
+            "tomorrow",
+            "tonight",
+            "yesterday",
+            "deadline",
+            "deadlines",
+            "date",
+            "time",
+            "when",
+            "week",
+            "month",
+            "quarter",
+            "year",
+            "next",
+            "upcoming",
+            "soon",
+            "due",
+            "calendar",
+            "agenda",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        }
+    )
+    _TEMPORAL_MEMORY_TOKENS: frozenset[str] = frozenset(
+        {
+            "today",
+            "tomorrow",
+            "tonight",
+            "yesterday",
+            "deadline",
+            "due",
+            "morning",
+            "afternoon",
+            "evening",
+            "night",
+            "week",
+            "month",
+            "quarter",
+            "year",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "may",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "oct",
+            "nov",
+            "dec",
+            "january",
+            "february",
+            "march",
+            "april",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+            "am",
+            "pm",
+            "utc",
+        }
+    )
+    _TEMPORAL_VALUE_RE = re.compile(
+        r"(?:\b\d{1,2}:\d{2}\b|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b\d{1,2}\s*(?:am|pm)\b)",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -415,6 +506,41 @@ class MemoryStore:
     def _tokens(text: str) -> list[str]:
         return [m.group(0).lower() for m in WORD_RE.finditer(text)]
 
+    @classmethod
+    def _query_has_temporal_intent(cls, query: str) -> bool:
+        tokens = set(cls._tokens(query))
+        if tokens.intersection(cls._TEMPORAL_QUERY_TOKENS):
+            return True
+        return bool(cls._TEMPORAL_VALUE_RE.search(str(query or "")))
+
+    @classmethod
+    def _memory_has_temporal_markers(cls, text: str) -> bool:
+        tokens = set(cls._tokens(text))
+        if tokens.intersection(cls._TEMPORAL_MEMORY_TOKENS):
+            return True
+        return bool(cls._TEMPORAL_VALUE_RE.search(str(text or "")))
+
+    @classmethod
+    def _recency_score(cls, created_at: str, *, now: datetime | None = None) -> float:
+        stamp = cls._parse_iso_timestamp(created_at)
+        if stamp.year <= 1:
+            return 0.0
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        ref_now = now or datetime.now(timezone.utc)
+        age_seconds = max(0.0, float((ref_now - stamp).total_seconds()))
+        half_life_seconds = cls._RECENCY_HALF_LIFE_HOURS * 3600.0
+        if half_life_seconds <= 0.0:
+            return 0.0
+        score = cls._RECENCY_MAX_BOOST * math.exp(-age_seconds / half_life_seconds)
+        return max(0.0, min(cls._RECENCY_MAX_BOOST, round(score, 6)))
+
+    @classmethod
+    def _memory_is_temporally_relevant(cls, text: str, created_at: str) -> bool:
+        if cls._memory_has_temporal_markers(text):
+            return True
+        return cls._recency_score(created_at) >= cls._TEMPORAL_RECENCY_RELEVANCE_MIN
+
     def add(self, text: str, *, source: str = "user") -> MemoryRecord:
         clean = text.strip()
         if not clean:
@@ -517,6 +643,7 @@ class MemoryStore:
             return []
 
         q_tokens = self._tokens(query)
+        query_has_temporal_intent = self._query_has_temporal_intent(query)
         if not q_tokens:
             return records[-limit:][::-1]
 
@@ -533,7 +660,7 @@ class MemoryStore:
 
         # Primary key: lexical overlap with query terms.
         # Secondary key: BM25 score for ordering among matching records.
-        scored: list[tuple[float, float, int]] = []
+        scored: list[tuple[float, float, float, int]] = []
         for idx, toks in enumerate(corpus_tokens):
             overlap = len(qset.intersection(toks))
             curated_boost = 0.0
@@ -541,12 +668,18 @@ class MemoryStore:
                 importance = curated_importance.get(records[idx].id, 1.0)
                 mentions = curated_mentions.get(records[idx].id, 1)
                 curated_boost = 0.75 + min(2.0, importance * 0.25) + min(1.0, mentions * 0.1)
-            scored.append((float(overlap) + curated_boost, bm25_scores[idx], idx))
+            temporal_score = self._recency_score(records[idx].created_at)
+            if query_has_temporal_intent:
+                if self._memory_has_temporal_markers(records[idx].text):
+                    temporal_score += self._TEMPORAL_INTENT_MATCH_BOOST
+                else:
+                    temporal_score -= self._TEMPORAL_INTENT_MISS_PENALTY
+            scored.append((float(overlap) + curated_boost, bm25_scores[idx], temporal_score, idx))
 
-        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
 
         picked: list[MemoryRecord] = []
-        for overlap_score, bm25_score, idx in scored:
+        for overlap_score, bm25_score, _temporal_score, idx in scored:
             if len(picked) >= limit:
                 break
             if overlap_score <= 0 and bm25_score <= 0.0:

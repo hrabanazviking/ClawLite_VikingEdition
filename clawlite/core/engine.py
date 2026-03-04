@@ -475,6 +475,15 @@ class AgentEngine:
     def _memory_result_sufficient(cls, query: str, rows: list[MemoryRecord]) -> bool:
         if not rows:
             return False
+        temporal_intent = MemoryStore._query_has_temporal_intent(query)
+        if temporal_intent:
+            top_rows = rows[:3]
+            has_temporal_candidate = any(
+                MemoryStore._memory_is_temporally_relevant(row.text, row.created_at)
+                for row in top_rows
+            )
+            if not has_temporal_candidate:
+                return False
         query_terms = cls._memory_query_terms(query)
         if not query_terms:
             return True

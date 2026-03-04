@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from clawlite.core.memory import MemoryStore
@@ -238,6 +239,74 @@ def test_memory_search_prefers_promoted_curated_fact(tmp_path: Path) -> None:
     assert found
     assert found[0].source.startswith("curated:")
     assert "utc-3" in found[0].text.lower()
+
+
+def test_memory_search_uses_recency_to_break_lexical_and_bm25_ties(tmp_path: Path, monkeypatch) -> None:
+    class _FakeBM25:
+        def __init__(self, _corpus: object) -> None:
+            pass
+
+        def get_scores(self, _query_tokens: object) -> list[float]:
+            return [0.0, 0.0]
+
+    monkeypatch.setattr("clawlite.core.memory.BM25Okapi", _FakeBM25)
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    now = datetime.now(timezone.utc)
+    older = now - timedelta(days=120)
+    newer = now - timedelta(hours=2)
+    rows = [
+        {
+            "id": "old-record",
+            "text": "project alpha timeline review",
+            "source": "session:old",
+            "created_at": older.isoformat(),
+        },
+        {
+            "id": "new-record",
+            "text": "project alpha timeline review",
+            "source": "session:new",
+            "created_at": newer.isoformat(),
+        },
+    ]
+    store.history_path.write_text("\n".join(json.dumps(item) for item in rows) + "\n", encoding="utf-8")
+
+    found = store.search("project alpha timeline", limit=2)
+    assert found
+    assert found[0].id == "new-record"
+
+
+def test_memory_search_temporal_intent_prefers_temporal_marker_on_tie(tmp_path: Path, monkeypatch) -> None:
+    class _FakeBM25:
+        def __init__(self, _corpus: object) -> None:
+            pass
+
+        def get_scores(self, _query_tokens: object) -> list[float]:
+            return [0.0, 0.0]
+
+    monkeypatch.setattr("clawlite.core.memory.BM25Okapi", _FakeBM25)
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    stamp = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "id": "non-temporal",
+            "text": "project alpha review notes",
+            "source": "session:a",
+            "created_at": stamp,
+        },
+        {
+            "id": "temporal",
+            "text": "project alpha review monday",
+            "source": "session:b",
+            "created_at": stamp,
+        },
+    ]
+    store.history_path.write_text("\n".join(json.dumps(item) for item in rows) + "\n", encoding="utf-8")
+
+    found = store.search("project alpha next week", limit=2)
+    assert found
+    assert found[0].id == "temporal"
 
 
 def test_memory_history_read_tolerates_corrupt_lines_and_repairs_file(tmp_path: Path) -> None:

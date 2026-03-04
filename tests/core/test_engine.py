@@ -451,6 +451,40 @@ def test_engine_memory_planner_next_query_rewrites_after_insufficient_first_hit(
     asyncio.run(_scenario())
 
 
+def test_engine_memory_planner_next_query_rewrites_when_temporal_intent_lacks_temporal_hit() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        original_query = "what is the deployment schedule today"
+        rewritten_query = "deployment schedule today"
+        memory = FakePlannerMemory(
+            {
+                original_query: [
+                    MemoryRecord(
+                        id="insuff-temporal",
+                        text="Deployment schedule discussion and tooling notes.",
+                        source="session:cli:ops",
+                        created_at="2025-01-01T00:00:00+00:00",
+                    )
+                ],
+                rewritten_query: [
+                    MemoryRecord(
+                        id="suff-temporal",
+                        text="Deployment is today at 17:00 UTC.",
+                        source="session:cli:ops",
+                        created_at="2026-03-04T12:05:00+00:00",
+                    )
+                ],
+            }
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:temporal-next-query", user_text=original_query)
+        assert out.text == "ok"
+        assert memory.search_calls == [original_query, rewritten_query]
+
+    asyncio.run(_scenario())
+
+
 def test_engine_respects_stop_event_before_provider_call() -> None:
     async def _scenario() -> None:
         provider = FakeNeverCalledProvider()
