@@ -91,6 +91,12 @@
 
 ## User Plan - "100%" Goals (Integrated execution)
 
+- Immediate focus order: Telegram parity 100% adapted from OpenClaw.
+- Immediate focus order: Skills parity.
+- Immediate focus order: Tools parity.
+- Immediate focus order: Provider parity.
+- Immediate focus order: Full autonomy parity.
+
 ### Practical mapping
 
 - **Telegram 100% (typing, formatting, robust delivery)** - **Status: partial**

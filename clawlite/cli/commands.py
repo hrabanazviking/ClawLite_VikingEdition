@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from clawlite import __version__
@@ -18,6 +19,7 @@ from clawlite.cli.ops import provider_status
 from clawlite.cli.ops import provider_use_model
 from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
+from clawlite.config.loader import save_config
 from clawlite.core.skills import SkillsLoader
 from clawlite.scheduler.cron import CronService
 from clawlite.utils.logger import stdout_json
@@ -29,10 +31,23 @@ def _print_json(payload: dict[str, Any]) -> None:
     stdout_json(payload)
 
 
+def _ensure_config_materialized(config_path: str | None) -> Any:
+    target = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    existed = target.exists()
+    cfg = load_config(config_path)
+    if not existed:
+        save_config(cfg, path=target)
+        if config_path:
+            stdout_text(f"Config criado em {target}.")
+        else:
+            stdout_text("Config criado em ~/.clawlite/config.json.")
+    return cfg
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     from clawlite.gateway.server import run_gateway
 
-    cfg = load_config(args.config)
+    cfg = _ensure_config_materialized(args.config)
     host = args.host or cfg.gateway.host
     port = args.port or cfg.gateway.port
     run_gateway(host=host, port=port)
@@ -94,7 +109,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_onboard(args: argparse.Namespace) -> int:
-    cfg = load_config(args.config)
+    cfg = _ensure_config_materialized(args.config)
     loader = WorkspaceLoader(workspace_path=cfg.workspace_path)
     created = loader.bootstrap(
         overwrite=args.overwrite,

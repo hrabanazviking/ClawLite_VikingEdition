@@ -118,6 +118,46 @@ def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:
     assert called["ok"] is True
 
 
+def test_cli_onboard_creates_missing_default_config_and_prints_notice(tmp_path: Path, monkeypatch, capsys) -> None:
+    default_config = tmp_path / ".clawlite" / "config.json"
+    monkeypatch.setattr("clawlite.cli.commands.DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setattr("clawlite.config.loader.DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setenv("CLAWLITE_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.chdir(tmp_path)
+
+    rc = main(["onboard"])
+    assert rc == 0
+    assert default_config.exists()
+
+    out = capsys.readouterr().out
+    assert "Config criado em ~/.clawlite/config.json." in out
+    assert (tmp_path / "workspace" / "IDENTITY.md").exists()
+
+
+def test_cli_start_creates_missing_default_config_and_prints_notice(tmp_path: Path, monkeypatch, capsys) -> None:
+    default_config = tmp_path / ".clawlite" / "config.json"
+    monkeypatch.setattr("clawlite.cli.commands.DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setattr("clawlite.config.loader.DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setenv("CLAWLITE_WORKSPACE", str(tmp_path / "workspace"))
+
+    called = {"ok": False}
+
+    def _fake_run_gateway(*, host, port):
+        called["ok"] = True
+        assert host == "127.0.0.1"
+        assert port == 8787
+
+    monkeypatch.setattr("clawlite.gateway.server.run_gateway", _fake_run_gateway)
+
+    rc = main(["start"])
+    assert rc == 0
+    assert default_config.exists()
+    assert called["ok"] is True
+
+    out = capsys.readouterr().out
+    assert "Config criado em ~/.clawlite/config.json." in out
+
+
 def test_cli_help_version_status_do_not_import_gateway(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     state_path = tmp_path / "state"

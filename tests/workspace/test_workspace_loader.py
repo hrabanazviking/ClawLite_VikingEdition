@@ -30,7 +30,7 @@ def test_workspace_bootstrap_lifecycle(tmp_path: Path) -> None:
 
     assert loader.should_run_bootstrap() is True
     prompt = loader.bootstrap_prompt()
-    assert "First-run setup checklist" in prompt
+    assert "This file is one-shot only." in prompt
 
     completed = loader.complete_bootstrap()
     assert completed is True
