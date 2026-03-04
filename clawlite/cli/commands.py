@@ -433,7 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_login.set_defaults(handler=cmd_provider_login)
 
     p_provider_status = provider_sub.add_parser("status", help="Show provider auth status")
-    p_provider_status.add_argument("provider", nargs="?", default="openai-codex", choices=["openai-codex"])
+    p_provider_status.add_argument("provider", nargs="?", default="openai-codex")
     p_provider_status.set_defaults(handler=cmd_provider_status)
 
     p_provider_logout = provider_sub.add_parser("logout", help="Clear provider auth from config")

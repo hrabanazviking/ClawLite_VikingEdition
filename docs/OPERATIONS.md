@@ -107,6 +107,7 @@ clawlite provider logout openai-codex
 Notas:
 - `openai-codex/*` usa caminho dedicado Codex (sem fallback silencioso para OpenAI LiteLLM).
 - Em erro de token ausente/expirado, gateway retorna orientação explícita para `clawlite provider login openai-codex`.
+- `clawlite provider status` também suporta providers de API key (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`) com payload seguro de origem/configuração.
 
 ## Incident checklist
 

@@ -179,20 +179,93 @@ def provider_login_openai_codex(
 
 def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[str, Any]:
     provider_norm = str(provider or "openai-codex").strip().lower().replace("_", "-")
-    if provider_norm != "openai-codex":
+    if provider_norm in {"openai-codex", "codex"}:
+        status = resolve_codex_auth(config)
+        return {
+            "ok": True,
+            "provider": "openai_codex",
+            "configured": bool(status["configured"]),
+            "token_masked": status["token_masked"],
+            "account_id_masked": status["account_id_masked"],
+            "source": status["source"],
+            "model": str(config.agents.defaults.model or config.provider.model),
+        }
+
+    supported_api_key_providers = {
+        "openai",
+        "gemini",
+        "groq",
+        "deepseek",
+        "anthropic",
+        "openrouter",
+        "custom",
+    }
+
+    provider_key = provider_norm.replace("-", "_")
+    spec = next((row for row in SPECS if row.name == provider_key), None)
+    if spec is None or spec.name not in supported_api_key_providers:
         return {
             "ok": False,
             "error": f"unsupported_provider:{provider}",
-            "detail": "Only openai-codex status is currently supported.",
         }
-    status = resolve_codex_auth(config)
+
+    selected = getattr(config.providers, spec.name, None)
+    cfg_api_key = str(getattr(selected, "api_key", "") or "").strip()
+    cfg_base_url = str(getattr(selected, "api_base", "") or "").strip()
+    global_api_key = str(config.provider.litellm_api_key or "").strip()
+    global_base_url = str(config.provider.litellm_base_url or "").strip()
+
+    env_names: list[str] = list(spec.key_envs)
+    env_names.extend(["CLAWLITE_LITELLM_API_KEY", "CLAWLITE_API_KEY"])
+    env_first_name = ""
+    env_first_value = ""
+    env_key_present = False
+    seen: set[str] = set()
+    for env_name in env_names:
+        if env_name in seen:
+            continue
+        seen.add(env_name)
+        env_value = os.getenv(env_name, "").strip()
+        if env_value:
+            env_key_present = True
+            if not env_first_name:
+                env_first_name = env_name
+                env_first_value = env_value
+
+    api_key = ""
+    api_key_source = ""
+    if cfg_api_key:
+        api_key = cfg_api_key
+        api_key_source = f"config:providers.{spec.name}.api_key"
+    elif global_api_key:
+        api_key = global_api_key
+        api_key_source = "config:provider.litellm_api_key"
+    elif env_first_value:
+        api_key = env_first_value
+        api_key_source = f"env:{env_first_name}"
+
+    base_url = ""
+    base_url_source = ""
+    if cfg_base_url:
+        base_url = cfg_base_url
+        base_url_source = f"config:providers.{spec.name}.api_base"
+    elif global_base_url:
+        base_url = global_base_url
+        base_url_source = "config:provider.litellm_base_url"
+    elif spec.default_base_url:
+        base_url = spec.default_base_url
+        base_url_source = f"spec:{spec.name}.default_base_url"
+
     return {
         "ok": True,
-        "provider": "openai_codex",
-        "configured": bool(status["configured"]),
-        "token_masked": status["token_masked"],
-        "account_id_masked": status["account_id_masked"],
-        "source": status["source"],
+        "provider": spec.name,
+        "configured": bool(api_key),
+        "auth_mode": "api_key",
+        "api_key_masked": _mask_secret(api_key),
+        "api_key_source": api_key_source,
+        "base_url": base_url,
+        "base_url_source": base_url_source,
+        "env_key_present": env_key_present,
         "model": str(config.agents.defaults.model or config.provider.model),
     }
 

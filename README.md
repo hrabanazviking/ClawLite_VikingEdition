@@ -149,7 +149,7 @@ Core commands:
 - `clawlite onboard`
 - `clawlite validate provider|channels|onboarding|config [--fix]`
 - `clawlite provider login openai-codex [--access-token ...] [--account-id ...] [--set-model] [--no-interactive]`
-- `clawlite provider status [openai-codex]`
+- `clawlite provider status [openai-codex|openai|gemini|groq|deepseek|anthropic|openrouter|custom]`
 - `clawlite provider logout [openai-codex]`
 - `clawlite diagnostics [--gateway-url ...]`
 - `clawlite memory doctor [--repair]`

@@ -523,6 +523,54 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys) -
     assert persisted_after["auth"]["providers"]["openai_codex"]["account_id"] == ""
 
 
+def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-1234")
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4.1-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "openai"])
+    assert rc_status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["provider"] == "openai"
+    assert payload["configured"] is True
+    assert payload["auth_mode"] == "api_key"
+    assert payload["api_key_source"] == "env:OPENAI_API_KEY"
+    assert payload["env_key_present"] is True
+    assert payload["base_url"] == "https://api.openai.com/v1"
+
+
+def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "unknown-provider"])
+    assert rc_status == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": False, "error": "unsupported_provider:unknown-provider"}
+
+
 def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
