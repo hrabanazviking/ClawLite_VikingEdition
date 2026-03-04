@@ -168,8 +168,8 @@ Accepted aliases in config parsing:
 ## Telegram (main options)
 
 In `channels.telegram`, besides `enabled` and `token`, the most used operational fields are:
-- `mode` (`polling` is the active runtime path today; webhook fields are kept for compatibility/future integration)
-- `webhook_enabled`, `webhook_secret`, `webhook_path`
+- `mode` (`polling` or `webhook`; webhook mode is active runtime when configured)
+- `webhook_enabled`, `webhook_secret`, `webhook_path`, `webhook_url`
 - `poll_interval_s`, `poll_timeout_s`
 - `reconnect_initial_s`, `reconnect_max_s`
 - `send_timeout_s`, `send_retry_attempts`
@@ -181,6 +181,11 @@ In `channels.telegram`, besides `enabled` and `token`, the most used operational
 - `typing_timeout_s` (HTTP timeout for typing API calls)
 - `typing_circuit_failure_threshold` (consecutive typing auth failures before opening typing circuit)
 - `typing_circuit_cooldown_s` (cooldown while typing auth circuit is open)
+
+Webhook notes:
+- Webhook activates when `mode=webhook` or `webhook_enabled=true` and both `webhook_url` + `webhook_secret` are configured.
+- Gateway ingests Telegram updates on configured `webhook_path` (default `/api/webhooks/telegram`) and validates header `X-Telegram-Bot-Api-Secret-Token`.
+- If webhook activation is not possible (missing fields or Telegram setWebhook failure), channel falls back safely to polling.
 
 ## Example
 

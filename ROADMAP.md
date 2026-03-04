@@ -84,6 +84,7 @@
 - Telegram outbound now captures per-message delivery receipts (`message_ids`, `last_message_id`) and channel delivery diagnostics include bounded per-message outcome snapshots via `channels_delivery.recent`.
 - Telegram parity increment: inbound `callback_query` updates now flow through allowlist+ack path with channel signals, and outbound supports metadata-driven inline keyboards.
 - Message tool parity increment: `message` now accepts `metadata` + `buttons` and bridges inline keyboard payloads to Telegram via gateway/channel metadata path.
+- Telegram parity increment: webhook runtime mode now active with secret-token validation on configurable webhook endpoint and safe fallback to polling when webhook activation fails.
 
 ### FUTURE (Scale + polish)
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -87,6 +89,56 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         alias = client.post("/api/message", json={"session_id": "cli:1", "text": "ping"})
         assert alias.status_code == 200
         assert alias.json()["text"] == "pong"
+
+
+def test_gateway_telegram_webhook_endpoint_requires_secret_and_dispatches(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={
+            "telegram": {
+                "enabled": True,
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_enabled": True,
+                "webhook_secret": "secret-1",
+                "webhook_url": "https://example.com/hook",
+            }
+        },
+    )
+    app = create_app(cfg)
+
+    class FakeBot:
+        def __init__(self, token: str) -> None:
+            assert token == "x:token"
+
+        async def set_webhook(self, **kwargs):
+            return kwargs
+
+        async def delete_webhook(self, **kwargs):
+            return kwargs
+
+    fake_module = SimpleNamespace(Bot=FakeBot)
+    with patch.dict(sys.modules, {"telegram": fake_module}):
+        with TestClient(app) as client:
+            unauthorized = client.post("/api/webhooks/telegram", json={"update_id": 1})
+            assert unauthorized.status_code == 401
+            assert unauthorized.json()["code"] == "telegram_webhook_secret_invalid"
+
+            channel = app.state.runtime.channels.get_channel("telegram")
+            assert channel is not None
+            webhook_handler = AsyncMock(return_value=True)
+            channel.handle_webhook_update = webhook_handler
+
+            authorized = client.post(
+                "/api/webhooks/telegram",
+                json={"update_id": 2, "message": {"text": "hello"}},
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret-1"},
+            )
+            assert authorized.status_code == 200
+            assert authorized.json() == {"ok": True, "processed": True}
+            webhook_handler.assert_awaited_once_with({"update_id": 2, "message": {"text": "hello"}})
 
 
 def test_gateway_successful_chat_completes_bootstrap_lifecycle(tmp_path: Path) -> None:

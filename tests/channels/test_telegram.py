@@ -1548,3 +1548,129 @@ def test_telegram_send_auth_breaker_close_count_tracks_natural_cooldown() -> Non
         assert signals["send_auth_breaker_open"] is False
 
     asyncio.run(_scenario())
+
+
+def test_telegram_webhook_mode_start_sets_webhook_and_stop_deletes_webhook() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_url": "https://example.com/hook",
+                "webhook_secret": "secret-1",
+            }
+        )
+
+        class FakeBot:
+            def __init__(self, token: str) -> None:
+                assert token == "x:token"
+                self.set_calls: list[dict] = []
+                self.delete_calls: list[dict] = []
+
+            async def set_webhook(self, **kwargs):
+                self.set_calls.append(kwargs)
+                return True
+
+            async def delete_webhook(self, **kwargs):
+                self.delete_calls.append(kwargs)
+                return True
+
+        fake_module = SimpleNamespace(Bot=FakeBot)
+        with patch.dict(sys.modules, {"telegram": fake_module}):
+            await channel.start()
+            assert channel.running is True
+            assert channel.webhook_mode_active is True
+            assert channel._task is None
+            bot = channel.bot
+            assert bot is not None
+            assert len(bot.set_calls) == 1
+            assert bot.set_calls[0]["url"] == "https://example.com/hook"
+            assert bot.set_calls[0]["secret_token"] == "secret-1"
+            assert bot.set_calls[0]["allowed_updates"] == ["message", "edited_message", "callback_query"]
+            await channel.stop()
+
+        assert len(bot.delete_calls) == 1
+        assert bot.delete_calls[0]["drop_pending_updates"] is False
+        signals = channel.signals()
+        assert signals["webhook_set_count"] == 1
+        assert signals["webhook_delete_count"] == 1
+        assert signals["webhook_mode_active"] is False
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_webhook_missing_config_falls_back_to_polling() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token", "mode": "webhook"})
+
+        async def _fake_poll_loop() -> None:
+            await asyncio.sleep(3600)
+
+        channel._poll_loop = _fake_poll_loop  # type: ignore[method-assign]
+        await channel.start()
+
+        assert channel.running is True
+        assert channel.webhook_mode_active is False
+        assert channel._task is not None
+        assert channel._task.done() is False
+        signals = channel.signals()
+        assert signals["webhook_fallback_to_polling_count"] == 1
+
+        await channel.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_handle_webhook_update_normalizes_callback_payload_and_dedupes() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict[str, object]) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.acks: list[dict[str, object]] = []
+
+            async def answer_callback_query(self, **kwargs):
+                self.acks.append(kwargs)
+                return True
+
+        channel.bot = FakeBot()
+        payload = {
+            "update_id": 900,
+            "callback_query": {
+                "id": "cq-raw-1",
+                "data": "action:raw",
+                "chat_instance": "inst-raw",
+                "from": {"id": 7, "username": "alice"},
+                "message": {
+                    "message_id": 55,
+                    "message_thread_id": 4,
+                    "chat": {"id": 42},
+                },
+            },
+        }
+
+        processed_first = await channel.handle_webhook_update(payload)
+        processed_duplicate = await channel.handle_webhook_update(payload)
+
+        assert processed_first is True
+        assert processed_duplicate is False
+        assert len(channel.bot.acks) == 1
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:42"
+        assert user_id == "7"
+        assert text == "action:raw"
+        assert metadata["channel"] == "telegram"
+        assert metadata["chat_id"] == "42"
+        assert metadata["callback_query_id"] == "cq-raw-1"
+        assert metadata["message_thread_id"] == 4
+        signals = channel.signals()
+        assert signals["webhook_update_received_count"] == 2
+        assert signals["webhook_update_duplicate_count"] == 1
+
+    asyncio.run(_scenario())

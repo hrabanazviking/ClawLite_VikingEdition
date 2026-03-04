@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -43,6 +44,12 @@ setup_logging()
 
 
 GATEWAY_CONTRACT_VERSION = "2026-03-04"
+TELEGRAM_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
+
+
+def _normalize_webhook_path(value: str, *, default: str = "/api/webhooks/telegram") -> str:
+    raw = str(value or "").strip() or default
+    return raw if raw.startswith("/") else f"/{raw}"
 
 
 class ChatRequest(BaseModel):
@@ -805,6 +812,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.lifecycle = lifecycle
     app.state.auth_guard = auth_guard
     app.state.http_telemetry = http_telemetry
+    telegram_webhook_path = _normalize_webhook_path(cfg.channels.telegram.webhook_path)
 
     @app.middleware("http")
     async def _http_telemetry_middleware(request: Request, call_next):
@@ -1009,6 +1017,42 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "header_name": auth_guard.header_name,
             "query_param": auth_guard.query_param,
         }
+
+    async def _telegram_webhook(request: Request) -> dict[str, Any]:
+        if not cfg.channels.telegram.enabled:
+            raise HTTPException(status_code=409, detail="telegram_channel_disabled")
+
+        channel = runtime.channels.get_channel("telegram")
+        if channel is None:
+            raise HTTPException(status_code=409, detail="telegram_channel_unavailable")
+
+        if not bool(getattr(channel, "webhook_mode_active", False)):
+            raise HTTPException(status_code=409, detail="telegram_webhook_mode_inactive")
+
+        expected_secret = str(getattr(channel, "webhook_secret", "") or "").strip()
+        if expected_secret:
+            supplied_secret = str(request.headers.get("X-Telegram-Bot-Api-Secret-Token", "") or "")
+            if not supplied_secret or supplied_secret != expected_secret:
+                raise HTTPException(status_code=401, detail="telegram_webhook_secret_invalid")
+
+        raw_body = await request.body()
+        if len(raw_body) > TELEGRAM_WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="telegram_webhook_payload_too_large")
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="telegram_webhook_payload_invalid") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="telegram_webhook_payload_invalid")
+
+        handler = getattr(channel, "handle_webhook_update", None)
+        if not callable(handler):
+            raise HTTPException(status_code=409, detail="telegram_webhook_handler_unavailable")
+
+        processed = bool(await handler(payload))
+        return {"ok": True, "processed": processed}
+
+    app.add_api_route(telegram_webhook_path, _telegram_webhook, methods=["POST"])
 
     @app.post("/v1/cron/add")
     async def cron_add(req: CronAddRequest, request: Request) -> dict[str, Any]:

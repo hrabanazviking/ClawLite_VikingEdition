@@ -450,12 +450,19 @@ Diagnóstico de autenticação do gateway.
 - Retorna apenas estado (`token_configured`) e versão mascarada determinística (`token_masked`).
 - Segue a mesma política de autenticação dos endpoints de control-plane.
 
+## `POST <telegram webhook path>`
+
+- Telegram webhook endpoint is dynamic and comes from `channels.telegram.webhook_path` (default: `/api/webhooks/telegram`).
+- Enabled only when Telegram channel is enabled and running in active webhook mode.
+- Validates `X-Telegram-Bot-Api-Secret-Token` against channel secret when configured.
+- Accepts JSON object payload up to 1 MB and returns `{ "ok": true, "processed": <bool> }`.
+
 Response:
 
 ```json
 {
-  "text": "...",
-  "model": "gemini/gemini-2.5-flash"
+  "ok": true,
+  "processed": true
 }
 ```
 

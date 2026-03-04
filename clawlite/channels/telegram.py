@@ -8,9 +8,11 @@ import math
 import random
 import re
 import time
+from collections import deque
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -301,6 +303,13 @@ class TelegramChannel(BaseChannel):
         self.token = token
         self.allow_from = ChannelConfig.from_dict(config).allow_from
         self.bot: Any | None = None
+        self.mode = self._normalize_mode(str(config.get("mode", "polling") or "polling"))
+        self.webhook_enabled = bool(config.get("webhook_enabled", config.get("webhookEnabled", False)))
+        self.webhook_secret = str(config.get("webhook_secret", config.get("webhookSecret", "")) or "").strip()
+        self.webhook_path = self._normalize_webhook_path(
+            str(config.get("webhook_path", config.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram")
+        )
+        self.webhook_url = str(config.get("webhook_url", config.get("webhookUrl", "")) or "").strip()
         self.poll_interval_s = float(config.get("poll_interval_s", 1.0) or 1.0)
         self.poll_timeout_s = int(config.get("poll_timeout_s", 20) or 20)
         self.reconnect_initial_s = float(config.get("reconnect_initial_s", 2.0) or 2.0)
@@ -344,7 +353,11 @@ class TelegramChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task[Any]] = {}
         self._offset = self._load_offset()
         self._connected = False
+        self._webhook_mode_active = False
         self._startup_drop_done = False
+        self._webhook_seen_limit = max(32, int(config.get("webhook_dedupe_limit", 2048) or 2048))
+        self._webhook_seen_ids: set[int] = set()
+        self._webhook_seen_order: deque[int] = deque()
         self._message_signatures: dict[tuple[str, int], str] = {}
         self._signature_limit = 4096
         self._signals: dict[str, int] = {
@@ -359,6 +372,12 @@ class TelegramChannel(BaseChannel):
             "callback_query_received_count": 0,
             "callback_query_blocked_count": 0,
             "callback_query_ack_error_count": 0,
+            "webhook_set_count": 0,
+            "webhook_delete_count": 0,
+            "webhook_fallback_to_polling_count": 0,
+            "webhook_update_received_count": 0,
+            "webhook_update_duplicate_count": 0,
+            "webhook_update_parse_error_count": 0,
         }
         self._send_auth_breaker_seen_open = False
         self._typing_auth_breaker_seen_open = False
@@ -431,7 +450,126 @@ class TelegramChannel(BaseChannel):
             "send_auth_breaker_open": self._send_auth_breaker.is_open,
             "typing_auth_breaker_open": self._typing_auth_breaker.is_open,
             "typing_keepalive_active": len(self._typing_tasks),
+            "webhook_mode_active": self._webhook_mode_active,
         }
+
+    @property
+    def webhook_mode_active(self) -> bool:
+        return bool(self._webhook_mode_active)
+
+    @staticmethod
+    def _normalize_mode(value: str) -> str:
+        mode = str(value or "polling").strip().lower()
+        return mode if mode in {"polling", "webhook"} else "polling"
+
+    @staticmethod
+    def _normalize_webhook_path(value: str) -> str:
+        raw = str(value or "").strip() or "/api/webhooks/telegram"
+        return raw if raw.startswith("/") else f"/{raw}"
+
+    def _webhook_requested(self) -> bool:
+        return self.mode == "webhook" or self.webhook_enabled
+
+    @staticmethod
+    def _normalize_webhook_payload(value: Any) -> Any:
+        if isinstance(value, dict):
+            normalized: dict[str, Any] = {}
+            for raw_key, raw_item in value.items():
+                key = "from_user" if str(raw_key) == "from" else str(raw_key)
+                normalized[key] = TelegramChannel._normalize_webhook_payload(raw_item)
+            chat = normalized.get("chat")
+            if isinstance(chat, dict) and "chat_id" not in normalized and "id" in chat:
+                normalized["chat_id"] = chat.get("id")
+            return normalized
+        if isinstance(value, list):
+            return [TelegramChannel._normalize_webhook_payload(item) for item in value]
+        return value
+
+    @staticmethod
+    def _to_namespace(value: Any) -> Any:
+        if isinstance(value, dict):
+            return SimpleNamespace(**{key: TelegramChannel._to_namespace(item) for key, item in value.items()})
+        if isinstance(value, list):
+            return [TelegramChannel._to_namespace(item) for item in value]
+        return value
+
+    def _remember_webhook_update_id(self, update_id: int) -> bool:
+        if update_id in self._webhook_seen_ids:
+            self._signals["webhook_update_duplicate_count"] += 1
+            return False
+        self._webhook_seen_ids.add(update_id)
+        self._webhook_seen_order.append(update_id)
+        while len(self._webhook_seen_order) > self._webhook_seen_limit:
+            oldest = self._webhook_seen_order.popleft()
+            self._webhook_seen_ids.discard(oldest)
+        return True
+
+    async def _ensure_bot(self) -> Any:
+        if self.bot is not None:
+            return self.bot
+        from telegram import Bot  # lazy import for environments without dependency during tests
+
+        self.bot = Bot(token=self.token)
+        return self.bot
+
+    async def _try_delete_webhook(self, *, reason: str) -> bool:
+        bot = self.bot
+        if bot is None or not hasattr(bot, "delete_webhook"):
+            return False
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+            self._signals["webhook_delete_count"] += 1
+            logger.info("telegram webhook deleted reason={}", reason)
+            return True
+        except TypeError as exc:
+            if "drop_pending_updates" not in str(exc):
+                logger.warning("telegram webhook delete failed reason={} error={}", reason, exc)
+                return False
+            try:
+                await bot.delete_webhook()
+                self._signals["webhook_delete_count"] += 1
+                logger.info("telegram webhook deleted reason={} legacy=true", reason)
+                return True
+            except Exception as legacy_exc:  # pragma: no cover
+                logger.warning("telegram webhook delete failed reason={} error={}", reason, legacy_exc)
+                return False
+        except Exception as exc:  # pragma: no cover
+            logger.warning("telegram webhook delete failed reason={} error={}", reason, exc)
+            return False
+
+    async def _activate_webhook_mode(self) -> bool:
+        if not self.webhook_url or not self.webhook_secret:
+            missing = []
+            if not self.webhook_url:
+                missing.append("webhook_url")
+            if not self.webhook_secret:
+                missing.append("webhook_secret")
+            logger.warning("telegram webhook activation skipped missing={}", ",".join(missing))
+            return False
+        try:
+            bot = await self._ensure_bot()
+        except Exception as exc:  # pragma: no cover
+            self._last_error = str(exc)
+            logger.warning("telegram webhook bot init failed error={}", exc)
+            return False
+        if not hasattr(bot, "set_webhook"):
+            logger.warning("telegram webhook activation skipped reason=bot_missing_set_webhook")
+            return False
+        try:
+            await bot.set_webhook(
+                url=self.webhook_url,
+                secret_token=self.webhook_secret,
+                allowed_updates=["message", "edited_message", "callback_query"],
+            )
+            self._signals["webhook_set_count"] += 1
+            self._connected = True
+            self._webhook_mode_active = True
+            logger.info("telegram connected polling=false webhook=true path={}", self.webhook_path)
+            return True
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("telegram webhook activation failed error={}", exc)
+            return False
 
     def _remember_message_signature(self, *, msg_key: tuple[str, int], signature: str) -> None:
         self._message_signatures[msg_key] = signature
@@ -585,10 +723,9 @@ class TelegramChannel(BaseChannel):
         while self._running:
             try:
                 if self.bot is None:
-                    from telegram import Bot  # lazy import for environments without dependency during tests
-
-                    self.bot = Bot(token=self.token)
+                    await self._ensure_bot()
                     logger.info("telegram bot initialized poll_timeout_s={}", self.poll_timeout_s)
+                    await self._try_delete_webhook(reason="polling_start")
                     if self.drop_pending_updates and not self._startup_drop_done:
                         await self._drop_pending_updates()
                         self._startup_drop_done = True
@@ -891,16 +1028,57 @@ class TelegramChannel(BaseChannel):
         if self._running:
             return
         self._running = True
-        logger.info("telegram channel starting")
+        self._webhook_mode_active = False
+        logger.info("telegram channel starting mode={}", self.mode)
+        if self._webhook_requested():
+            activated = await self._activate_webhook_mode()
+            if activated:
+                return
+            self._signals["webhook_fallback_to_polling_count"] += 1
+            logger.warning("telegram webhook requested but falling back to polling")
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
         self._running = False
         await self._stop_all_typing_keepalive()
+        if self._webhook_mode_active:
+            await self._try_delete_webhook(reason="webhook_stop")
         await cancel_task(self._task)
         self._task = None
+        self._webhook_mode_active = False
         self._connected = False
         logger.info("telegram channel stopped")
+
+    async def handle_webhook_update(self, payload: dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            self._signals["webhook_update_parse_error_count"] += 1
+            return False
+
+        self._signals["webhook_update_received_count"] += 1
+        normalized = self._normalize_webhook_payload(payload)
+        update_id = normalized.get("update_id")
+        parsed_update_id: int | None = None
+        if update_id is not None:
+            try:
+                parsed_update_id = int(update_id)
+            except (TypeError, ValueError):
+                self._signals["webhook_update_parse_error_count"] += 1
+                return False
+            if not self._remember_webhook_update_id(parsed_update_id):
+                return False
+
+        try:
+            item = self._to_namespace(normalized)
+        except Exception:
+            self._signals["webhook_update_parse_error_count"] += 1
+            return False
+
+        try:
+            return bool(await self._handle_update(item))
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("telegram webhook update processing failed error={}", exc)
+            return False
 
     async def send(self, *, target: str, text: str, metadata: dict[str, Any] | None = None) -> str:
         chat_id, target_thread_id = self._parse_target(str(target))

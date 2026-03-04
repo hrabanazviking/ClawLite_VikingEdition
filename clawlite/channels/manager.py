@@ -789,6 +789,9 @@ class ChannelManager:
                 sent_targets.add((str(channel), str(target)))
         return response
 
+    def get_channel(self, name: str) -> BaseChannel | None:
+        return self._channels.get(str(name or "").strip().lower())
+
     @staticmethod
     def _target_from_event(event: InboundEvent) -> str:
         target = str(event.metadata.get("chat_id") or event.user_id)
