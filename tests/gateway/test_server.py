@@ -497,6 +497,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "bootstrap" in payload
         assert "pending" in payload["bootstrap"]
         assert "engine" in payload
+        assert "http" in payload
         assert "retrieval_metrics" in payload["engine"]
         assert "provider" in payload["engine"]
         retrieval = payload["engine"]["retrieval_metrics"]
@@ -567,6 +568,51 @@ def test_gateway_diagnostics_include_provider_telemetry_when_enabled(tmp_path: P
 
         alias_payload = client.get("/api/diagnostics").json()
         assert alias_payload["engine"]["provider"] == payload["engine"]["provider"]
+
+
+def test_gateway_diagnostics_http_telemetry_tracks_success_and_errors(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": "diag-token",
+                "allow_loopback_without_auth": False,
+            },
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": True},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        unauthorized = client.get("/v1/status")
+        assert unauthorized.status_code == 401
+
+        authorized_status = client.get("/v1/status", headers={"Authorization": "Bearer diag-token"})
+        assert authorized_status.status_code == 200
+
+        diagnostics = client.get("/v1/diagnostics", headers={"Authorization": "Bearer diag-token"})
+        assert diagnostics.status_code == 200
+        http_payload = diagnostics.json()["http"]
+
+        assert http_payload["total_requests"] >= 3
+        assert http_payload["in_flight"] >= 1
+        assert http_payload["by_method"]["GET"] >= 3
+        assert http_payload["by_path"]["/v1/status"] >= 2
+        assert http_payload["by_path"]["/v1/diagnostics"] >= 1
+        assert http_payload["by_status"]["401"] >= 1
+        assert http_payload["by_status"]["200"] >= 1
+
+        latency = http_payload["latency_ms"]
+        assert latency["count"] >= 2
+        assert latency["min"] >= 0
+        assert latency["max"] >= latency["min"]
+        assert latency["avg"] >= latency["min"]
+        assert latency["avg"] <= latency["max"]
 
 
 def test_gateway_diagnostics_provider_telemetry_sanitizes_nested_secrets(tmp_path: Path) -> None:

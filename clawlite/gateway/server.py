@@ -4,7 +4,7 @@ import asyncio
 import datetime as dt
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,62 @@ class DiagnosticsResponse(BaseModel):
     bootstrap: dict[str, Any]
     engine: dict[str, Any] = {}
     environment: dict[str, Any] = {}
+    http: dict[str, Any] = {}
+
+
+@dataclass(slots=True)
+class HttpRequestTelemetry:
+    total_requests: int = 0
+    in_flight: int = 0
+    by_method: dict[str, int] = field(default_factory=dict)
+    by_path: dict[str, int] = field(default_factory=dict)
+    by_status: dict[str, int] = field(default_factory=dict)
+    latency_count: int = 0
+    latency_sum_ms: float = 0.0
+    latency_min_ms: float = 0.0
+    latency_max_ms: float = 0.0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def start(self, *, method: str, path: str) -> None:
+        normalized_method = (method or "UNKNOWN").upper()
+        normalized_path = str(path or "") or "/"
+        async with self.lock:
+            self.total_requests += 1
+            self.in_flight += 1
+            self.by_method[normalized_method] = self.by_method.get(normalized_method, 0) + 1
+            self.by_path[normalized_path] = self.by_path.get(normalized_path, 0) + 1
+
+    async def finish(self, *, status_code: int, latency_ms: float) -> None:
+        normalized_status = str(int(status_code) if status_code else 500)
+        elapsed_ms = max(0.0, float(latency_ms))
+        async with self.lock:
+            self.in_flight = max(0, self.in_flight - 1)
+            self.by_status[normalized_status] = self.by_status.get(normalized_status, 0) + 1
+            self.latency_count += 1
+            self.latency_sum_ms += elapsed_ms
+            if self.latency_count == 1:
+                self.latency_min_ms = elapsed_ms
+                self.latency_max_ms = elapsed_ms
+            else:
+                self.latency_min_ms = min(self.latency_min_ms, elapsed_ms)
+                self.latency_max_ms = max(self.latency_max_ms, elapsed_ms)
+
+    async def snapshot(self) -> dict[str, Any]:
+        async with self.lock:
+            avg_ms = (self.latency_sum_ms / self.latency_count) if self.latency_count else 0.0
+            return {
+                "total_requests": self.total_requests,
+                "in_flight": self.in_flight,
+                "by_method": dict(self.by_method),
+                "by_path": dict(self.by_path),
+                "by_status": dict(self.by_status),
+                "latency_ms": {
+                    "count": self.latency_count,
+                    "min": round(self.latency_min_ms, 3) if self.latency_count else 0.0,
+                    "max": round(self.latency_max_ms, 3) if self.latency_count else 0.0,
+                    "avg": round(avg_ms, 3),
+                },
+            }
 
 
 ROOT_ENTRYPOINT_HTML = """<!doctype html>
@@ -558,6 +614,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     if auth_guard.mode == "off" and not GatewayAuthGuard._is_loopback(cfg.gateway.host):
         bind_event("gateway.auth").warning("gateway running on non-loopback host without auth host={}", cfg.gateway.host)
     lifecycle = GatewayLifecycleState()
+    http_telemetry = HttpRequestTelemetry()
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
 
@@ -739,6 +796,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.runtime = runtime
     app.state.lifecycle = lifecycle
     app.state.auth_guard = auth_guard
+    app.state.http_telemetry = http_telemetry
+
+    @app.middleware("http")
+    async def _http_telemetry_middleware(request: Request, call_next):
+        started_at = time.perf_counter()
+        await http_telemetry.start(method=request.method, path=request.url.path)
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = int(getattr(response, "status_code", 500) or 500)
+            return response
+        except HTTPException as exc:
+            status_code = int(exc.status_code)
+            raise
+        except Exception:
+            status_code = 500
+            raise
+        finally:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            await http_telemetry.finish(status_code=status_code, latency_ms=elapsed_ms)
 
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
@@ -863,6 +940,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             bootstrap=_bootstrap_status_snapshot(),
             engine=engine_payload,
             environment=environment,
+            http=await http_telemetry.snapshot(),
         )
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
