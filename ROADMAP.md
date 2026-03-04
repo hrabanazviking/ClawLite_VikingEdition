@@ -74,6 +74,7 @@
 - Structured HTTP gateway telemetry added to diagnostics (`http`) with in-memory request counters by method/path/status and latency aggregates.
 - Provider ops status expanded beyond Codex in CLI (`clawlite provider status`) with deterministic, secret-safe status for API-key providers (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`).
 - Strict CLI config preflight added via `clawlite validate config` with structured JSON and deterministic exit semantics (`0` ok, `2` invalid/parse/validation).
+- Prompt/memory pipeline now injects session-aware recovery snippets when retrieval returns no hits, preserving fail-soft turn execution.
 
 ### FUTURE (Scale + polish)
 

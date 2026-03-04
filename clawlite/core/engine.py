@@ -509,6 +509,12 @@ class AgentEngine:
         text = str(record.text or "").strip()
         return f"{cls._memory_ref(record.id)} [src:{source}] {text}"
 
+    @staticmethod
+    def _format_session_recovery_snippet(*, session_id: str, text: str) -> str:
+        clean_session = str(session_id or "").strip() or "unknown"
+        clean_text = str(text or "").strip()
+        return f"[src:session-recovery:{clean_session}] {clean_text}"
+
     @classmethod
     def _tokenize_retrieval_text(cls, text: str) -> list[str]:
         return [match.group(0).lower() for match in cls._MEMORY_TOKEN_RE.finditer(str(text or ""))]
@@ -586,7 +592,7 @@ class AgentEngine:
         original = " ".join(str(user_text or "").split()).strip().lower()
         return "" if rewritten.lower() == original else rewritten
 
-    def _plan_memory_snippets(self, *, user_text: str, run_log: Any) -> list[str]:
+    def _plan_memory_snippets(self, *, session_id: str = "", user_text: str, run_log: Any) -> list[str]:
         route = self._MEMORY_ROUTE_NO_RETRIEVE
         selected_query = ""
         attempts = 0
@@ -628,7 +634,32 @@ class AgentEngine:
                         hits += 1
                         selected_rows = second_rows
 
-            run_log.debug("memory planner route={} query={} rows={}", route, selected_query or "-", len(selected_rows))
+            recovery_snippets: list[str] = []
+            if not selected_rows:
+                recover_fn = getattr(self.memory, "recover_session_context", None)
+                if callable(recover_fn):
+                    try:
+                        recovered = recover_fn(session_id, limit=4)
+                        for snippet in recovered:
+                            clean = str(snippet or "").strip()
+                            if clean:
+                                recovery_snippets.append(
+                                    self._format_session_recovery_snippet(session_id=session_id, text=clean)
+                                )
+                    except Exception as exc:
+                        run_log.warning(
+                            "memory planner session recovery failed session={} error={}",
+                            session_id or "-",
+                            exc,
+                        )
+
+            run_log.debug(
+                "memory planner route={} query={} rows={} recovery_rows={}",
+                route,
+                selected_query or "-",
+                len(selected_rows),
+                len(recovery_snippets),
+            )
             self._record_retrieval_metrics(
                 route=route,
                 query=selected_query,
@@ -636,7 +667,9 @@ class AgentEngine:
                 hits=hits,
                 rewrites=rewrites,
             )
-            return [self._format_memory_snippet(row) for row in selected_rows]
+            if selected_rows:
+                return [self._format_memory_snippet(row) for row in selected_rows]
+            return recovery_snippets
         except Exception as exc:
             run_log.warning("memory planner failed route={} query={} error={}", route, selected_query or "-", exc)
             self._record_retrieval_metrics(
@@ -828,7 +861,7 @@ class AgentEngine:
         budget = self._resolve_turn_budget(turn_budget)
         progress_counter = [0]
         history = self.sessions.read(session_id, limit=self.memory_window)
-        memories = self._plan_memory_snippets(user_text=user_text, run_log=run_log)
+        memories = self._plan_memory_snippets(session_id=session_id, user_text=user_text, run_log=run_log)
         skills = self.skills_loader.render_for_prompt()
         always_names = [item.name for item in self.skills_loader.always_on()]
         skills_context = self.skills_loader.load_skills_for_context(always_names)

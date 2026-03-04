@@ -104,9 +104,17 @@ class FakeMemory:
 
 
 class FakePlannerMemory:
-    def __init__(self, routes: dict[str, list[MemoryRecord]] | None = None) -> None:
+    def __init__(
+        self,
+        routes: dict[str, list[MemoryRecord]] | None = None,
+        recovered: list[str] | None = None,
+        recover_error: Exception | None = None,
+    ) -> None:
         self.routes = routes or {}
+        self.recovered = recovered or []
+        self.recover_error = recover_error
         self.search_calls: list[str] = []
+        self.recovery_calls: list[tuple[str, int]] = []
 
     def search(self, query: str, *, limit: int = 5) -> list[MemoryRecord]:
         del limit
@@ -116,6 +124,12 @@ class FakePlannerMemory:
     def consolidate(self, messages, *, source: str = "session"):
         del messages, source
         return None
+
+    def recover_session_context(self, session_id: str, *, limit: int = 4) -> list[str]:
+        self.recovery_calls.append((session_id, limit))
+        if self.recover_error is not None:
+            raise self.recover_error
+        return self.recovered[:limit]
 
 
 class FakeProviderWithReasoningCapture:
@@ -483,6 +497,77 @@ def test_engine_memory_planner_next_query_rewrites_when_temporal_intent_lacks_te
         out = await engine.run(session_id="cli:temporal-next-query", user_text=original_query)
         assert out.text == "ok"
         assert memory.search_calls == [original_query, rewritten_query]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_uses_session_recovery_when_retrieval_has_no_hits() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        query = "what is my timezone preference"
+        memory = FakePlannerMemory(
+            routes={},
+            recovered=["User timezone is America/Sao_Paulo."],
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="telegram:42", user_text=query)
+        assert out.text == "ok"
+        assert memory.search_calls[0] == query
+        assert len(memory.search_calls) >= 1
+        assert memory.recovery_calls == [("telegram:42", 4)]
+
+        first_prompt = provider.snapshots[0]
+        memory_sections = [row for row in first_prompt if row.get("role") == "system" and "[Memory]" in str(row.get("content", ""))]
+        assert memory_sections
+        section = str(memory_sections[0].get("content", ""))
+        assert "[src:session-recovery:telegram:42] User timezone is America/Sao_Paulo." in section
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_skips_session_recovery_when_retrieval_has_hits() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        query = "what is my timezone preference"
+        memory = FakePlannerMemory(
+            routes={
+                query: [
+                    MemoryRecord(
+                        id="hit000001",
+                        text="Timezone is America/Sao_Paulo.",
+                        source="session:telegram:42",
+                        created_at="2026-03-04T12:00:00+00:00",
+                    )
+                ]
+            },
+            recovered=["fallback should not be used"],
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="telegram:42", user_text=query)
+        assert out.text == "ok"
+        assert memory.search_calls == [query]
+        assert memory.recovery_calls == []
+
+    asyncio.run(_scenario())
+
+
+def test_engine_memory_planner_session_recovery_exception_is_fail_soft() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        query = "what is my timezone preference"
+        memory = FakePlannerMemory(
+            routes={},
+            recover_error=RuntimeError("boom"),
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="telegram:42", user_text=query)
+        assert out.text == "ok"
+        assert memory.search_calls[0] == query
+        assert len(memory.search_calls) >= 1
+        assert memory.recovery_calls == [("telegram:42", 4)]
 
     asyncio.run(_scenario())
 
