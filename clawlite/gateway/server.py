@@ -31,6 +31,7 @@ from clawlite.tools.exec import ExecTool
 from clawlite.tools.files import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from clawlite.tools.mcp import MCPTool
 from clawlite.tools.message import MessageTool
+from clawlite.tools.memory import MemoryLearnTool, MemoryRecallTool
 from clawlite.tools.registry import ToolRegistry
 from clawlite.tools.skill import SkillTool
 from clawlite.tools.spawn import SpawnTool
@@ -395,6 +396,8 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
 
     sessions = SessionStore(root=Path(config.state_path) / "sessions")
     memory = MemoryStore(db_path=Path(config.state_path) / "memory.jsonl")
+    tools.register(MemoryRecallTool(memory))
+    tools.register(MemoryLearnTool(memory))
     prompt = PromptBuilder(workspace_path=config.workspace_path)
 
     engine = AgentEngine(

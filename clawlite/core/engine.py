@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from clawlite.core.memory import MemoryStore
+from clawlite.core.memory import MemoryRecord, MemoryStore
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.core.subagent import SubagentManager
@@ -357,6 +357,18 @@ class AgentEngine:
 
         return runtime_channel, runtime_chat_id
 
+    @staticmethod
+    def _memory_ref(memory_id: str) -> str:
+        clean = str(memory_id or "").strip()
+        short = clean[:8] if clean else "unknown"
+        return f"mem:{short}"
+
+    @classmethod
+    def _format_memory_snippet(cls, record: MemoryRecord) -> str:
+        source = str(record.source or "").strip() or "unknown"
+        text = str(record.text or "").strip()
+        return f"{cls._memory_ref(record.id)} [src:{source}] {text}"
+
     def request_stop(self, session_id: str) -> bool:
         normalized = str(session_id or "").strip()
         if not normalized:
@@ -535,7 +547,8 @@ class AgentEngine:
         budget = self._resolve_turn_budget(turn_budget)
         progress_counter = [0]
         history = self.sessions.read(session_id, limit=self.memory_window)
-        memories = [row.text for row in self.memory.search(user_text, limit=6)]
+        memory_rows = self.memory.search(user_text, limit=6)
+        memories = [self._format_memory_snippet(row) for row in memory_rows]
         skills = self.skills_loader.render_for_prompt()
         always_names = [item.name for item in self.skills_loader.always_on()]
         skills_context = self.skills_loader.load_skills_for_context(always_names)

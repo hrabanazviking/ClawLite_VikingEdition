@@ -6,6 +6,7 @@ from typing import Any
 
 from clawlite.config.schema import ToolSafetyPolicyConfig
 from clawlite.core.engine import AgentEngine, LoopDetectionSettings, ProviderResult, ToolCall, TurnBudget
+from clawlite.core.memory import MemoryRecord
 from clawlite.tools.base import Tool, ToolContext
 from clawlite.tools.registry import ToolRegistry
 
@@ -65,6 +66,16 @@ class FakeProviderWithSamplingCapture:
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
 
+class FakePromptCaptureProvider:
+    def __init__(self) -> None:
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.snapshots.append(messages)
+        return ProviderResult(text="ok", tool_calls=[], model="fake/model")
+
+
 class SessionStoreCapture:
     def __init__(self) -> None:
         self.last_limit: int | None = None
@@ -74,6 +85,19 @@ class SessionStoreCapture:
         return []
 
     def append(self, session_id: str, role: str, content: str) -> None:
+        return None
+
+
+class FakeMemory:
+    def __init__(self, rows: list[MemoryRecord] | None = None) -> None:
+        self.rows = rows or []
+
+    def search(self, query: str, *, limit: int = 5) -> list[MemoryRecord]:
+        del query
+        return self.rows[:limit]
+
+    def consolidate(self, messages, *, source: str = "session"):
+        del messages, source
         return None
 
 
@@ -305,6 +329,33 @@ def test_engine_uses_configured_memory_window_for_session_history() -> None:
         out = await engine.run(session_id="cli:memory-window", user_text="hello")
         assert out.text == "ok"
         assert sessions.last_limit == 7
+
+    asyncio.run(_scenario())
+
+
+def test_engine_formats_memory_snippets_with_ref_and_source_marker() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        memory = FakeMemory(
+            [
+                MemoryRecord(
+                    id="a1b2c3d4e5f6",
+                    text="Remember to ship daily status.",
+                    source="session:telegram:42",
+                    created_at="2026-03-04T12:00:00+00:00",
+                )
+            ]
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+        out = await engine.run(session_id="telegram:42", user_text="status")
+        assert out.text == "ok"
+
+        first_prompt = provider.snapshots[0]
+        memory_sections = [row for row in first_prompt if row.get("role") == "system" and "[Memory]" in str(row.get("content", ""))]
+        assert memory_sections
+        section = str(memory_sections[0].get("content", ""))
+        assert "mem:a1b2c3d4" in section
+        assert "[src:session:telegram:42]" in section
 
     asyncio.run(_scenario())
 

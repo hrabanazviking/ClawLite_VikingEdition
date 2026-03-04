@@ -131,6 +131,7 @@
 
 ### Reference
 - memU repository: https://github.com/NevaMind-AI/memU
+- Progress (2026-03-04): added `memory_learn` + `memory_recall` tools and prompt memory snippets now carry `mem:<id8>` provenance with source markers.
 
 ### Vision and differentiation
 - Build **ClawMemory** as a proactive memory engine that adapts ideas from
