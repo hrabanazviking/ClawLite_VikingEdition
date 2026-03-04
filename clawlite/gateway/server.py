@@ -81,6 +81,7 @@ class DiagnosticsResponse(BaseModel):
     channels: dict[str, Any]
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
+    bootstrap: dict[str, Any]
     engine: dict[str, Any] = {}
     environment: dict[str, Any] = {}
 
@@ -201,6 +202,7 @@ class GatewayLifecycleState:
                 "channels": {"enabled": True, "running": False, "last_error": ""},
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
+                "bootstrap": {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
             }
 
@@ -559,11 +561,88 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
 
+    def _bootstrap_status_snapshot() -> dict[str, Any]:
+        fallback = {
+            "pending": False,
+            "bootstrap_exists": False,
+            "bootstrap_path": str(runtime.workspace.bootstrap_path()),
+            "state_path": str(runtime.workspace.bootstrap_state_path()),
+            "last_run_iso": "",
+            "completed_at": "",
+            "last_status": "",
+            "last_error": "",
+            "run_count": 0,
+            "last_session_id": "",
+        }
+        try:
+            payload = runtime.workspace.bootstrap_status()
+        except Exception as exc:
+            fallback["last_status"] = "error"
+            fallback["last_error"] = str(exc)
+            return fallback
+        if not isinstance(payload, dict):
+            return fallback
+        for key in tuple(fallback.keys()):
+            if key in payload:
+                fallback[key] = payload[key]
+        fallback["pending"] = bool(fallback.get("pending", False))
+        fallback["bootstrap_exists"] = bool(fallback.get("bootstrap_exists", False))
+        fallback["run_count"] = max(0, int(fallback.get("run_count", 0) or 0))
+        return fallback
+
+    def _refresh_bootstrap_component() -> dict[str, Any]:
+        status = _bootstrap_status_snapshot()
+        row = lifecycle.components.setdefault(
+            "bootstrap",
+            {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
+        )
+        row["enabled"] = True
+        row["pending"] = bool(status.get("pending", False))
+        row["running"] = bool(status.get("pending", False))
+        row["last_status"] = str(status.get("last_status", "") or "")
+        row["last_error"] = str(status.get("last_error", "") or "")
+        row["completed_at"] = str(status.get("completed_at", "") or "")
+        row["run_count"] = int(status.get("run_count", 0) or 0)
+        return status
+
+    def _is_internal_session_id(session_id: str) -> bool:
+        normalized = str(session_id or "").strip().lower()
+        return normalized.startswith("heartbeat:") or normalized.startswith("autonomy:") or normalized.startswith("bootstrap:")
+
+    def _finalize_bootstrap_for_user_turn(session_id: str) -> None:
+        if _is_internal_session_id(session_id):
+            _refresh_bootstrap_component()
+            return
+
+        status = _bootstrap_status_snapshot()
+        if not bool(status.get("pending", False)):
+            _refresh_bootstrap_component()
+            return
+
+        try:
+            completed = runtime.workspace.complete_bootstrap()
+            if completed:
+                runtime.workspace.record_bootstrap_result(status="completed", session_id=session_id)
+            else:
+                runtime.workspace.record_bootstrap_result(
+                    status="error",
+                    session_id=session_id,
+                    error="complete_bootstrap_returned_false",
+                )
+        except Exception as exc:
+            try:
+                runtime.workspace.record_bootstrap_result(status="error", session_id=session_id, error=str(exc))
+            except Exception:
+                pass
+        finally:
+            _refresh_bootstrap_component()
+
     def _utc_now_iso() -> str:
         return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
     def _control_plane_payload(server_time: str | None = None) -> ControlPlaneResponse:
         now = server_time or _utc_now_iso()
+        _refresh_bootstrap_component()
         return ControlPlaneResponse(
             ready=bool(lifecycle.ready),
             phase=str(lifecycle.phase),
@@ -781,6 +860,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             channels=runtime.channels.status(),
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
+            bootstrap=_bootstrap_status_snapshot(),
             engine=engine_payload,
             environment=environment,
         )
@@ -819,6 +899,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             status_code, detail = _provider_error_payload(exc)
             bind_event("gateway.chat", session=req.session_id).error("chat request failed status={} detail={}", status_code, detail)
             raise HTTPException(status_code=status_code, detail=detail)
+        _finalize_bootstrap_for_user_turn(req.session_id)
         bind_event("gateway.chat", session=req.session_id).info("chat response generated model={}", out.model)
         return ChatResponse(text=out.text, model=out.model)
 
@@ -883,6 +964,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     bind_event("gateway.ws", session=session_id, channel="ws").error("websocket request failed status={} detail={}", status_code, detail)
                     await socket.send_json({"error": detail, "status_code": status_code})
                     continue
+                _finalize_bootstrap_for_user_turn(session_id)
                 await socket.send_json({"text": out.text, "model": out.model})
                 bind_event("gateway.ws", session=session_id, channel="ws").debug("websocket response sent model={}", out.model)
         except WebSocketDisconnect:

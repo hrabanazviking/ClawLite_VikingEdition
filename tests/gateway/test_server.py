@@ -89,6 +89,57 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         assert alias.json()["text"] == "pong"
 
 
+def test_gateway_successful_chat_completes_bootstrap_lifecycle(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+    bootstrap_file = tmp_path / "workspace" / "BOOTSTRAP.md"
+
+    with TestClient(app) as client:
+        assert bootstrap_file.exists()
+        chat = client.post("/v1/chat", json={"session_id": "cli:bootstrap", "text": "ping"})
+        assert chat.status_code == 200
+        assert chat.json()["text"] == "pong"
+
+        assert not bootstrap_file.exists()
+
+        status_payload = client.get("/v1/status").json()
+        bootstrap_component = status_payload["components"]["bootstrap"]
+        assert bootstrap_component["pending"] is False
+        assert bootstrap_component["last_status"] == "completed"
+
+        diagnostics_payload = client.get("/v1/diagnostics").json()
+        assert diagnostics_payload["bootstrap"]["pending"] is False
+        assert diagnostics_payload["bootstrap"]["last_status"] == "completed"
+
+
+def test_gateway_internal_sessions_do_not_complete_bootstrap(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+    bootstrap_file = tmp_path / "workspace" / "BOOTSTRAP.md"
+
+    with TestClient(app) as client:
+        assert bootstrap_file.exists()
+        chat = client.post("/v1/chat", json={"session_id": "heartbeat:manual", "text": "ping"})
+        assert chat.status_code == 200
+        assert bootstrap_file.exists()
+
+        payload = client.get("/v1/diagnostics").json()
+        assert payload["bootstrap"]["pending"] is True
+        assert payload["bootstrap"]["last_status"] == ""
+
+
 def test_gateway_runtime_passes_memory_window_to_engine(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -251,7 +302,11 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
 
         ok_alias = client.get("/api/status", headers={"Authorization": "Bearer secret-token"})
         assert ok_alias.status_code == 200
-        assert ok_alias.json() == payload
+        alias_payload = ok_alias.json()
+        assert isinstance(alias_payload["server_time"], str) and alias_payload["server_time"]
+        assert {k: v for k, v in alias_payload.items() if k != "server_time"} == {
+            k: v for k, v in payload.items() if k != "server_time"
+        }
 
         token = client.get("/api/token", headers={"Authorization": "Bearer secret-token"})
         assert token.status_code == 200
@@ -353,10 +408,15 @@ def test_gateway_ws_alias_behaves_like_v1_ws(tmp_path: Path) -> None:
     app.state.runtime.engine.provider = FakeProvider()
 
     with TestClient(app) as client:
+        bootstrap_file = tmp_path / "workspace" / "BOOTSTRAP.md"
+        assert bootstrap_file.exists()
+
         with client.websocket_connect("/v1/ws") as socket:
             socket.send_json({"session_id": "cli:ws", "text": "ping"})
             payload = socket.receive_json()
             assert payload["text"] == "pong"
+
+        assert not bootstrap_file.exists()
 
         with client.websocket_connect("/ws") as socket_alias:
             socket_alias.send_json({"session_id": "cli:ws", "text": "ping"})
@@ -434,6 +494,8 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "channels" in payload
         assert "cron" in payload
         assert "heartbeat" in payload
+        assert "bootstrap" in payload
+        assert "pending" in payload["bootstrap"]
         assert "engine" in payload
         assert "retrieval_metrics" in payload["engine"]
         assert "provider" in payload["engine"]

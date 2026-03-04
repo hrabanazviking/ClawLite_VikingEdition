@@ -70,6 +70,7 @@
   retrieval regression checks.
 - Provider telemetry visibility added to gateway diagnostics (`engine.provider`) with config/env control and secret-safe provider contracts.
 - Codex auth UX hardened: typed `auth.providers.openai_codex`, deterministic `openai-codex/*` provider path, CLI login/status/logout, and explicit auth guidance on failures.
+- Workspace/bootstrap lifecycle aligned as one-shot with persisted `bootstrap-state.json`, runtime auto-completion on successful user turns, and operator visibility in gateway/CLI diagnostics.
 
 ### FUTURE (Scale + polish)
 

@@ -23,6 +23,7 @@ The same core engine powers CLI, gateway, scheduler, and channel workflows for a
 - Active outbound adapters for Discord, Slack, and WhatsApp.
 - Memory tooling for learn/recall/forget/analyze plus `clawlite memory doctor` diagnostics, deterministic `clawlite memory eval`, and safe repair path.
 - Scheduler with cron jobs and heartbeat loop (`HEARTBEAT_OK` contract + persisted heartbeat state).
+- One-shot bootstrap lifecycle (`BOOTSTRAP.md` auto-completes on first successful non-internal user turn and exposes persisted bootstrap state).
 - Session controls including `agents.defaults.memory_window` and `agents.defaults.session_retention_messages`.
 - Gateway compatibility aliases aligned with OpenClaw-style surface.
 - Channel-aware tool safety policy for risky tools (`exec`, `web_fetch`, `web_search`, `mcp`).
@@ -125,7 +126,7 @@ Base URL (default): `http://127.0.0.1:8787`
 - `POST /v1/chat`: chat execution.
 - `WS /v1/ws`: WebSocket chat.
 - `GET /v1/status`: control-plane status + auth posture.
-- `GET /v1/diagnostics`: operational diagnostics snapshot (includes `engine.retrieval_metrics` and optional `engine.provider` telemetry).
+- `GET /v1/diagnostics`: operational diagnostics snapshot (includes `engine.retrieval_metrics`, optional `engine.provider` telemetry, and bootstrap lifecycle state).
 - `POST /v1/control/*`: heartbeat/autonomy/dead-letter control endpoints.
 - `POST /v1/cron/add`, `GET /v1/cron/list`, `DELETE /v1/cron/{job_id}`: scheduler API.
 
@@ -144,6 +145,7 @@ Core commands:
 - `clawlite start` (alias: `clawlite gateway`)
 - `clawlite run "<prompt>" --session-id <id>`
 - `clawlite status`
+- `clawlite status` (includes `bootstrap_pending` and `bootstrap_last_status`)
 - `clawlite onboard`
 - `clawlite validate provider|channels|onboarding [--fix]`
 - `clawlite provider login openai-codex [--access-token ...] [--account-id ...] [--set-model] [--no-interactive]`

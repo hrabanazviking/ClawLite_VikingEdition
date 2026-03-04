@@ -41,6 +41,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     config_path = str(args.config) if args.config else str(DEFAULT_CONFIG_PATH)
     channels_enabled = cfg.channels.enabled_names()
+    workspace = WorkspaceLoader(workspace_path=cfg.workspace_path)
+    bootstrap = workspace.bootstrap_status()
     cron = CronService(store_path=f"{cfg.state_path}/cron_jobs.json")
     jobs_count = len(cron.list_jobs())
     _print_json(
@@ -56,6 +58,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             "gateway_auth_mode": cfg.gateway.auth.mode,
             "gateway_auth_token_configured": bool(cfg.gateway.auth.token),
             "gateway_diagnostics_enabled": cfg.gateway.diagnostics.enabled,
+            "bootstrap_pending": bool(bootstrap.get("pending", False)),
+            "bootstrap_last_status": str(bootstrap.get("last_status", "") or ""),
         }
     )
     return 0

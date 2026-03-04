@@ -42,7 +42,15 @@ Notas:
 - `/api/token` retorna token mascarado (nunca o token bruto).
 - `WS /ws` espelha `WS /v1/ws`.
 - `/v1/status` e `/api/status` expõem `contract_version` e `server_time`.
+- `/v1/status` e `/api/status` incluem componente `bootstrap` com visibilidade de pendência/último estado.
 - `/v1/diagnostics` e `/api/diagnostics` expõem `generated_at`, `uptime_s` e `contract_version`.
+- `/v1/diagnostics` e `/api/diagnostics` incluem `bootstrap` com estado persistido (`pending`, `last_status`, `completed_at`, etc.).
+
+## Bootstrap one-shot lifecycle
+
+- `BOOTSTRAP.md` é processado como etapa one-shot: após o primeiro turno de usuário bem-sucedido (sessões não internas), o gateway remove o arquivo e grava `memory/bootstrap-state.json`.
+- Sessões internas (`heartbeat:*`, `autonomy:*`, `bootstrap:*`) não finalizam bootstrap automaticamente.
+- Visibilidade local: `clawlite status` (`bootstrap_pending`, `bootstrap_last_status`) e `clawlite diagnostics` (`local.bootstrap`).
 
 ## Retrieval observability + eval
 

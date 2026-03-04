@@ -83,6 +83,8 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     assert payload["gateway_auth_mode"] == "off"
     assert payload["gateway_auth_token_configured"] is False
     assert payload["gateway_diagnostics_enabled"] is True
+    assert "bootstrap_pending" in payload
+    assert "bootstrap_last_status" in payload
 
     rc_ver = main(["--version"])
     assert rc_ver == 0
@@ -216,6 +218,8 @@ def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> 
     assert diagnostics["local"]["session_retention_messages"] == 111
     assert diagnostics["local"]["agent_defaults"]["memory_window"] == 29
     assert diagnostics["local"]["agent_defaults"]["session_retention_messages"] == 111
+    assert "bootstrap" in diagnostics["local"]
+    assert "pending" in diagnostics["local"]["bootstrap"]
     assert "validation" not in diagnostics["local"]
 
 

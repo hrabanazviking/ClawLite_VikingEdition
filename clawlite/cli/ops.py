@@ -14,6 +14,7 @@ from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.workspace.loader import TEMPLATE_FILES
+from clawlite.workspace.loader import WorkspaceLoader
 
 
 def _mask_secret(value: str, *, keep: int = 4) -> str:
@@ -457,6 +458,7 @@ def diagnostics_snapshot(config: AppConfig, *, config_path: str, include_validat
     state_path = Path(config.state_path).expanduser()
     cron_store = state_path / "cron_jobs.json"
     heartbeat_state = Path(config.workspace_path).expanduser() / "memory" / "heartbeat-state.json"
+    workspace_loader = WorkspaceLoader(workspace_path=config.workspace_path)
     payload: dict[str, Any] = {
         "config_path": config_path,
         "workspace_path": config.workspace_path,
@@ -481,6 +483,7 @@ def diagnostics_snapshot(config: AppConfig, *, config_path: str, include_validat
             "cron_store_exists": cron_store.exists(),
             "heartbeat_state_exists": heartbeat_state.exists(),
         },
+        "bootstrap": workspace_loader.bootstrap_status(),
         "channels_enabled": config.channels.enabled_names(),
     }
     if include_validation:
