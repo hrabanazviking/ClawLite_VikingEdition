@@ -356,6 +356,9 @@ class TelegramChannel(BaseChannel):
             "typing_auth_breaker_close_count": 0,
             "typing_ttl_stop_count": 0,
             "reconnect_count": 0,
+            "callback_query_received_count": 0,
+            "callback_query_blocked_count": 0,
+            "callback_query_ack_error_count": 0,
         }
         self._send_auth_breaker_seen_open = False
         self._typing_auth_breaker_seen_open = False
@@ -533,7 +536,7 @@ class TelegramChannel(BaseChannel):
                 updates = await self.bot.get_updates(
                     offset=self._offset,
                     timeout=0,
-                    allowed_updates=["message", "edited_message"],
+                    allowed_updates=["message", "edited_message", "callback_query"],
                 )
                 if not updates:
                     break
@@ -592,7 +595,7 @@ class TelegramChannel(BaseChannel):
                 updates = await self.bot.get_updates(
                     offset=self._offset,
                     timeout=self.poll_timeout_s,
-                    allowed_updates=["message", "edited_message"],
+                    allowed_updates=["message", "edited_message", "callback_query"],
                 )
                 if not self._connected:
                     self._connected = True
@@ -620,6 +623,90 @@ class TelegramChannel(BaseChannel):
                 backoff = min(backoff * 2, self.reconnect_max_s)
 
     async def _handle_update(self, item: Any) -> bool:
+        callback_query = getattr(item, "callback_query", None)
+        if callback_query is not None:
+            self._signals["callback_query_received_count"] += 1
+            callback_query_id = str(getattr(callback_query, "id", "") or "")
+            callback_data_raw = getattr(callback_query, "data", "")
+            callback_data = str(callback_data_raw or "")
+            callback_text = callback_data.strip() or "[telegram callback_query]"
+            callback_message = getattr(callback_query, "message", None)
+            callback_message_chat = getattr(callback_message, "chat", None)
+            callback_chat_id = str(
+                getattr(callback_message, "chat_id", "")
+                or getattr(callback_message_chat, "id", "")
+                or ""
+            )
+            if not callback_chat_id:
+                logger.debug("telegram callback_query skipped reason=missing_chat_id")
+                return True
+
+            callback_from_user = getattr(callback_query, "from_user", None)
+            callback_user_id = str(getattr(callback_from_user, "id", "") or callback_chat_id)
+            callback_username = str(getattr(callback_from_user, "username", "") or "").strip()
+
+            if self.bot is not None and callback_query_id and hasattr(self.bot, "answer_callback_query"):
+                try:
+                    await self.bot.answer_callback_query(callback_query_id=callback_query_id)
+                except Exception as exc:
+                    self._signals["callback_query_ack_error_count"] += 1
+                    logger.debug(
+                        "telegram callback_query ack failed id={} chat={} error={}",
+                        callback_query_id,
+                        callback_chat_id,
+                        exc,
+                    )
+
+            if not self._is_allowed_sender(callback_user_id, callback_username):
+                self._signals["callback_query_blocked_count"] += 1
+                logger.debug(
+                    "telegram callback_query blocked user={} chat={} id={}",
+                    callback_user_id,
+                    callback_chat_id,
+                    callback_query_id,
+                )
+                return True
+
+            session_id = f"telegram:{callback_chat_id}"
+            metadata: dict[str, Any] = {
+                "channel": "telegram",
+                "chat_id": callback_chat_id,
+                "is_callback_query": True,
+                "callback_query_id": callback_query_id,
+                "callback_data": callback_data,
+                "callback_chat_instance": str(getattr(callback_query, "chat_instance", "") or ""),
+                "user_id": int(getattr(callback_from_user, "id", 0) or 0),
+                "username": callback_username,
+                "text": callback_text,
+                "update_id": int(getattr(item, "update_id", 0) or 0),
+            }
+            callback_message_id = getattr(callback_message, "message_id", None)
+            try:
+                callback_message_id_int = int(callback_message_id)
+            except (TypeError, ValueError):
+                callback_message_id_int = 0
+            if callback_message_id_int > 0:
+                metadata["message_id"] = callback_message_id_int
+
+            callback_thread_id = self._coerce_thread_id(getattr(callback_message, "message_thread_id", None))
+            if callback_thread_id is not None:
+                metadata["message_thread_id"] = callback_thread_id
+
+            logger.info(
+                "telegram callback_query received chat={} user={} chars={} id={}",
+                callback_chat_id,
+                callback_user_id,
+                len(callback_text),
+                callback_query_id,
+            )
+            await self.emit(
+                session_id=session_id,
+                user_id=callback_user_id,
+                text=callback_text,
+                metadata=metadata,
+            )
+            return True
+
         message = getattr(item, "message", None)
         is_edit = False
         if message is None:
@@ -847,6 +934,8 @@ class TelegramChannel(BaseChannel):
             if message_id > 0:
                 message_ids.append(message_id)
 
+        reply_markup = self._build_inline_keyboard_reply_markup(metadata_payload)
+
         for idx, chunk in enumerate(chunks, start=1):
             html_payload = markdown_to_telegram_html(chunk)
             payload_text = html_payload
@@ -864,6 +953,8 @@ class TelegramChannel(BaseChannel):
                         "parse_mode": payload_parse_mode,
                         "reply_to_message_id": reply_to_message_id,
                     }
+                    if reply_markup is not None:
+                        payload["reply_markup"] = reply_markup
                     if message_thread_id is not None:
                         payload["message_thread_id"] = message_thread_id
                     send_result = await asyncio.wait_for(
@@ -882,6 +973,7 @@ class TelegramChannel(BaseChannel):
                             text=payload_text,
                             parse_mode=payload_parse_mode,
                             reply_to_message_id=reply_to_message_id,
+                            reply_markup=reply_markup,
                         ),
                         timeout=max(1.0, float(self.send_timeout_s)),
                     )
@@ -932,3 +1024,57 @@ class TelegramChannel(BaseChannel):
             caller_metadata["_delivery_receipt"] = receipt
         logger.info("telegram outbound sent chat={} chunks={} chars={}", chat_id, len(chunks), len(text))
         return f"telegram:sent:{len(chunks)}"
+
+    def _build_inline_keyboard_reply_markup(self, metadata: dict[str, Any]) -> Any | None:
+        keyboard_source = metadata.get("_telegram_inline_keyboard")
+        if keyboard_source is None:
+            keyboard_source = metadata.get("telegram_inline_keyboard")
+        if keyboard_source is None:
+            return None
+        if not isinstance(keyboard_source, list):
+            logger.debug("telegram outbound inline keyboard ignored reason=invalid_root_type")
+            return None
+
+        inline_keyboard_rows: list[list[dict[str, str]]] = []
+        for row in keyboard_source:
+            if not isinstance(row, list):
+                logger.debug("telegram outbound inline keyboard ignored reason=invalid_row_type")
+                return None
+            inline_row: list[dict[str, str]] = []
+            for button in row:
+                if not isinstance(button, dict):
+                    logger.debug("telegram outbound inline keyboard ignored reason=invalid_button_type")
+                    return None
+                text = str(button.get("text", "") or "").strip()
+                callback_data = button.get("callback_data")
+                url = button.get("url")
+                if not text:
+                    logger.debug("telegram outbound inline keyboard ignored reason=missing_button_text")
+                    return None
+                if bool(callback_data) == bool(url):
+                    logger.debug("telegram outbound inline keyboard ignored reason=invalid_button_action")
+                    return None
+                inline_button: dict[str, str] = {"text": text}
+                if callback_data:
+                    inline_button["callback_data"] = str(callback_data)
+                if url:
+                    inline_button["url"] = str(url)
+                inline_row.append(inline_button)
+            if inline_row:
+                inline_keyboard_rows.append(inline_row)
+
+        if not inline_keyboard_rows:
+            logger.debug("telegram outbound inline keyboard ignored reason=empty_keyboard")
+            return None
+
+        try:
+            from telegram import InlineKeyboardButton
+            from telegram import InlineKeyboardMarkup
+
+            telegram_rows = [
+                [InlineKeyboardButton(**button) for button in row]
+                for row in inline_keyboard_rows
+            ]
+            return InlineKeyboardMarkup(telegram_rows)
+        except Exception:
+            return {"inline_keyboard": inline_keyboard_rows}

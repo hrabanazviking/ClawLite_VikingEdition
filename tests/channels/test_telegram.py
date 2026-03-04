@@ -288,6 +288,127 @@ def test_telegram_media_only_message_is_forwarded_with_placeholder() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_callback_query_is_forwarded_and_acknowledged() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(config={"token": "x:token"}, on_message=_on_message)
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.acks: list[dict] = []
+
+            async def answer_callback_query(self, **kwargs):
+                self.acks.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        user = SimpleNamespace(id=7, username="alice")
+        callback_message = SimpleNamespace(
+            message_id=55,
+            message_thread_id=4,
+            chat=SimpleNamespace(id=42),
+            chat_id=42,
+        )
+        callback_query = SimpleNamespace(
+            id="cq-1",
+            data="action:ok",
+            chat_instance="inst-1",
+            from_user=user,
+            message=callback_message,
+        )
+        update = SimpleNamespace(
+            update_id=100,
+            callback_query=callback_query,
+            message=None,
+            edited_message=None,
+            effective_message=None,
+        )
+
+        await channel._handle_update(update)
+
+        assert len(bot.acks) == 1
+        assert bot.acks[0]["callback_query_id"] == "cq-1"
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:42"
+        assert user_id == "7"
+        assert text == "action:ok"
+        assert metadata["channel"] == "telegram"
+        assert metadata["chat_id"] == "42"
+        assert metadata["is_callback_query"] is True
+        assert metadata["callback_query_id"] == "cq-1"
+        assert metadata["callback_data"] == "action:ok"
+        assert metadata["callback_chat_instance"] == "inst-1"
+        assert metadata["message_id"] == 55
+        assert metadata["message_thread_id"] == 4
+        assert metadata["user_id"] == 7
+        assert metadata["username"] == "alice"
+        signals = channel.signals()
+        assert signals["callback_query_received_count"] == 1
+        assert signals["callback_query_ack_error_count"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_callback_query_blocked_by_allowlist_does_not_emit() -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(
+            config={"token": "x:token", "allowFrom": ["123"]},
+            on_message=_on_message,
+        )
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.acks: list[dict] = []
+
+            async def answer_callback_query(self, **kwargs):
+                self.acks.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        callback_query = SimpleNamespace(
+            id="cq-2",
+            data="action:block",
+            chat_instance="inst-2",
+            from_user=SimpleNamespace(id=999, username="guest"),
+            message=SimpleNamespace(
+                message_id=56,
+                chat=SimpleNamespace(id=42),
+                chat_id=42,
+            ),
+        )
+        update = SimpleNamespace(
+            update_id=101,
+            callback_query=callback_query,
+            message=None,
+            edited_message=None,
+            effective_message=None,
+        )
+
+        await channel._handle_update(update)
+
+        assert emitted == []
+        assert len(bot.acks) == 1
+        signals = channel.signals()
+        assert signals["callback_query_received_count"] == 1
+        assert signals["callback_query_blocked_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_markdown_falls_back_to_plain_text() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(config={"token": "x:token"})
@@ -314,6 +435,51 @@ def test_telegram_send_markdown_falls_back_to_plain_text() -> None:
         assert bot.calls[0]["parse_mode"] == "HTML"
         assert bot.calls[1]["text"] == "**hello**"
         assert bot.calls[1]["parse_mode"] is None
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_supports_inline_keyboard_from_metadata() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+        metadata = {
+            "telegram_inline_keyboard": [
+                [
+                    {"text": "Approve", "callback_data": "approve:1"},
+                    {"text": "Open", "url": "https://example.com"},
+                ]
+            ]
+        }
+
+        out = await channel.send(target="42", text="choose", metadata=metadata)
+
+        assert out == "telegram:sent:1"
+        assert len(bot.calls) == 1
+        assert "reply_markup" in bot.calls[0]
+        reply_markup = bot.calls[0]["reply_markup"]
+        if isinstance(reply_markup, dict):
+            assert reply_markup["inline_keyboard"][0][0]["text"] == "Approve"
+            assert reply_markup["inline_keyboard"][0][0]["callback_data"] == "approve:1"
+            assert reply_markup["inline_keyboard"][0][1]["text"] == "Open"
+            assert reply_markup["inline_keyboard"][0][1]["url"] == "https://example.com"
+        else:
+            button_a = reply_markup.inline_keyboard[0][0]
+            button_b = reply_markup.inline_keyboard[0][1]
+            assert button_a.text == "Approve"
+            assert button_a.callback_data == "approve:1"
+            assert button_b.text == "Open"
+            assert button_b.url == "https://example.com"
 
     asyncio.run(_scenario())
 
