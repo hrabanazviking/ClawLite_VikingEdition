@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 import json
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1345,10 +1346,98 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 payload["request_id"] = request_id
             return payload
 
+        def _ws_req_error(
+            *,
+            request_id: str | int | None,
+            code: str,
+            message: str,
+            status_code: int,
+        ) -> dict[str, Any]:
+            return {
+                "type": "res",
+                "id": request_id,
+                "ok": False,
+                "error": {
+                    "code": str(code or "invalid_request"),
+                    "message": str(message or "invalid_request"),
+                    "status_code": int(status_code),
+                },
+            }
+
+        def _coerce_req_id(value: Any) -> str | int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (str, int)):
+                return value
+            return None
+
+        def _coerce_req_payload(payload: dict[str, Any]) -> tuple[str | int | None, str, dict[str, Any] | None]:
+            request_id = _coerce_req_id(payload.get("id"))
+            method = str(payload.get("method", "") or "").strip()
+            params = payload.get("params")
+            if params is None:
+                params = {}
+            if not isinstance(params, dict):
+                return request_id, method, None
+            return request_id, method, params
+
+        async def _ws_req_chat_send(
+            *,
+            request_id: str | int | None,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
+            text = str(params.get("text") or "").strip()
+            if not session_id or not text:
+                return _ws_req_error(
+                    request_id=request_id,
+                    code="invalid_request",
+                    message="session_id/sessionId and text are required",
+                    status_code=400,
+                )
+            try:
+                out = await runtime.engine.run(session_id=session_id, user_text=text)
+            except RuntimeError as exc:
+                status_code, detail = _provider_error_payload(exc)
+                bind_event("gateway.ws", session=session_id, channel="ws").error(
+                    "websocket request failed status={} detail={}",
+                    status_code,
+                    detail,
+                )
+                return _ws_req_error(
+                    request_id=request_id,
+                    code=detail,
+                    message=detail,
+                    status_code=status_code,
+                )
+
+            _finalize_bootstrap_for_user_turn(session_id)
+            return {
+                "type": "res",
+                "id": request_id,
+                "ok": True,
+                "result": {
+                    "session_id": session_id,
+                    "text": out.text,
+                    "model": out.model,
+                },
+            }
+
         if not await auth_guard.check_ws(socket=socket, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth):
             return
         await socket.accept()
+        await socket.send_json(
+            {
+                "type": "event",
+                "event": "connect.challenge",
+                "params": {
+                    "nonce": uuid.uuid4().hex,
+                    "issued_at": _utc_now_iso(),
+                },
+            }
+        )
         bind_event("gateway.ws", channel="ws").info("websocket client connected path={}", path_label)
+        req_connected = False
         try:
             while True:
                 payload = await socket.receive_json()
@@ -1358,6 +1447,100 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
                 message_type = str(payload.get("type", "") or "").strip().lower()
                 if message_type:
+                    if message_type == "req":
+                        request_id, method, params = _coerce_req_payload(payload)
+                        if request_id is None or not method or params is None:
+                            await socket.send_json(
+                                _ws_req_error(
+                                    request_id=request_id,
+                                    code="invalid_request",
+                                    message="req frames require string|number id, string method, and object params",
+                                    status_code=400,
+                                )
+                            )
+                            continue
+
+                        normalized_method = method.lower()
+                        if normalized_method == "connect":
+                            req_connected = True
+                            await socket.send_json(
+                                {
+                                    "type": "res",
+                                    "id": request_id,
+                                    "ok": True,
+                                    "result": {
+                                        "connected": req_connected,
+                                        "contract_version": GATEWAY_CONTRACT_VERSION,
+                                        "server_time": _utc_now_iso(),
+                                    },
+                                }
+                            )
+                            continue
+                        if not req_connected:
+                            await socket.send_json(
+                                _ws_req_error(
+                                    request_id=request_id,
+                                    code="not_connected",
+                                    message="connect handshake required",
+                                    status_code=409,
+                                )
+                            )
+                            continue
+                        if normalized_method == "ping":
+                            await socket.send_json(
+                                {
+                                    "type": "res",
+                                    "id": request_id,
+                                    "ok": True,
+                                    "result": {
+                                        "server_time": _utc_now_iso(),
+                                    },
+                                }
+                            )
+                            continue
+                        if normalized_method == "health":
+                            await socket.send_json(
+                                {
+                                    "type": "res",
+                                    "id": request_id,
+                                    "ok": True,
+                                    "result": {
+                                        "ok": True,
+                                        "ready": lifecycle.ready,
+                                        "phase": lifecycle.phase,
+                                        "channels": runtime.channels.status(),
+                                        "queue": runtime.bus.stats(),
+                                    },
+                                }
+                            )
+                            continue
+                        if normalized_method == "status":
+                            status_payload = _control_plane_payload().dict()
+                            await socket.send_json(
+                                {
+                                    "type": "res",
+                                    "id": request_id,
+                                    "ok": True,
+                                    "result": status_payload,
+                                }
+                            )
+                            continue
+                        if normalized_method in {"chat.send", "message.send"}:
+                            await socket.send_json(
+                                await _ws_req_chat_send(request_id=request_id, params=params)
+                            )
+                            continue
+
+                        await socket.send_json(
+                            _ws_req_error(
+                                request_id=request_id,
+                                code="unsupported_method",
+                                message=f"unsupported req method: {method}",
+                                status_code=400,
+                            )
+                        )
+                        continue
+
                     request_id = str(payload.get("request_id", "") or "").strip() or None
                     if message_type == "hello":
                         await socket.send_json(

@@ -71,6 +71,15 @@ class ProviderWithUnsafeDiagnostics:
         }
 
 
+def _assert_connect_challenge(socket) -> dict[str, object]:
+    payload = socket.receive_json()
+    assert payload["type"] == "event"
+    assert payload["event"] == "connect.challenge"
+    assert isinstance(payload["params"]["nonce"], str) and payload["params"]["nonce"]
+    assert isinstance(payload["params"]["issued_at"], str) and payload["params"]["issued_at"]
+    return payload
+
+
 def test_gateway_chat_endpoint(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -908,6 +917,7 @@ def test_gateway_ws_alias_behaves_like_v1_ws(tmp_path: Path) -> None:
         assert bootstrap_file.exists()
 
         with client.websocket_connect("/v1/ws") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json({"session_id": "cli:ws", "text": "ping"})
             payload = socket.receive_json()
             assert payload["text"] == "pong"
@@ -915,6 +925,7 @@ def test_gateway_ws_alias_behaves_like_v1_ws(tmp_path: Path) -> None:
         assert not bootstrap_file.exists()
 
         with client.websocket_connect("/ws") as socket_alias:
+            _assert_connect_challenge(socket_alias)
             socket_alias.send_json({"session_id": "cli:ws", "text": "ping"})
             payload_alias = socket_alias.receive_json()
             assert payload_alias["text"] == "pong"
@@ -944,6 +955,7 @@ def test_gateway_ws_alias_respects_auth_guard(tmp_path: Path) -> None:
                 pass
 
         with client.websocket_connect("/ws?token=secret-token") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json({"session_id": "cli:ws", "text": "ping"})
             payload = socket.receive_json()
             assert payload["text"] == "pong"
@@ -961,6 +973,7 @@ def test_gateway_ws_envelope_hello_and_ping_contract(tmp_path: Path) -> None:
 
     with TestClient(app) as client:
         with client.websocket_connect("/v1/ws") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json({"type": "hello"})
             ready_payload = socket.receive_json()
             assert ready_payload["type"] == "ready"
@@ -985,6 +998,7 @@ def test_gateway_ws_envelope_message_result_and_request_id(tmp_path: Path) -> No
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json(
                 {
                     "type": "message",
@@ -1015,6 +1029,7 @@ def test_gateway_ws_envelope_error_path_returns_structured_error(tmp_path: Path)
 
     with TestClient(app) as client:
         with client.websocket_connect("/v1/ws") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json({"type": "message", "session_id": "cli:ws-envelope", "request_id": "req-err"})
             payload = socket.receive_json()
             assert payload == {
@@ -1037,9 +1052,101 @@ def test_gateway_ws_legacy_payload_without_type_keeps_legacy_contract(tmp_path: 
 
     with TestClient(app) as client:
         with client.websocket_connect("/v1/ws") as socket:
+            _assert_connect_challenge(socket)
             socket.send_json({"session_id": "cli:ws-legacy", "text": "ping"})
             payload = socket.receive_json()
             assert payload == {"text": "pong", "model": "fake/test"}
+
+
+def test_gateway_ws_req_res_openclaw_compatibility_methods(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as socket:
+            _assert_connect_challenge(socket)
+
+            socket.send_json({"type": "req", "id": "pre1", "method": "ping", "params": {}})
+            preconnect_ping = socket.receive_json()
+            assert preconnect_ping == {
+                "type": "res",
+                "id": "pre1",
+                "ok": False,
+                "error": {
+                    "code": "not_connected",
+                    "message": "connect handshake required",
+                    "status_code": 409,
+                },
+            }
+
+            socket.send_json({"type": "req", "id": "c1", "method": "connect", "params": {}})
+            connect_payload = socket.receive_json()
+            assert connect_payload["type"] == "res"
+            assert connect_payload["id"] == "c1"
+            assert connect_payload["ok"] is True
+            assert connect_payload["result"]["contract_version"] == "2026-03-04"
+            assert connect_payload["result"]["connected"] is True
+            assert isinstance(connect_payload["result"]["server_time"], str)
+
+            socket.send_json({"type": "req", "id": 2, "method": "ping", "params": {}})
+            ping_payload = socket.receive_json()
+            assert ping_payload == {
+                "type": "res",
+                "id": 2,
+                "ok": True,
+                "result": {
+                    "server_time": ping_payload["result"]["server_time"],
+                },
+            }
+            assert isinstance(ping_payload["result"]["server_time"], str) and ping_payload["result"]["server_time"]
+
+            socket.send_json({"type": "req", "id": "s1", "method": "status", "params": {}})
+            status_payload = socket.receive_json()
+            assert status_payload["type"] == "res"
+            assert status_payload["id"] == "s1"
+            assert status_payload["ok"] is True
+            assert status_payload["result"]["contract_version"] == "2026-03-04"
+            assert "components" in status_payload["result"]
+            assert "auth" in status_payload["result"]
+
+            socket.send_json(
+                {
+                    "type": "req",
+                    "id": "m1",
+                    "method": "chat.send",
+                    "params": {"sessionId": "cli:req-path", "text": "ping"},
+                }
+            )
+            message_payload = socket.receive_json()
+            assert message_payload == {
+                "type": "res",
+                "id": "m1",
+                "ok": True,
+                "result": {
+                    "session_id": "cli:req-path",
+                    "text": "pong",
+                    "model": "fake/test",
+                },
+            }
+
+            socket.send_json({"type": "req", "id": "u1", "method": "nope.method", "params": {}})
+            unsupported = socket.receive_json()
+            assert unsupported == {
+                "type": "res",
+                "id": "u1",
+                "ok": False,
+                "error": {
+                    "code": "unsupported_method",
+                    "message": "unsupported req method: nope.method",
+                    "status_code": 400,
+                },
+            }
 
 
 def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
