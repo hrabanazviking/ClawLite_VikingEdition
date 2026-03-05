@@ -1161,6 +1161,31 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "retrieval_metrics": runtime.engine.retrieval_metrics_snapshot(),
             "turn_metrics": runtime.engine.turn_metrics_snapshot(),
         }
+        memory_payload: dict[str, Any]
+        memory_store = getattr(runtime.engine, "memory", None)
+        memory_diagnostics = getattr(memory_store, "diagnostics", None)
+        if callable(memory_diagnostics):
+            try:
+                raw_memory_payload = memory_diagnostics()
+            except Exception as exc:
+                memory_payload = {
+                    "available": True,
+                    "error": str(exc),
+                }
+            else:
+                if isinstance(raw_memory_payload, dict):
+                    memory_payload = dict(raw_memory_payload)
+                else:
+                    memory_payload = {
+                        "available": True,
+                        "error": "invalid_memory_diagnostics_payload",
+                    }
+                memory_payload.setdefault("available", True)
+        else:
+            memory_payload = {
+                "available": False,
+            }
+        engine_payload["memory"] = memory_payload
         if cfg.gateway.diagnostics.include_provider_telemetry:
             engine_payload["provider"] = _provider_telemetry_snapshot(runtime.engine.provider)
         monitor_payload: dict[str, Any]

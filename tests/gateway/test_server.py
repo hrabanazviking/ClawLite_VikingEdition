@@ -1109,7 +1109,14 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "http" in payload
         assert "retrieval_metrics" in payload["engine"]
         assert "turn_metrics" in payload["engine"]
+        assert "memory" in payload["engine"]
         assert "provider" in payload["engine"]
+        memory_diag = payload["engine"]["memory"]
+        assert memory_diag["available"] is True
+        assert memory_diag["backend_name"] == "sqlite"
+        assert memory_diag["backend_supported"] is True
+        assert memory_diag["backend_initialized"] is True
+        assert memory_diag["backend_init_error"] == ""
         retrieval = payload["engine"]["retrieval_metrics"]
         assert set(retrieval.keys()) == {
             "route_counts",

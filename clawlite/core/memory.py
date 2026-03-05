@@ -367,10 +367,6 @@ class MemoryStore:
         self._ensure_json_file(self.branches_meta_path, self._default_branches_metadata())
         self._ensure_file(self.branch_head_path, default="main\n")
         self._sync_branch_head_file()
-        try:
-            self.backend.initialize(self.memory_home)
-        except Exception:
-            pass
         self._diagnostics: dict[str, int | str] = {
             "history_read_corrupt_lines": 0,
             "history_repaired_files": 0,
@@ -390,6 +386,27 @@ class MemoryStore:
             "privacy_key_create_events": 0,
             "privacy_key_errors": 0,
             "last_error": "",
+        }
+        backend_name = str(getattr(self.backend, "name", self.memory_backend_name) or self.memory_backend_name)
+        backend_supported = False
+        backend_initialized = False
+        backend_init_error = ""
+        try:
+            backend_supported = bool(self.backend.is_supported())
+        except Exception as exc:
+            backend_init_error = str(exc)
+            self._diagnostics["last_error"] = str(exc)
+        try:
+            self.backend.initialize(self.memory_home)
+            backend_initialized = True
+        except Exception as exc:
+            backend_init_error = str(exc)
+            self._diagnostics["last_error"] = str(exc)
+        self._backend_diagnostics: dict[str, bool | str] = {
+            "backend_name": backend_name,
+            "backend_supported": backend_supported,
+            "backend_initialized": backend_initialized,
+            "backend_init_error": backend_init_error,
         }
         self._privacy_key: bytes | None = None
 
@@ -3186,7 +3203,7 @@ class MemoryStore:
 
         return picked
 
-    def diagnostics(self) -> dict[str, int | str]:
+    def diagnostics(self) -> dict[str, int | str | bool]:
         return {
             "history_read_corrupt_lines": int(self._diagnostics["history_read_corrupt_lines"]),
             "history_repaired_files": int(self._diagnostics["history_repaired_files"]),
@@ -3206,6 +3223,10 @@ class MemoryStore:
             "privacy_key_create_events": int(self._diagnostics["privacy_key_create_events"]),
             "privacy_key_errors": int(self._diagnostics["privacy_key_errors"]),
             "last_error": str(self._diagnostics["last_error"]),
+            "backend_name": str(self._backend_diagnostics["backend_name"]),
+            "backend_supported": bool(self._backend_diagnostics["backend_supported"]),
+            "backend_initialized": bool(self._backend_diagnostics["backend_initialized"]),
+            "backend_init_error": str(self._backend_diagnostics["backend_init_error"]),
         }
 
     @staticmethod

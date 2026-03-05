@@ -520,6 +520,37 @@ def test_memory_consolidate_diagnostics_track_writes_and_dedup_hits(tmp_path: Pa
     assert diag["consolidate_dedup_hits"] == 1
 
 
+def test_memory_diagnostics_expose_backend_health_defaults(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+
+    diag = store.diagnostics()
+    assert diag["backend_name"] == "sqlite"
+    assert diag["backend_supported"] is True
+    assert diag["backend_initialized"] is True
+    assert diag["backend_init_error"] == ""
+
+
+def test_memory_diagnostics_preserve_backend_init_failure_details(tmp_path: Path, monkeypatch) -> None:
+    class _FailingBackend:
+        name = "failing"
+
+        def is_supported(self) -> bool:
+            return True
+
+        def initialize(self, memory_home):
+            del memory_home
+            raise RuntimeError("backend init exploded")
+
+    monkeypatch.setattr("clawlite.core.memory.resolve_memory_backend", lambda **kwargs: _FailingBackend())
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    diag = store.diagnostics()
+    assert diag["backend_name"] == "failing"
+    assert diag["backend_supported"] is True
+    assert diag["backend_initialized"] is False
+    assert diag["backend_init_error"] == "backend init exploded"
+    assert diag["last_error"] == "backend init exploded"
+
 def test_memory_recover_session_context_uses_history_then_curated_fallback(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     store.add("session direct context", source="abc")
