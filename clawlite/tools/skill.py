@@ -162,14 +162,25 @@ class SkillTool(Tool):
 
         return {}
 
-    async def _dispatch_script(self, script_name: str, arguments: dict[str, Any], ctx: ToolContext) -> str:
+    async def _dispatch_script(self, script_name: str, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
         if script_name == "weather":
             return await self._run_weather(arguments)
 
         target_tool = self.registry.get(script_name)
         if target_tool is not None and script_name != self.name:
             tool_arguments = self._script_tool_arguments(script_name, arguments)
-            return await self.registry.execute(script_name, tool_arguments, session_id=ctx.session_id)
+            try:
+                return await self.registry.execute(
+                    script_name,
+                    tool_arguments,
+                    session_id=ctx.session_id,
+                    channel=ctx.channel,
+                    user_id=ctx.user_id,
+                )
+            except RuntimeError as exc:
+                if str(exc).startswith(f"tool_blocked_by_safety_policy:{script_name}:"):
+                    return f"skill_blocked:{spec_name}:{exc}"
+                raise
 
         return f"skill_script_unavailable:{script_name}"
 
@@ -202,7 +213,7 @@ class SkillTool(Tool):
 
         if spec.execution_kind == "script":
             log.info("running skill script skill={} script={}", spec.name, spec.execution_target)
-            return await self._dispatch_script(spec.execution_target, arguments, ctx)
+            return await self._dispatch_script(spec.execution_target, arguments, ctx, spec_name=spec.name)
 
         if spec.execution_kind == "invalid":
             details = ", ".join(spec.contract_issues)

@@ -17,6 +17,7 @@ from clawlite.cli.ops import memory_export_snapshot
 from clawlite.cli.ops import memory_import_snapshot
 from clawlite.cli.ops import memory_merge_branches
 from clawlite.cli.ops import memory_overview_snapshot
+from clawlite.cli.ops import memory_quality_snapshot
 from clawlite.cli.ops import memory_privacy_snapshot
 from clawlite.cli.ops import memory_profile_snapshot
 from clawlite.cli.ops import memory_shared_opt_in
@@ -495,6 +496,19 @@ def cmd_memory_eval(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok", False) else 2
 
 
+def cmd_memory_quality(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = memory_quality_snapshot(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+        limit=int(args.limit),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
 def cmd_memory_profile(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     payload = memory_profile_snapshot(cfg)
@@ -873,6 +887,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_memory_eval = memory_sub.add_parser("eval", help="Run deterministic synthetic memory retrieval evaluation")
     p_memory_eval.add_argument("--limit", type=int, default=5, help="Top-k retrieval limit per synthetic query")
     p_memory_eval.set_defaults(handler=cmd_memory_eval)
+
+    p_memory_quality = memory_sub.add_parser("quality", help="Compute and persist memory quality-state report")
+    p_memory_quality.add_argument("--limit", type=int, default=5, help="Top-k retrieval limit per synthetic query")
+    p_memory_quality.add_argument("--gateway-url", default="", help="Optional gateway base URL for diagnostics probe")
+    p_memory_quality.add_argument("--token", default="", help="Optional bearer token for gateway diagnostics probe")
+    p_memory_quality.add_argument("--timeout", type=float, default=3.0, help="Gateway probe timeout in seconds")
+    p_memory_quality.set_defaults(handler=cmd_memory_quality)
 
     p_memory_profile = memory_sub.add_parser("profile", help="Show memory profile snapshot")
     p_memory_profile.set_defaults(handler=cmd_memory_profile)

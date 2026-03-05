@@ -70,12 +70,69 @@ def test_tool_registry_blocks_risky_tools_for_blocked_channels() -> None:
     asyncio.run(_scenario())
 
 
+def test_tool_registry_blocks_risky_tools_with_derived_channel_from_session() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["exec"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(ExecLikeTool())
+        try:
+            await reg.execute("exec", {"command": "id"}, session_id="telegram:1", user_id="1")
+            raise AssertionError("expected safety policy block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_blocked_by_safety_policy:exec:telegram"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_risky_tools_for_unknown_channel_when_restricted() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["exec"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(ExecLikeTool())
+        try:
+            await reg.execute("exec", {"command": "id"}, session_id="", channel="", user_id="1")
+            raise AssertionError("expected safety policy block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_blocked_by_safety_policy:exec:unknown"
+
+    asyncio.run(_scenario())
+
+
 def test_tool_registry_allows_risky_tools_for_cli_channel() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry()
         reg.register(ExecLikeTool())
         out = await reg.execute("exec", {"command": "id"}, session_id="cli:1", channel="cli", user_id="1")
         assert out == "channel=cli;user=1"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_allows_non_risky_tools_for_empty_channel_and_session() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["exec"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(EchoTool())
+        out = await reg.execute("echo", {"text": "ok"}, session_id="", channel="", user_id="")
+        assert out == "ok"
 
     asyncio.run(_scenario())
 

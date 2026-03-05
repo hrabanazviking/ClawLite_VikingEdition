@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -160,3 +161,66 @@ def test_memory_monitor_dedupe_and_cooldown_controls(tmp_path: Path) -> None:
         assert metrics["sent"] >= 1
 
     asyncio.run(_scenario())
+
+
+def test_memory_monitor_writes_pending_atomically(tmp_path: Path, monkeypatch) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    monitor = MemoryMonitor(store)
+
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = __import__("os").replace
+
+    def _spy_replace(src: str | Path, dst: str | Path) -> None:
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("clawlite.core.memory_monitor.os.replace", _spy_replace)
+
+    monitor._write_pending_payload(
+        [
+            {
+                "id": "a1",
+                "semantic_key": "k1",
+                "text": "pending",
+                "priority": 0.8,
+                "trigger": "pattern",
+                "channel": "cli",
+                "target": "default",
+                "status": "pending",
+            }
+        ]
+    )
+
+    assert replace_calls
+    payload = json.loads(monitor.suggestions_path.read_text(encoding="utf-8"))
+    assert payload[0]["id"] == "a1"
+
+
+def test_memory_monitor_mark_delivered_read_modify_write_is_lock_safe(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    monitor = MemoryMonitor(store)
+    monitor._write_pending_payload(
+        [
+            {
+                "id": "race-1",
+                "semantic_key": "race-semantic",
+                "text": "pending race",
+                "priority": 0.8,
+                "trigger": "pattern",
+                "channel": "cli",
+                "target": "default",
+                "status": "pending",
+            }
+        ]
+    )
+
+    def _mark() -> bool:
+        return monitor.mark_delivered("race-1")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: _mark(), range(16)))
+
+    assert any(results)
+    payload = json.loads(monitor.suggestions_path.read_text(encoding="utf-8"))
+    assert len(payload) == 1
+    assert payload[0]["status"] == "delivered"

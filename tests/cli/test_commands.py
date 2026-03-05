@@ -834,6 +834,33 @@ def test_cli_memory_eval_does_not_import_gateway_runtime(tmp_path: Path, capsys)
     capsys.readouterr()
 
 
+def test_cli_memory_quality_generates_and_persists_report(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "memory", "quality"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    report = payload["report"]
+    assert 0 <= int(report["score"]) <= 100
+    assert set(report["retrieval"].keys()) == {"attempts", "hits", "rewrites", "hit_rate"}
+    assert set(report["turn_stability"].keys()) == {"successes", "errors", "success_rate", "error_rate"}
+    assert "drift" in report
+    assert isinstance(report["recommendations"], list)
+    assert payload["state"]["current"]["score"] == report["score"]
+    assert Path(payload["quality_state_path"]).exists()
+
+
 def test_cli_memory_profile_returns_schema_fields(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -1147,6 +1174,12 @@ def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, c
     sys.modules.pop("clawlite.gateway.server", None)
     rc_suggest = main(["--config", str(config_path), "memory", "suggest", "--no-refresh"])
     assert rc_suggest == 0
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_quality = main(["--config", str(config_path), "memory", "quality"])
+    assert rc_quality == 0
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()
 

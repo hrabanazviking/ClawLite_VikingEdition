@@ -523,6 +523,7 @@ class TelegramChannelConfig(BaseChannelConfig):
     webhook_secret: str = ""
     webhook_path: str = "/api/webhooks/telegram"
     webhook_url: str = ""
+    webhook_fail_fast_on_error: bool = False
     update_dedupe_limit: int = 4096
     dedupe_state_path: str = ""
     poll_interval_s: float = 1.0
@@ -574,6 +575,9 @@ class TelegramChannelConfig(BaseChannelConfig):
             webhook_secret=str(data.get("webhook_secret", data.get("webhookSecret", "")) or ""),
             webhook_path=str(data.get("webhook_path", data.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram"),
             webhook_url=str(data.get("webhook_url", data.get("webhookUrl", "")) or ""),
+            webhook_fail_fast_on_error=bool(
+                data.get("webhook_fail_fast_on_error", data.get("webhookFailFastOnError", False))
+            ),
             update_dedupe_limit=max(
                 32,
                 int(

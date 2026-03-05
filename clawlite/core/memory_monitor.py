@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import os
 import re
+import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -76,9 +79,47 @@ class MemoryMonitor:
             "sent": 0,
             "failed": 0,
         }
+        self._pending_lock = threading.Lock()
         self.suggestions_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.suggestions_path.exists():
-            self.suggestions_path.write_text("[]\n", encoding="utf-8")
+            self._atomic_write_pending_text("[]\n")
+
+    @staticmethod
+    def _flush_and_fsync(handle: Any) -> None:
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except Exception:
+            pass
+
+    def _atomic_write_pending_text(self, content: str) -> None:
+        self.suggestions_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.suggestions_path.parent / f".{self.suggestions_path.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with temp_path.open("w", encoding="utf-8") as fh:
+                fh.write(content)
+                self._flush_and_fsync(fh)
+            os.replace(temp_path, self.suggestions_path)
+            try:
+                dir_fd = os.open(str(self.suggestions_path.parent), os.O_RDONLY)
+            except Exception:
+                dir_fd = -1
+            if dir_fd >= 0:
+                try:
+                    os.fsync(dir_fd)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.close(dir_fd)
+                    except Exception:
+                        pass
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
 
     @staticmethod
     def _coerce_priority(value: Any) -> float:
@@ -128,7 +169,7 @@ class MemoryMonitor:
         return []
 
     def _write_pending_payload(self, rows: list[dict[str, Any]]) -> None:
-        self.suggestions_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._atomic_write_pending_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
 
     def pending(self) -> list[MemorySuggestion]:
         suggestions: list[MemorySuggestion] = []
@@ -162,19 +203,20 @@ class MemoryMonitor:
             sid = str(suggestion_id or "")
             semantic_key = ""
         changed = False
-        rows = self._read_pending_payload()
-        for row in rows:
-            current_id = str(row.get("id", "") or "")
-            current_key = str(row.get("semantic_key", "") or "")
-            if current_id != sid and (not semantic_key or current_key != semantic_key):
-                continue
-            if row.get("status", "pending") != "delivered":
-                row["status"] = "delivered"
-                row["delivered_at"] = datetime.now(timezone.utc).isoformat()
-                changed = True
-        if changed:
-            self._write_pending_payload(rows)
-            self._telemetry["sent"] += 1
+        with self._pending_lock:
+            rows = self._read_pending_payload()
+            for row in rows:
+                current_id = str(row.get("id", "") or "")
+                current_key = str(row.get("semantic_key", "") or "")
+                if current_id != sid and (not semantic_key or current_key != semantic_key):
+                    continue
+                if row.get("status", "pending") != "delivered":
+                    row["status"] = "delivered"
+                    row["delivered_at"] = datetime.now(timezone.utc).isoformat()
+                    changed = True
+            if changed:
+                self._write_pending_payload(rows)
+                self._telemetry["sent"] += 1
         return changed
 
     def mark_failed(self, suggestion_id: str | MemorySuggestion, *, error: str = "") -> bool:
@@ -185,21 +227,22 @@ class MemoryMonitor:
             sid = str(suggestion_id or "")
             semantic_key = ""
         changed = False
-        rows = self._read_pending_payload()
-        now_iso = datetime.now(timezone.utc).isoformat()
-        for row in rows:
-            current_id = str(row.get("id", "") or "")
-            current_key = str(row.get("semantic_key", "") or "")
-            if current_id != sid and (not semantic_key or current_key != semantic_key):
-                continue
-            row["status"] = "failed"
-            row["failed_at"] = now_iso
-            if error:
-                row["last_error"] = str(error)
-            changed = True
-        if changed:
-            self._write_pending_payload(rows)
-            self._telemetry["failed"] += 1
+        with self._pending_lock:
+            rows = self._read_pending_payload()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for row in rows:
+                current_id = str(row.get("id", "") or "")
+                current_key = str(row.get("semantic_key", "") or "")
+                if current_id != sid and (not semantic_key or current_key != semantic_key):
+                    continue
+                row["status"] = "failed"
+                row["failed_at"] = now_iso
+                if error:
+                    row["last_error"] = str(error)
+                changed = True
+            if changed:
+                self._write_pending_payload(rows)
+                self._telemetry["failed"] += 1
         return changed
 
     def _latest_delivery_timestamp(self, semantic_key: str) -> datetime | None:
@@ -397,31 +440,32 @@ class MemoryMonitor:
         return out
 
     def _persist_pending(self, suggestions: list[MemorySuggestion]) -> None:
-        rows = self._read_pending_payload()
-        by_id = {str(item.get("id", "")): item for item in rows if isinstance(item, dict)}
-        by_semantic = {
-            str(item.get("semantic_key", "")): item
-            for item in rows
-            if isinstance(item, dict) and str(item.get("semantic_key", "")).strip()
-        }
-        for suggestion in suggestions:
-            suggestion_payload = suggestion.to_payload()
-            suggestion_payload["status"] = "pending"
-            sid = suggestion_payload.get("id", "")
-            semantic_key = str(suggestion_payload.get("semantic_key", "") or "")
-            existing = by_semantic.get(semantic_key)
-            if existing is not None:
-                self._telemetry["deduped"] += 1
-                continue
-            if sid in by_id and by_id[sid].get("status") == "delivered":
-                self._telemetry["deduped"] += 1
-                continue
-            by_id[str(sid)] = suggestion_payload
-            if semantic_key:
-                by_semantic[semantic_key] = suggestion_payload
-        merged = list(by_id.values())
-        merged.sort(key=lambda row: str(row.get("created_at", "")))
-        self._write_pending_payload(merged)
+        with self._pending_lock:
+            rows = self._read_pending_payload()
+            by_id = {str(item.get("id", "")): item for item in rows if isinstance(item, dict)}
+            by_semantic = {
+                str(item.get("semantic_key", "")): item
+                for item in rows
+                if isinstance(item, dict) and str(item.get("semantic_key", "")).strip()
+            }
+            for suggestion in suggestions:
+                suggestion_payload = suggestion.to_payload()
+                suggestion_payload["status"] = "pending"
+                sid = suggestion_payload.get("id", "")
+                semantic_key = str(suggestion_payload.get("semantic_key", "") or "")
+                existing = by_semantic.get(semantic_key)
+                if existing is not None:
+                    self._telemetry["deduped"] += 1
+                    continue
+                if sid in by_id and by_id[sid].get("status") == "delivered":
+                    self._telemetry["deduped"] += 1
+                    continue
+                by_id[str(sid)] = suggestion_payload
+                if semantic_key:
+                    by_semantic[semantic_key] = suggestion_payload
+            merged = list(by_id.values())
+            merged.sort(key=lambda row: str(row.get("created_at", "")))
+            self._write_pending_payload(merged)
 
     async def scan(self) -> list[MemorySuggestion]:
         self._telemetry["scans"] += 1

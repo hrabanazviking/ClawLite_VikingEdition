@@ -30,6 +30,7 @@ from clawlite.providers import build_provider, detect_provider_name
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
 from clawlite.session.store import SessionStore
+from clawlite.runtime import AutonomyWakeCoordinator
 from clawlite.tools.cron import CronTool
 from clawlite.tools.exec import ExecTool
 from clawlite.tools.files import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -93,6 +94,7 @@ class DiagnosticsResponse(BaseModel):
     channels_delivery: dict[str, Any] = {}
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
+    autonomy_wake: dict[str, Any] = {}
     bootstrap: dict[str, Any]
     memory_monitor: dict[str, Any] = {}
     engine: dict[str, Any] = {}
@@ -359,6 +361,7 @@ class RuntimeContainer:
     channels: ChannelManager
     cron: CronService
     heartbeat: HeartbeatService
+    autonomy_wake: AutonomyWakeCoordinator
     workspace: WorkspaceLoader
     memory_monitor: MemoryMonitor | None = None
 
@@ -376,6 +379,8 @@ class GatewayLifecycleState:
                 "channels": {"enabled": True, "running": False, "last_error": ""},
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
+                "proactive_monitor": {"enabled": False, "running": False, "last_error": ""},
+                "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
                 "bootstrap": {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
             }
@@ -617,6 +622,10 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         interval_seconds=heartbeat_interval,
         state_path=workspace_path / "memory" / "heartbeat-state.json",
     )
+    wake_backlog = int(getattr(config.gateway.autonomy, "max_queue_backlog", 200) or 200)
+    if wake_backlog <= 0:
+        wake_backlog = 200
+    autonomy_wake = AutonomyWakeCoordinator(max_pending=wake_backlog)
 
     tools = ToolRegistry(safety=config.tools.safety)
     tools.register(
@@ -727,6 +736,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         channels=channels,
         cron=cron,
         heartbeat=heartbeat,
+        autonomy_wake=autonomy_wake,
         workspace=workspace,
         memory_monitor=memory_monitor,
     )
@@ -745,6 +755,174 @@ async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
             return "cron_send_skipped"
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch finished job_id={}", job.id)
     return result.text
+
+
+def _default_heartbeat_route() -> tuple[str, str]:
+    return "cli", "profile"
+
+
+async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
+    channel, target = _default_heartbeat_route()
+    if memory_store is None or not hasattr(memory_store, "all"):
+        return channel, target
+    try:
+        history_rows = await asyncio.to_thread(memory_store.all)
+    except Exception:
+        return channel, target
+    latest_source = ""
+    latest_stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    for row in history_rows:
+        source = str(getattr(row, "source", "") or "").strip()
+        created_raw = str(getattr(row, "created_at", "") or "")
+        try:
+            created_at = dt.datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=dt.timezone.utc)
+        except Exception:
+            created_at = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        if source and created_at >= latest_stamp:
+            latest_stamp = created_at
+            latest_source = source
+    if latest_source:
+        return MemoryMonitor._delivery_route_from_source(latest_source)
+    return channel, target
+
+
+async def _run_proactive_monitor(runtime: RuntimeContainer) -> dict[str, Any]:
+    monitor = getattr(runtime, "memory_monitor", None)
+    channels = getattr(runtime, "channels", None)
+    memory_store = getattr(getattr(runtime, "engine", None), "memory", None)
+
+    result: dict[str, Any] = {
+        "status": "disabled",
+        "scanned": 0,
+        "delivered": 0,
+        "failed": 0,
+        "next_step_sent": False,
+        "error": "",
+    }
+    if monitor is None or channels is None:
+        return result
+
+    result["status"] = "ok"
+    try:
+        suggestions = await monitor.scan()
+    except Exception as exc:
+        bind_event("proactive.memory", session="autonomy:proactive").warning("memory monitor scan failed error={}", exc)
+        result["status"] = "scan_error"
+        result["error"] = str(exc)
+        suggestions = []
+
+    result["scanned"] = len(suggestions)
+    for suggestion in suggestions:
+        if not monitor.should_deliver(suggestion, min_priority=0.7):
+            continue
+        try:
+            priority = float(getattr(suggestion, "priority", 0.0) or 0.0)
+        except Exception:
+            priority = 0.0
+        metadata = {
+            "source": "memory_monitor",
+            "suggestion_id": suggestion.suggestion_id,
+            "trigger": suggestion.trigger,
+            "priority": priority,
+            **dict(getattr(suggestion, "metadata", {}) or {}),
+        }
+        try:
+            await channels.send(
+                channel=suggestion.channel,
+                target=suggestion.target,
+                text=suggestion.text,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            bind_event("proactive.memory", session="autonomy:proactive").warning(
+                "memory suggestion delivery failed suggestion_id={} channel={} target={} error={}",
+                suggestion.suggestion_id,
+                suggestion.channel,
+                suggestion.target,
+                exc,
+            )
+            result["failed"] = int(result.get("failed", 0) or 0) + 1
+            try:
+                monitor.mark_failed(suggestion, error=str(exc))
+            except Exception:
+                pass
+            continue
+        result["delivered"] = int(result.get("delivered", 0) or 0) + 1
+        try:
+            monitor.mark_delivered(suggestion)
+        except Exception as exc:
+            bind_event("proactive.memory", session="autonomy:proactive").warning(
+                "memory suggestion mark_delivered failed suggestion_id={} error={}",
+                suggestion.suggestion_id,
+                exc,
+            )
+
+    try:
+        channel, target = await _latest_memory_route(memory_store)
+        if memory_store is not None and hasattr(memory_store, "retrieve"):
+            proactive = await memory_store.retrieve(
+                "What should be the next proactive follow-up question?",
+                method="llm",
+                limit=5,
+            )
+            next_step_query = str(proactive.get("next_step_query", "") or "").strip()
+            if next_step_query:
+                suggestion = MemorySuggestion(
+                    text=next_step_query,
+                    priority=0.74,
+                    trigger="next_step_query",
+                    channel=channel,
+                    target=target,
+                    metadata={
+                        "trigger": "next_step_query",
+                        "source": "memory_llm",
+                    },
+                )
+                if monitor.should_deliver(suggestion, min_priority=0.7):
+                    metadata = {
+                        "source": "memory_monitor",
+                        "suggestion_id": suggestion.suggestion_id,
+                        "trigger": "next_step_query",
+                        "priority": float(getattr(suggestion, "priority", 0.0) or 0.0),
+                        **dict(getattr(suggestion, "metadata", {}) or {}),
+                    }
+                    try:
+                        await channels.send(
+                            channel=suggestion.channel,
+                            target=suggestion.target,
+                            text=suggestion.text,
+                            metadata=metadata,
+                        )
+                    except Exception as exc:
+                        bind_event("proactive.memory", session="autonomy:proactive").warning(
+                            "next-step suggestion delivery failed channel={} target={} error={}",
+                            suggestion.channel,
+                            suggestion.target,
+                            exc,
+                        )
+                        result["failed"] = int(result.get("failed", 0) or 0) + 1
+                        try:
+                            monitor.mark_failed(suggestion, error=str(exc))
+                        except Exception:
+                            pass
+                    else:
+                        result["delivered"] = int(result.get("delivered", 0) or 0) + 1
+                        result["next_step_sent"] = True
+                        try:
+                            monitor.mark_delivered(suggestion)
+                        except Exception:
+                            pass
+    except Exception as exc:
+        bind_event("proactive.memory", session="autonomy:proactive").warning(
+            "next-step proactive retrieval failed error={}",
+            exc,
+        )
+        result["status"] = "next_step_error"
+        result["error"] = str(exc)
+
+    return result
 
 
 async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
@@ -772,37 +950,8 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
     channels = getattr(runtime, "channels", None)
     memory_store = getattr(getattr(runtime, "engine", None), "memory", None)
 
-    def _default_heartbeat_route() -> tuple[str, str]:
-        return "cli", "profile"
-
-    async def _latest_memory_route() -> tuple[str, str]:
-        channel, target = _default_heartbeat_route()
-        if memory_store is None or not hasattr(memory_store, "all"):
-            return channel, target
-        try:
-            history_rows = await asyncio.to_thread(memory_store.all)
-        except Exception:
-            return channel, target
-        latest_source = ""
-        latest_stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-        for row in history_rows:
-            source = str(getattr(row, "source", "") or "").strip()
-            created_raw = str(getattr(row, "created_at", "") or "")
-            try:
-                created_at = dt.datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=dt.timezone.utc)
-            except Exception:
-                created_at = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-            if source and created_at >= latest_stamp:
-                latest_stamp = created_at
-                latest_source = source
-        if latest_source:
-            return MemoryMonitor._delivery_route_from_source(latest_source)
-        return channel, target
-
     if decision.action == "run" and decision.text:
-        channel, target = await _latest_memory_route()
+        channel, target = await _latest_memory_route(memory_store)
         metadata = {
             "source": "heartbeat",
             "trigger": "heartbeat_loop",
@@ -823,137 +972,6 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
         else:
             decision = HeartbeatDecision(action="run", reason="actionable_dispatched", text=decision.text)
 
-    monitor = getattr(runtime, "memory_monitor", None)
-    if monitor is not None and channels is not None:
-        try:
-            suggestions = await monitor.scan()
-        except Exception as exc:
-            bind_event("heartbeat.memory", session="heartbeat:system").warning("memory monitor scan failed error={}", exc)
-        else:
-            for suggestion in suggestions:
-                if not monitor.should_deliver(suggestion, min_priority=0.7):
-                    continue
-                try:
-                    priority = float(getattr(suggestion, "priority", 0.0) or 0.0)
-                except Exception:
-                    priority = 0.0
-                metadata = {
-                    "source": "memory_monitor",
-                    "suggestion_id": suggestion.suggestion_id,
-                    "trigger": suggestion.trigger,
-                    "priority": priority,
-                    **dict(getattr(suggestion, "metadata", {}) or {}),
-                }
-                try:
-                    await channels.send(
-                        channel=suggestion.channel,
-                        target=suggestion.target,
-                        text=suggestion.text,
-                        metadata=metadata,
-                    )
-                except Exception as exc:
-                    bind_event("heartbeat.memory", session="heartbeat:system").warning(
-                        "memory suggestion delivery failed suggestion_id={} channel={} target={} error={}",
-                        suggestion.suggestion_id,
-                        suggestion.channel,
-                        suggestion.target,
-                        exc,
-                    )
-                    try:
-                        monitor.mark_failed(suggestion, error=str(exc))
-                    except Exception:
-                        pass
-                    continue
-                try:
-                    monitor.mark_delivered(suggestion)
-                except Exception as exc:
-                    bind_event("heartbeat.memory", session="heartbeat:system").warning(
-                        "memory suggestion mark_delivered failed suggestion_id={} error={}",
-                        suggestion.suggestion_id,
-                        exc,
-                    )
-
-        try:
-            channel = "cli"
-            target = "profile"
-            if memory_store is not None and hasattr(memory_store, "all"):
-                try:
-                    history_rows = await asyncio.to_thread(memory_store.all)
-                except Exception:
-                    history_rows = []
-                latest_source = ""
-                latest_stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-                for row in history_rows:
-                    source = str(getattr(row, "source", "") or "").strip()
-                    created_raw = str(getattr(row, "created_at", "") or "")
-                    try:
-                        created_at = dt.datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                        if created_at.tzinfo is None:
-                            created_at = created_at.replace(tzinfo=dt.timezone.utc)
-                    except Exception:
-                        created_at = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
-                    if source and created_at >= latest_stamp:
-                        latest_stamp = created_at
-                        latest_source = source
-                if latest_source:
-                    channel, target = MemoryMonitor._delivery_route_from_source(latest_source)
-
-            if memory_store is not None and hasattr(memory_store, "retrieve"):
-                proactive = await memory_store.retrieve(
-                    "What should be the next proactive follow-up question?",
-                    method="llm",
-                    limit=5,
-                )
-                next_step_query = str(proactive.get("next_step_query", "") or "").strip()
-                if next_step_query:
-                    suggestion = MemorySuggestion(
-                        text=next_step_query,
-                        priority=0.74,
-                        trigger="next_step_query",
-                        channel=channel,
-                        target=target,
-                        metadata={
-                            "trigger": "next_step_query",
-                            "source": "memory_llm",
-                        },
-                    )
-                    if monitor.should_deliver(suggestion, min_priority=0.7):
-                        metadata = {
-                            "source": "memory_monitor",
-                            "suggestion_id": suggestion.suggestion_id,
-                            "trigger": "next_step_query",
-                            "priority": float(getattr(suggestion, "priority", 0.0) or 0.0),
-                            **dict(getattr(suggestion, "metadata", {}) or {}),
-                        }
-                        try:
-                            await channels.send(
-                                channel=suggestion.channel,
-                                target=suggestion.target,
-                                text=suggestion.text,
-                                metadata=metadata,
-                            )
-                        except Exception as exc:
-                            bind_event("heartbeat.memory", session="heartbeat:system").warning(
-                                "next-step suggestion delivery failed channel={} target={} error={}",
-                                suggestion.channel,
-                                suggestion.target,
-                                exc,
-                            )
-                            try:
-                                monitor.mark_failed(suggestion, error=str(exc))
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                monitor.mark_delivered(suggestion)
-                            except Exception:
-                                pass
-        except Exception as exc:
-            bind_event("heartbeat.memory", session="heartbeat:system").warning(
-                "next-step proactive retrieval failed error={}",
-                exc,
-            )
-
     return decision
 
 
@@ -970,6 +988,29 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     ws_telemetry = WebSocketTelemetry()
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
+    lifecycle.components["proactive_monitor"]["enabled"] = bool(runtime.memory_monitor is not None)
+    proactive_interval_seconds = max(5, int(cfg.gateway.heartbeat.interval_s or 1800))
+    proactive_task: asyncio.Task[Any] | None = None
+    proactive_running = False
+    proactive_stop_event = asyncio.Event()
+    proactive_runner_state: dict[str, Any] = {
+        "enabled": bool(runtime.memory_monitor is not None),
+        "running": False,
+        "interval_seconds": proactive_interval_seconds,
+        "ticks": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "backpressure_count": 0,
+        "delivered_count": 0,
+        "last_trigger": "",
+        "last_result": "",
+        "last_error": "",
+        "last_run_iso": "",
+    }
+    memory_quality_cache: dict[str, Any] = {
+        "fingerprint": "",
+        "payload": None,
+    }
 
     def _bootstrap_status_snapshot() -> dict[str, Any]:
         fallback = {
@@ -1014,6 +1055,58 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         row["completed_at"] = str(status.get("completed_at", "") or "")
         row["run_count"] = int(status.get("run_count", 0) or 0)
         return status
+
+    async def _dispatch_autonomy_wake(kind: str, payload: dict[str, Any]) -> Any:
+        if kind == "heartbeat":
+            return await _run_heartbeat(runtime)
+        if kind == "proactive":
+            return await _run_proactive_monitor(runtime)
+        if kind == "cron":
+            job = payload.get("job")
+            if job is None:
+                return "cron_job_missing"
+            return await _route_cron_job(runtime, job)
+        return None
+
+    async def _submit_heartbeat_wake() -> HeartbeatDecision:
+        fallback = HeartbeatDecision(action="skip", reason="wake_backpressure")
+        decision = await runtime.autonomy_wake.submit(
+            kind="heartbeat",
+            key="heartbeat:loop",
+            priority=10,
+            payload={},
+            fallback_result=fallback,
+        )
+        return HeartbeatDecision.from_result(decision)
+
+    async def _submit_cron_wake(job) -> str | None:
+        return await runtime.autonomy_wake.submit(
+            kind="cron",
+            key=f"cron:{job.id}",
+            priority=50,
+            payload={"job": job},
+            fallback_result="cron_backpressure_skipped",
+        )
+
+    async def _submit_proactive_wake() -> dict[str, Any]:
+        fallback = {
+            "status": "wake_backpressure",
+            "scanned": 0,
+            "delivered": 0,
+            "failed": 0,
+            "next_step_sent": False,
+            "error": "",
+        }
+        response = await runtime.autonomy_wake.submit(
+            kind="proactive",
+            key="proactive:memory_monitor",
+            priority=30,
+            payload={},
+            fallback_result=fallback,
+        )
+        if isinstance(response, dict):
+            return dict(response)
+        return fallback
 
     def _is_internal_session_id(session_id: str) -> bool:
         normalized = str(session_id or "").strip().lower()
@@ -1071,12 +1164,81 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             memory_proactive_enabled=bool(runtime.memory_monitor is not None),
         )
 
+    async def _start_proactive_monitor() -> None:
+        nonlocal proactive_task, proactive_running
+        if proactive_task is not None:
+            proactive_running = True
+            proactive_runner_state["running"] = True
+            return
+
+        proactive_stop_event.clear()
+        proactive_running = True
+        proactive_runner_state["running"] = True
+
+        async def _loop() -> None:
+            first_tick = True
+            while proactive_running:
+                if not first_tick:
+                    try:
+                        await asyncio.wait_for(proactive_stop_event.wait(), timeout=proactive_interval_seconds)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        pass
+                    if proactive_stop_event.is_set() or not proactive_running:
+                        break
+                first_tick = False
+
+                proactive_runner_state["ticks"] = int(proactive_runner_state.get("ticks", 0) or 0) + 1
+                proactive_runner_state["last_trigger"] = "startup" if proactive_runner_state["ticks"] == 1 else "interval"
+                proactive_runner_state["last_run_iso"] = _utc_now_iso()
+                try:
+                    scan_result = await _submit_proactive_wake()
+                    status = str(scan_result.get("status", "") or "").strip().lower()
+                    if status == "wake_backpressure":
+                        proactive_runner_state["backpressure_count"] = int(proactive_runner_state.get("backpressure_count", 0) or 0) + 1
+                    elif status in {"ok", "disabled"}:
+                        proactive_runner_state["success_count"] = int(proactive_runner_state.get("success_count", 0) or 0) + 1
+                    else:
+                        proactive_runner_state["error_count"] = int(proactive_runner_state.get("error_count", 0) or 0) + 1
+                    proactive_runner_state["delivered_count"] = int(proactive_runner_state.get("delivered_count", 0) or 0) + int(scan_result.get("delivered", 0) or 0)
+                    proactive_runner_state["last_result"] = status or "unknown"
+                    proactive_runner_state["last_error"] = str(scan_result.get("error", "") or "")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    proactive_runner_state["error_count"] = int(proactive_runner_state.get("error_count", 0) or 0) + 1
+                    proactive_runner_state["last_result"] = "error"
+                    proactive_runner_state["last_error"] = str(exc)
+                    bind_event("proactive.lifecycle").error("proactive loop tick failed error={}", exc)
+
+        proactive_task = asyncio.create_task(_loop())
+        bind_event("proactive.lifecycle").info("proactive monitor started interval_seconds={}", proactive_interval_seconds)
+
+    async def _stop_proactive_monitor() -> None:
+        nonlocal proactive_task, proactive_running
+        proactive_running = False
+        proactive_stop_event.set()
+        proactive_runner_state["running"] = False
+        if proactive_task is None:
+            return
+        proactive_task.cancel()
+        try:
+            await proactive_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            proactive_runner_state["last_error"] = str(exc)
+            bind_event("proactive.lifecycle").error("proactive monitor stop failed error={}", exc)
+        proactive_task = None
+        bind_event("proactive.lifecycle").info("proactive monitor stopped")
+
     async def _start_subsystems() -> None:
         started: list[tuple[str, Any]] = []
         steps: list[tuple[str, Any, Any, bool]] = [
             ("channels", runtime.channels.start, runtime.channels.stop, True),
+            ("autonomy_wake", runtime.autonomy_wake.start, runtime.autonomy_wake.stop, True),
             ("cron", runtime.cron.start, runtime.cron.stop, True),
             ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
+            ("proactive_monitor", _start_proactive_monitor, _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
         ]
 
         for name, start_fn, stop_fn, enabled in steps:
@@ -1088,10 +1250,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             try:
                 if name == "channels":
                     await start_fn(cfg.to_dict())
+                elif name == "autonomy_wake":
+                    await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":
-                    await start_fn(lambda job: _route_cron_job(runtime, job))
+                    await start_fn(_submit_cron_wake)
+                elif name == "proactive_monitor":
+                    await start_fn()
                 else:
-                    await start_fn(lambda: _run_heartbeat(runtime))
+                    await start_fn(_submit_heartbeat_wake)
                 lifecycle.mark_component(name, running=True)
                 started.append((name, stop_fn))
                 bind_event("gateway.lifecycle").info("subsystem started name={}", name)
@@ -1112,7 +1278,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _stop_subsystems() -> None:
         steps: list[tuple[str, Any, bool]] = [
             ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
+            ("proactive_monitor", _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
             ("cron", runtime.cron.stop, True),
+            ("autonomy_wake", runtime.autonomy_wake.stop, True),
             ("channels", runtime.channels.stop, True),
         ]
         for name, stop_fn, enabled in steps:
@@ -1278,9 +1446,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "state_path": cfg.state_path,
                 "provider_model": cfg.agents.defaults.model,
             }
+        retrieval_metrics_snapshot = runtime.engine.retrieval_metrics_snapshot()
+        turn_metrics_snapshot = runtime.engine.turn_metrics_snapshot()
         engine_payload: dict[str, Any] = {
-            "retrieval_metrics": runtime.engine.retrieval_metrics_snapshot(),
-            "turn_metrics": runtime.engine.turn_metrics_snapshot(),
+            "retrieval_metrics": retrieval_metrics_snapshot,
+            "turn_metrics": turn_metrics_snapshot,
         }
         memory_payload: dict[str, Any]
         memory_store = getattr(runtime.engine, "memory", None)
@@ -1307,17 +1477,99 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "available": False,
             }
         engine_payload["memory"] = memory_payload
+
+        memory_quality_payload: dict[str, Any] = {
+            "available": False,
+            "updated": False,
+            "report": {},
+            "state": {},
+            "error": {
+                "type": "not_supported",
+                "message": "memory_quality_methods_unavailable",
+            },
+        }
+        quality_update = getattr(memory_store, "update_quality_state", None)
+        quality_snapshot = getattr(memory_store, "quality_state_snapshot", None)
+        if callable(quality_update) and callable(quality_snapshot):
+            retrieval_metrics = {
+                "attempts": int(retrieval_metrics_snapshot.get("retrieval_attempts", 0) or 0),
+                "hits": int(retrieval_metrics_snapshot.get("retrieval_hits", 0) or 0),
+                "rewrites": int(retrieval_metrics_snapshot.get("retrieval_rewrites", 0) or 0),
+            }
+            turn_metrics = {
+                "successes": int(turn_metrics_snapshot.get("turns_success", 0) or 0),
+                "errors": int(turn_metrics_snapshot.get("turns_provider_errors", 0) or 0)
+                + int(turn_metrics_snapshot.get("turns_cancelled", 0) or 0),
+            }
+            semantic_raw = memory_payload.get("semantic", {}) if isinstance(memory_payload.get("semantic", {}), dict) else {}
+            semantic_metrics = {
+                "enabled": bool(semantic_raw.get("enabled", False)),
+                "coverage_ratio": float(semantic_raw.get("coverage_ratio", 0.0) or 0.0),
+            }
+
+            fingerprint_payload = {
+                "retrieval": retrieval_metrics,
+                "turn": turn_metrics,
+                "semantic": semantic_metrics,
+            }
+            try:
+                fingerprint = json.dumps(fingerprint_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                fingerprint = repr(fingerprint_payload)
+
+            cached_payload = memory_quality_cache.get("payload")
+            if memory_quality_cache.get("fingerprint") == fingerprint and isinstance(cached_payload, dict):
+                memory_quality_payload = dict(cached_payload)
+            else:
+                try:
+                    report = quality_update(
+                        retrieval_metrics=retrieval_metrics,
+                        turn_stability_metrics=turn_metrics,
+                        semantic_metrics=semantic_metrics,
+                        sampled_at=generated_at,
+                    )
+                    snapshot = quality_snapshot()
+                    memory_quality_payload = {
+                        "available": True,
+                        "updated": True,
+                        "report": dict(report) if isinstance(report, dict) else {},
+                        "state": dict(snapshot) if isinstance(snapshot, dict) else {},
+                        "error": None,
+                    }
+                except Exception as exc:
+                    state_payload: dict[str, Any] = {}
+                    try:
+                        snapshot = quality_snapshot()
+                        if isinstance(snapshot, dict):
+                            state_payload = dict(snapshot)
+                    except Exception:
+                        state_payload = {}
+                    memory_quality_payload = {
+                        "available": True,
+                        "updated": False,
+                        "report": {},
+                        "state": state_payload,
+                        "error": {
+                            "type": exc.__class__.__name__,
+                            "message": str(exc),
+                        },
+                    }
+                memory_quality_cache["fingerprint"] = fingerprint
+                memory_quality_cache["payload"] = dict(memory_quality_payload)
+
+        engine_payload["memory_quality"] = memory_quality_payload
         if cfg.gateway.diagnostics.include_provider_telemetry:
             engine_payload["provider"] = _provider_telemetry_snapshot(runtime.engine.provider)
         monitor_payload: dict[str, Any]
         if runtime.memory_monitor is None:
-            monitor_payload = {"enabled": False}
+            monitor_payload = {"enabled": False, "runner": dict(proactive_runner_state)}
         else:
             try:
                 monitor_payload = dict(runtime.memory_monitor.telemetry())
             except Exception:
                 monitor_payload = {}
             monitor_payload["enabled"] = True
+            monitor_payload["runner"] = dict(proactive_runner_state)
 
         return DiagnosticsResponse(
             schema_version="2026-03-02",
@@ -1330,6 +1582,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             channels_delivery=runtime.channels.delivery_diagnostics(),
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
+            autonomy_wake=runtime.autonomy_wake.status(),
             bootstrap=_bootstrap_status_snapshot(),
             memory_monitor=monitor_payload,
             engine=engine_payload,
@@ -1351,7 +1604,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         if not cfg.gateway.heartbeat.enabled:
             raise HTTPException(status_code=409, detail="heartbeat_disabled")
-        decision = await runtime.heartbeat.trigger_now(lambda: _run_heartbeat(runtime))
+        decision = await runtime.heartbeat.trigger_now(_submit_heartbeat_wake)
         return {
             "ok": True,
             "decision": {
@@ -1430,6 +1683,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="telegram_webhook_handler_unavailable")
 
         processed = bool(await handler(payload))
+        if (not processed) and bool(getattr(cfg.channels.telegram, "webhook_fail_fast_on_error", False)):
+            raise HTTPException(status_code=503, detail="telegram_webhook_processing_failed")
         return {"ok": True, "processed": processed}
 
     app.add_api_route(telegram_webhook_path, _telegram_webhook, methods=["POST"])

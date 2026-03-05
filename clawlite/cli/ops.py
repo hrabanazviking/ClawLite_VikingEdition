@@ -1254,6 +1254,105 @@ def memory_eval_snapshot(config: AppConfig, limit: int = 5) -> dict[str, Any]:
     }
 
 
+def memory_quality_snapshot(
+    config: AppConfig,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 3.0,
+    limit: int = 5,
+) -> dict[str, Any]:
+    try:
+        store = _build_memory_store(config)
+        eval_snapshot = memory_eval_snapshot(config, limit=max(1, int(limit or 1)))
+        diagnostics = store.diagnostics()
+        analysis = store.analysis_stats()
+
+        eval_attempts = int(eval_snapshot.get("cases", 0) or 0)
+        eval_hits = int(eval_snapshot.get("passed", 0) or 0)
+
+        recovery_attempts = int(diagnostics.get("session_recovery_attempts", 0) or 0)
+        recovery_hits = int(diagnostics.get("session_recovery_hits", 0) or 0)
+        rewrites = int(diagnostics.get("consolidate_dedup_hits", 0) or 0)
+
+        retrieval_metrics = {
+            "attempts": max(0, eval_attempts + recovery_attempts),
+            "hits": max(0, eval_hits + recovery_hits),
+            "rewrites": max(0, rewrites),
+        }
+
+        error_keys = (
+            "history_read_corrupt_lines",
+            "privacy_audit_errors",
+            "privacy_encrypt_errors",
+            "privacy_decrypt_errors",
+            "privacy_key_errors",
+        )
+        turn_errors = sum(int(diagnostics.get(key, 0) or 0) for key in error_keys)
+        if str(diagnostics.get("last_error", "") or "").strip():
+            turn_errors += 1
+        turn_successes = max(0, int(diagnostics.get("consolidate_writes", 0) or 0) + recovery_hits)
+
+        turn_stability_metrics = {
+            "successes": turn_successes,
+            "errors": turn_errors,
+        }
+
+        semantic = analysis.get("semantic", {}) if isinstance(analysis.get("semantic", {}), dict) else {}
+        semantic_metrics = {
+            "enabled": bool(semantic.get("enabled", False)),
+            "coverage_ratio": float(semantic.get("coverage_ratio", 0.0) or 0.0),
+        }
+
+        gateway_block: dict[str, Any] = {"enabled": False}
+        gateway_metrics: dict[str, Any] = {}
+        if str(gateway_url or "").strip():
+            gateway_block = {"enabled": True}
+            try:
+                gateway_snapshot = fetch_gateway_diagnostics(
+                    gateway_url=str(gateway_url or ""),
+                    token=str(token or ""),
+                    timeout=float(timeout),
+                )
+                gateway_block["ok"] = True
+                gateway_block["base_url"] = str(gateway_snapshot.get("base_url", "") or "")
+                endpoints = gateway_snapshot.get("endpoints", {})
+                if isinstance(endpoints, dict):
+                    ok_count = sum(1 for value in endpoints.values() if isinstance(value, dict) and bool(value.get("ok", False)))
+                    gateway_metrics = {
+                        "endpoint_ok": ok_count,
+                        "endpoint_total": len(endpoints),
+                    }
+            except Exception as exc:
+                gateway_block["ok"] = False
+                gateway_block["error"] = str(exc)
+
+        report = store.update_quality_state(
+            retrieval_metrics=retrieval_metrics,
+            turn_stability_metrics=turn_stability_metrics,
+            semantic_metrics=semantic_metrics,
+            gateway_metrics=gateway_metrics,
+        )
+        state = store.quality_state_snapshot()
+
+        return {
+            "ok": True,
+            "report": report,
+            "state": state,
+            "quality_state_path": str(store.quality_state_path),
+            "eval": {
+                "cases": eval_attempts,
+                "passed": eval_hits,
+                "failed": int(eval_snapshot.get("failed", 0) or 0),
+            },
+            "gateway_probe": gateway_block,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": {"type": exc.__class__.__name__, "message": str(exc)},
+        }
+
+
 def _file_stat(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {

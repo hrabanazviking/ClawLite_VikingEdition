@@ -14,7 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.core.memory_monitor import MemorySuggestion
-from clawlite.gateway.server import _run_heartbeat, build_runtime, create_app
+from clawlite.gateway.server import _run_heartbeat, _run_proactive_monitor, build_runtime, create_app
 from clawlite.providers.base import LLMResult
 from clawlite.scheduler.heartbeat import HeartbeatDecision
 from clawlite.utils import logging as logging_utils
@@ -200,6 +200,99 @@ def test_gateway_telegram_webhook_timeout_returns_408_contract(tmp_path: Path) -
             assert payload["code"] == "telegram_webhook_payload_timeout"
 
 
+def test_gateway_telegram_webhook_processing_failure_returns_200_by_default(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={
+            "telegram": {
+                "enabled": True,
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_enabled": True,
+                "webhook_secret": "secret-1",
+                "webhook_url": "https://example.com/hook",
+            }
+        },
+    )
+    app = create_app(cfg)
+
+    class FakeBot:
+        def __init__(self, token: str) -> None:
+            assert token == "x:token"
+
+        async def set_webhook(self, **kwargs):
+            return kwargs
+
+        async def delete_webhook(self, **kwargs):
+            return kwargs
+
+    fake_module = SimpleNamespace(Bot=FakeBot)
+    with patch.dict(sys.modules, {"telegram": fake_module}):
+        with TestClient(app) as client:
+            channel = app.state.runtime.channels.get_channel("telegram")
+            assert channel is not None
+            channel.handle_webhook_update = AsyncMock(return_value=False)
+
+            response = client.post(
+                "/api/webhooks/telegram",
+                json={"update_id": 2, "message": {"text": "hello"}},
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret-1"},
+            )
+
+            assert response.status_code == 200
+            assert response.json() == {"ok": True, "processed": False}
+
+
+def test_gateway_telegram_webhook_processing_failure_returns_503_in_fail_fast_mode(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={
+            "telegram": {
+                "enabled": True,
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_enabled": True,
+                "webhook_secret": "secret-1",
+                "webhook_url": "https://example.com/hook",
+                "webhook_fail_fast_on_error": True,
+            }
+        },
+    )
+    app = create_app(cfg)
+
+    class FakeBot:
+        def __init__(self, token: str) -> None:
+            assert token == "x:token"
+
+        async def set_webhook(self, **kwargs):
+            return kwargs
+
+        async def delete_webhook(self, **kwargs):
+            return kwargs
+
+    fake_module = SimpleNamespace(Bot=FakeBot)
+    with patch.dict(sys.modules, {"telegram": fake_module}):
+        with TestClient(app) as client:
+            channel = app.state.runtime.channels.get_channel("telegram")
+            assert channel is not None
+            channel.handle_webhook_update = AsyncMock(return_value=False)
+
+            response = client.post(
+                "/api/webhooks/telegram",
+                json={"update_id": 2, "message": {"text": "hello"}},
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret-1"},
+            )
+
+            assert response.status_code == 503
+            payload = response.json()
+            assert payload["error"] == "telegram_webhook_processing_failed"
+            assert payload["code"] == "telegram_webhook_processing_failed"
+
+
 def test_gateway_successful_chat_completes_bootstrap_lifecycle(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -364,6 +457,36 @@ def test_run_heartbeat_skips_suggestions_when_memory_monitor_missing() -> None:
     asyncio.run(_scenario())
 
 
+def test_run_heartbeat_does_not_run_memory_monitor_when_present() -> None:
+    class _Engine:
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id, user_text
+            return SimpleNamespace(text="HEARTBEAT_OK")
+
+    class _Monitor:
+        async def scan(self):
+            return [
+                MemorySuggestion(
+                    text="Should not send from heartbeat",
+                    priority=0.9,
+                    trigger="upcoming_event",
+                    channel="telegram",
+                    target="chat42",
+                )
+            ]
+
+    async def _scenario() -> None:
+        channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
+        runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=_Monitor())
+        decision = await _run_heartbeat(runtime)
+
+        assert decision.action == "skip"
+        assert decision.reason == "heartbeat_ok"
+        channels.send.assert_not_awaited()
+
+    asyncio.run(_scenario())
+
+
 def test_gateway_status_exposes_memory_proactive_enabled_flag(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -388,12 +511,63 @@ def test_gateway_diagnostics_exposes_memory_monitor_telemetry_when_enabled(tmp_p
         channels={},
     )
     app = create_app(cfg)
+    app.state.runtime.autonomy_wake.submit = AsyncMock(
+        return_value={
+            "status": "ok",
+            "scanned": 0,
+            "delivered": 0,
+            "failed": 0,
+            "next_step_sent": False,
+            "error": "",
+        }
+    )
     with TestClient(app) as client:
         payload = client.get("/v1/diagnostics").json()
         monitor_payload = payload["memory_monitor"]
         assert monitor_payload["enabled"] is True
         assert "scans" in monitor_payload
         assert "generated" in monitor_payload
+        assert "runner" in monitor_payload
+        assert monitor_payload["runner"]["enabled"] is True
+        assert monitor_payload["runner"]["running"] is True
+
+        status_payload = client.get("/v1/status").json()
+        proactive_component = status_payload["components"]["proactive_monitor"]
+        assert proactive_component["enabled"] is True
+        assert proactive_component["running"] is True
+
+    app.state.runtime.autonomy_wake.submit.assert_awaited()
+
+
+def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}, "diagnostics": {"enabled": True, "require_auth": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        payload = client.get("/v1/diagnostics").json()
+        alias_payload = client.get("/api/diagnostics").json()
+
+        assert "autonomy_wake" in payload
+        assert set(payload["autonomy_wake"].keys()) >= {
+            "running",
+            "max_pending",
+            "enqueued",
+            "coalesced",
+            "dropped_backpressure",
+            "executed_ok",
+            "executed_error",
+            "queue_depth",
+            "inflight",
+            "max_queue_depth_seen",
+            "by_kind",
+        }
+        assert alias_payload["autonomy_wake"] == payload["autonomy_wake"]
 
 
 def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
@@ -565,10 +739,10 @@ def test_run_heartbeat_actionable_dispatch_failure_marks_reason() -> None:
     asyncio.run(_scenario())
 
 
-def test_run_heartbeat_sends_high_priority_memory_suggestions() -> None:
+def test_run_proactive_monitor_sends_high_priority_memory_suggestions() -> None:
     class _Engine:
-        async def run(self, *, session_id: str, user_text: str):
-            return SimpleNamespace(text="HEARTBEAT_OK")
+        def __init__(self) -> None:
+            self.memory = None
 
     class _Monitor:
         def __init__(self) -> None:
@@ -616,9 +790,10 @@ def test_run_heartbeat_sends_high_priority_memory_suggestions() -> None:
         monitor = _Monitor()
         channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
         runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=monitor)
-        decision = await _run_heartbeat(runtime)
+        result = await _run_proactive_monitor(runtime)
 
-        assert decision.action == "skip"
+        assert result["status"] == "ok"
+        assert result["delivered"] == 1
         channels.send.assert_awaited_once()
         send_kwargs = channels.send.await_args.kwargs
         assert send_kwargs["channel"] == "telegram"
@@ -630,7 +805,7 @@ def test_run_heartbeat_sends_high_priority_memory_suggestions() -> None:
     asyncio.run(_scenario())
 
 
-def test_run_heartbeat_sends_next_step_query_proactive_suggestion() -> None:
+def test_run_proactive_monitor_sends_next_step_query_proactive_suggestion() -> None:
     class _Memory:
         async def retrieve(self, query: str, *, method: str = "rag", limit: int = 5):
             assert query
@@ -648,10 +823,6 @@ def test_run_heartbeat_sends_next_step_query_proactive_suggestion() -> None:
     class _Engine:
         def __init__(self) -> None:
             self.memory = _Memory()
-
-        async def run(self, *, session_id: str, user_text: str):
-            del session_id, user_text
-            return SimpleNamespace(text="HEARTBEAT_OK")
 
     class _Monitor:
         def __init__(self) -> None:
@@ -679,9 +850,9 @@ def test_run_heartbeat_sends_next_step_query_proactive_suggestion() -> None:
         channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
         runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=monitor)
 
-        decision = await _run_heartbeat(runtime)
+        result = await _run_proactive_monitor(runtime)
 
-        assert decision.action == "skip"
+        assert result["status"] == "ok"
         channels.send.assert_awaited_once()
         kwargs = channels.send.await_args.kwargs
         assert kwargs["channel"] == "telegram"
@@ -694,7 +865,7 @@ def test_run_heartbeat_sends_next_step_query_proactive_suggestion() -> None:
     asyncio.run(_scenario())
 
 
-def test_run_heartbeat_next_step_retrieve_fail_soft() -> None:
+def test_run_proactive_monitor_next_step_retrieve_fail_soft() -> None:
     class _Memory:
         async def retrieve(self, query: str, *, method: str = "rag", limit: int = 5):
             del query, method, limit
@@ -706,10 +877,6 @@ def test_run_heartbeat_next_step_retrieve_fail_soft() -> None:
     class _Engine:
         def __init__(self) -> None:
             self.memory = _Memory()
-
-        async def run(self, *, session_id: str, user_text: str):
-            del session_id, user_text
-            return SimpleNamespace(text="HEARTBEAT_OK")
 
     class _Monitor:
         async def scan(self):
@@ -730,16 +897,15 @@ def test_run_heartbeat_next_step_retrieve_fail_soft() -> None:
     async def _scenario() -> None:
         channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
         runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=_Monitor())
-        decision = await _run_heartbeat(runtime)
+        result = await _run_proactive_monitor(runtime)
 
-        assert decision.action == "skip"
-        assert decision.reason == "heartbeat_ok"
+        assert result["status"] == "next_step_error"
         channels.send.assert_not_awaited()
 
     asyncio.run(_scenario())
 
 
-def test_run_heartbeat_skips_low_priority_suggestions() -> None:
+def test_run_heartbeat_ignores_memory_monitor_suggestions() -> None:
     class _Engine:
         def __init__(self) -> None:
             self.memory = None
@@ -784,11 +950,7 @@ def test_run_heartbeat_skips_low_priority_suggestions() -> None:
     asyncio.run(_scenario())
 
 
-def test_run_heartbeat_monitor_fail_soft_does_not_break_decision() -> None:
-    class _Engine:
-        async def run(self, *, session_id: str, user_text: str):
-            return SimpleNamespace(text="HEARTBEAT_OK")
-
+def test_run_proactive_monitor_scan_fail_soft_does_not_raise() -> None:
     class _Monitor:
         async def scan(self):
             raise RuntimeError("monitor failed")
@@ -806,11 +968,10 @@ def test_run_heartbeat_monitor_fail_soft_does_not_break_decision() -> None:
 
     async def _scenario() -> None:
         channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
-        runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=_Monitor())
-        decision = await _run_heartbeat(runtime)
+        runtime = SimpleNamespace(engine=SimpleNamespace(memory=None), channels=channels, memory_monitor=_Monitor())
+        result = await _run_proactive_monitor(runtime)
 
-        assert decision.action == "skip"
-        assert decision.reason == "heartbeat_ok"
+        assert result["status"] == "scan_error"
         channels.send.assert_not_awaited()
 
     asyncio.run(_scenario())
@@ -1333,6 +1494,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "retrieval_metrics" in payload["engine"]
         assert "turn_metrics" in payload["engine"]
         assert "memory" in payload["engine"]
+        assert "memory_quality" in payload["engine"]
         assert "provider" in payload["engine"]
         memory_diag = payload["engine"]["memory"]
         assert memory_diag["available"] is True
@@ -1340,6 +1502,21 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert memory_diag["backend_supported"] is True
         assert memory_diag["backend_initialized"] is True
         assert memory_diag["backend_init_error"] == ""
+        memory_quality = payload["engine"]["memory_quality"]
+        assert memory_quality["available"] is True
+        assert memory_quality["updated"] is True
+        assert isinstance(memory_quality["report"], dict)
+        assert isinstance(memory_quality["state"], dict)
+        assert memory_quality["error"] is None
+        assert set(memory_quality["report"].keys()) >= {
+            "sampled_at",
+            "score",
+            "retrieval",
+            "turn_stability",
+            "drift",
+            "semantic",
+            "recommendations",
+        }
         retrieval = payload["engine"]["retrieval_metrics"]
         assert set(retrieval.keys()) == {
             "route_counts",
@@ -1426,6 +1603,39 @@ def test_gateway_diagnostics_include_provider_telemetry_when_enabled(tmp_path: P
 
         alias_payload = client.get("/api/diagnostics").json()
         assert alias_payload["engine"]["provider"] == payload["engine"]["provider"]
+
+
+def test_gateway_diagnostics_memory_quality_fail_soft_when_update_errors(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+
+    def _boom(*, retrieval_metrics, turn_stability_metrics, semantic_metrics, sampled_at):
+        del retrieval_metrics, turn_stability_metrics, semantic_metrics, sampled_at
+        raise RuntimeError("quality update failed")
+
+    app.state.runtime.engine.memory.update_quality_state = _boom
+
+    with TestClient(app) as client:
+        response = client.get("/v1/diagnostics")
+        assert response.status_code == 200
+        payload = response.json()
+        quality = payload["engine"]["memory_quality"]
+
+        assert quality["available"] is True
+        assert quality["updated"] is False
+        assert quality["report"] == {}
+        assert isinstance(quality["state"], dict)
+        assert quality["error"]["type"] == "RuntimeError"
+        assert quality["error"]["message"] == "quality update failed"
 
 
 def test_gateway_diagnostics_http_telemetry_tracks_success_and_errors(tmp_path: Path) -> None:
@@ -1724,3 +1934,26 @@ def test_gateway_heartbeat_trigger_disabled_guard(tmp_path: Path) -> None:
         assert payload["error"] == "heartbeat_disabled"
         assert payload["status"] == 409
         assert payload["code"] == "heartbeat_disabled"
+
+
+def test_gateway_heartbeat_trigger_surfaces_wake_backpressure_from_coordinator(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": True, "interval_s": 9999}},
+        channels={},
+    )
+    app = create_app(cfg)
+    submit_mock = AsyncMock(return_value=HeartbeatDecision(action="skip", reason="wake_backpressure"))
+    app.state.runtime.autonomy_wake.submit = submit_mock
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/heartbeat/trigger")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["decision"]["action"] == "skip"
+        assert payload["decision"]["reason"] == "wake_backpressure"
+
+    submit_mock.assert_awaited()

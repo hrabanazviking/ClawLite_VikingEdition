@@ -333,6 +333,15 @@ class TelegramChannel(BaseChannel):
             str(config.get("webhook_path", config.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram")
         )
         self.webhook_url = str(config.get("webhook_url", config.get("webhookUrl", "")) or "").strip()
+        self.webhook_fail_fast_on_error = bool(
+            config.get(
+                "webhook_fail_fast_on_error",
+                config.get(
+                    "webhookFailFastOnError",
+                    getattr(telegram_config, "webhook_fail_fast_on_error", False),
+                ),
+            )
+        )
         self.poll_interval_s = float(config.get("poll_interval_s", 1.0) or 1.0)
         self.poll_timeout_s = int(config.get("poll_timeout_s", 20) or 20)
         self.reconnect_initial_s = float(config.get("reconnect_initial_s", 2.0) or 2.0)
@@ -487,6 +496,9 @@ class TelegramChannel(BaseChannel):
             seen_local: set[str] = set()
             for item in keys_raw:
                 key = str(item or "").strip()
+                if key.startswith("polling:") or key.startswith("webhook:"):
+                    _, _, maybe_key = key.partition(":")
+                    key = maybe_key.strip()
                 if not key or key in seen_local:
                     continue
                 seen_local.add(key)
@@ -726,23 +738,33 @@ class TelegramChannel(BaseChannel):
             return f"message:{chat_id}:{message_id}:{is_edit_int}"
         return None
 
-    def _remember_update_dedupe_key(self, dedupe_key: str, *, source: str) -> bool:
+    def _is_duplicate_update_dedupe_key(self, dedupe_key: str, *, source: str) -> bool:
         key = str(dedupe_key or "").strip()
         if not key:
-            return True
+            return False
         normalized_source = str(source or "").strip().lower() or "unknown"
-        store_key = f"{normalized_source}:{key}"
-        if store_key in self._seen_update_keys:
+        if key in self._seen_update_keys:
             self._signals["update_duplicate_skip_count"] += 1
             if normalized_source == "webhook":
                 self._signals["webhook_update_duplicate_count"] += 1
-            return False
-        self._seen_update_keys.add(store_key)
-        self._seen_update_order.append(store_key)
+            return True
+        return False
+
+    def _commit_update_dedupe_key(self, dedupe_key: str) -> None:
+        key = str(dedupe_key or "").strip()
+        if not key or key in self._seen_update_keys:
+            return
+        self._seen_update_keys.add(key)
+        self._seen_update_order.append(key)
         while len(self._seen_update_order) > self._update_dedupe_limit:
             oldest = self._seen_update_order.popleft()
             self._seen_update_keys.discard(oldest)
         self._schedule_dedupe_state_persist()
+
+    def _remember_update_dedupe_key(self, dedupe_key: str, *, source: str) -> bool:
+        if self._is_duplicate_update_dedupe_key(dedupe_key, source=source):
+            return False
+        self._commit_update_dedupe_key(dedupe_key)
         return True
 
     async def _ensure_bot(self) -> Any:
@@ -1194,7 +1216,7 @@ class TelegramChannel(BaseChannel):
                 backoff = self.reconnect_initial_s
                 for item in updates:
                     dedupe_key = self._build_update_dedupe_key(item)
-                    if dedupe_key and not self._remember_update_dedupe_key(dedupe_key, source="polling"):
+                    if dedupe_key and self._is_duplicate_update_dedupe_key(dedupe_key, source="polling"):
                         continue
                     update_id = self._coerce_update_id(getattr(item, "update_id", None))
                     if update_id is not None and update_id < self._offset:
@@ -1203,6 +1225,8 @@ class TelegramChannel(BaseChannel):
                     processed_ok = await self._handle_update(item)
                     if not processed_ok:
                         raise RuntimeError("telegram update processing failed")
+                    if dedupe_key:
+                        self._commit_update_dedupe_key(dedupe_key)
                     if update_id is None:
                         continue
                     self._offset = max(self._offset, update_id + 1)
@@ -1670,7 +1694,7 @@ class TelegramChannel(BaseChannel):
         self._signals["webhook_update_received_count"] += 1
         normalized = self._normalize_webhook_payload(payload)
         dedupe_key = self._build_update_dedupe_key(normalized)
-        if dedupe_key and not self._remember_update_dedupe_key(dedupe_key, source="webhook"):
+        if dedupe_key and self._is_duplicate_update_dedupe_key(dedupe_key, source="webhook"):
             return False
 
         try:
@@ -1680,7 +1704,10 @@ class TelegramChannel(BaseChannel):
             return False
 
         try:
-            return bool(await self._handle_update(item))
+            processed = bool(await self._handle_update(item))
+            if processed and dedupe_key:
+                self._commit_update_dedupe_key(dedupe_key)
+            return processed
         except Exception as exc:
             self._last_error = str(exc)
             logger.warning("telegram webhook update processing failed error={}", exc)

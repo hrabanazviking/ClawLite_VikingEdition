@@ -18,7 +18,7 @@ class FakeWebSearchTool(Tool):
         return {"type": "object", "properties": {"query": {"type": "string"}}}
 
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
-        return f"query:{arguments.get('query', '')}:{ctx.session_id}"
+        return f"query:{arguments.get('query', '')}:{ctx.session_id}:{ctx.channel}:{ctx.user_id}"
 
 
 class FakeExecTool(Tool):
@@ -87,8 +87,39 @@ def test_run_skill_dispatches_script_to_tool_registry(tmp_path: Path) -> None:
         reg.register(FakeWebSearchTool())
         tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
         reg.register(tool)
-        out = await tool.run({"name": "web", "query": "nanobot"}, ToolContext(session_id="s3"))
-        assert out == "query:nanobot:s3"
+        out = await tool.run(
+            {"name": "web", "query": "nanobot"},
+            ToolContext(session_id="s3", channel="cli", user_id="u3"),
+        )
+        assert out == "query:nanobot:s3:cli:u3"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_script_respects_channel_safety_policy(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "web",
+        "name: web\ndescription: web\nscript: web_search",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["web_search"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(FakeWebSearchTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        reg.register(tool)
+        out = await tool.run(
+            {"name": "web", "query": "nanobot"},
+            ToolContext(session_id="s3", channel="telegram", user_id="u3"),
+        )
+        assert out == "skill_blocked:web:tool_blocked_by_safety_policy:web_search:telegram"
 
     asyncio.run(_scenario())
 

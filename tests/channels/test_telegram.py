@@ -2612,6 +2612,48 @@ def test_telegram_handle_webhook_update_normalizes_callback_payload_and_dedupes(
     asyncio.run(_scenario())
 
 
+def test_telegram_webhook_failed_processing_allows_redelivery_then_commits_dedupe(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dedupe_state_path": str(tmp_path / "telegram-dedupe.json"),
+            }
+        )
+        payload = {
+            "update_id": 990,
+            "message": {
+                "message_id": 55,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 7, "username": "alice"},
+                "text": "retry me",
+            },
+        }
+
+        attempts = 0
+
+        async def _flaky_handle(_: object) -> bool:
+            nonlocal attempts
+            attempts += 1
+            return attempts >= 2
+
+        channel._handle_update = _flaky_handle  # type: ignore[method-assign]
+
+        first = await channel.handle_webhook_update(payload)
+        second = await channel.handle_webhook_update(payload)
+        third = await channel.handle_webhook_update(payload)
+
+        assert first is False
+        assert second is True
+        assert third is False
+        assert attempts == 2
+        signals = channel.signals()
+        assert signals["update_duplicate_skip_count"] == 1
+        assert signals["webhook_update_duplicate_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_dedupe_skips_duplicate_callback_query_without_update_id(tmp_path: Path) -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict[str, object]]] = []
@@ -2653,6 +2695,36 @@ def test_telegram_dedupe_skips_duplicate_callback_query_without_update_id(tmp_pa
         assert len(emitted) == 1
         signals = channel.signals()
         assert signals["update_duplicate_skip_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_dedupe_is_unified_across_polling_and_webhook(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dedupe_state_path": str(tmp_path / "telegram-dedupe.json"),
+            }
+        )
+        assert channel._remember_update_dedupe_key("update:991", source="polling") is True
+
+        payload = {
+            "update_id": 991,
+            "message": {
+                "message_id": 56,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 7, "username": "alice"},
+                "text": "duplicate across mode",
+            },
+        }
+
+        processed = await channel.handle_webhook_update(payload)
+
+        assert processed is False
+        signals = channel.signals()
+        assert signals["update_duplicate_skip_count"] == 1
+        assert signals["webhook_update_duplicate_count"] == 1
 
     asyncio.run(_scenario())
 

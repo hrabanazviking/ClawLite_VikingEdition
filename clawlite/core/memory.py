@@ -108,6 +108,7 @@ class MemoryStore:
     _MAX_CURATED_SESSIONS_PER_FACT = 12
     _MAX_CHECKPOINT_SOURCES = 4096
     _MAX_CHECKPOINT_SIGNATURES = 4096
+    _MAX_QUALITY_HISTORY = 24
     _RECENCY_MAX_BOOST = 0.35
     _RECENCY_HALF_LIFE_HOURS = 24.0 * 21.0
     _TEMPORAL_INTENT_MATCH_BOOST = 0.2
@@ -304,6 +305,7 @@ class MemoryStore:
         self.branch_head_path = self.versions_path / "HEAD"
         self.profile_path = self.emotional_path / "profile.json"
         self._legacy_profile_path = self.memory_home / "profile.json"
+        self.quality_state_path = self.memory_home / "quality-state.json"
 
         if curated_path:
             self.curated_path = Path(curated_path)
@@ -345,12 +347,12 @@ class MemoryStore:
         self.shared_path.mkdir(parents=True, exist_ok=True)
 
         if (not self.profile_path.exists()) and self._legacy_profile_path.exists():
-            self.profile_path.write_text(self._legacy_profile_path.read_text(encoding="utf-8"), encoding="utf-8")
+            self._atomic_write_text(self.profile_path, self._legacy_profile_path.read_text(encoding="utf-8"))
 
         if (not self._embeddings_path_explicit) and (not self.embeddings_path.exists()):
             legacy_embeddings_path = self.history_path.parent / "embeddings.jsonl"
             if legacy_embeddings_path != self.embeddings_path and legacy_embeddings_path.exists():
-                self.embeddings_path.write_text(legacy_embeddings_path.read_text(encoding="utf-8"), encoding="utf-8")
+                self._atomic_write_text(self.embeddings_path, legacy_embeddings_path.read_text(encoding="utf-8"))
 
         self._ensure_file(self.history_path, default="")
         if self.curated_path is not None:
@@ -361,6 +363,7 @@ class MemoryStore:
         self.embeddings_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_file(self.embeddings_path, default="")
         self._ensure_json_file(self.profile_path, self._default_profile())
+        self._ensure_json_file(self.quality_state_path, self._default_quality_state())
         self._ensure_json_file(self.privacy_path, self._default_privacy())
         self._ensure_json_file(self.shared_optin_path, {})
         self._ensure_file(self.privacy_audit_path, default="")
@@ -414,7 +417,53 @@ class MemoryStore:
     def _ensure_file(path: Path, *, default: str) -> None:
         if path.exists():
             return
-        path.write_text(default, encoding="utf-8")
+        MemoryStore._atomic_write_text(path, default)
+
+    @staticmethod
+    def _flush_and_fsync(handle: Any) -> None:
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fsync_parent_dir(path: Path) -> None:
+        parent = path.parent
+        try:
+            dir_fd = os.open(str(parent), os.O_RDONLY)
+        except Exception:
+            return
+        try:
+            os.fsync(dir_fd)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with temp_path.open("w", encoding="utf-8") as fh:
+                fh.write(content)
+                MemoryStore._flush_and_fsync(fh)
+            os.replace(temp_path, path)
+            MemoryStore._fsync_parent_dir(path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+
+    def _atomic_write_text_locked(self, path: Path, content: str) -> None:
+        with self._locked_file(path, "a+", exclusive=True):
+            self._atomic_write_text(path, content)
 
     @staticmethod
     def _utcnow_iso() -> str:
@@ -459,6 +508,174 @@ class MemoryStore:
             },
         }
 
+    @staticmethod
+    def _default_quality_state() -> dict[str, Any]:
+        return {
+            "version": 1,
+            "updated_at": "",
+            "baseline": {},
+            "current": {},
+            "history": [],
+        }
+
+    @staticmethod
+    def _quality_float(value: Any, *, minimum: float = 0.0, maximum: float = 1.0, default: float = 0.0) -> float:
+        try:
+            raw = float(value)
+        except Exception:
+            raw = default
+        return max(minimum, min(maximum, raw))
+
+    @staticmethod
+    def _quality_int(value: Any, *, minimum: int = 0, default: int = 0) -> int:
+        try:
+            raw = int(value)
+        except Exception:
+            raw = default
+        return max(minimum, raw)
+
+    def quality_state_snapshot(self) -> dict[str, Any]:
+        payload = self._load_json_dict(self.quality_state_path, self._default_quality_state())
+        history_raw = payload.get("history", [])
+        history = history_raw if isinstance(history_raw, list) else []
+        baseline = payload.get("baseline", {}) if isinstance(payload.get("baseline", {}), dict) else {}
+        current = payload.get("current", {}) if isinstance(payload.get("current", {}), dict) else {}
+        return {
+            "version": 1,
+            "updated_at": str(payload.get("updated_at", "") or ""),
+            "baseline": baseline,
+            "current": current,
+            "history": history,
+        }
+
+    def update_quality_state(
+        self,
+        *,
+        retrieval_metrics: dict[str, Any] | None = None,
+        turn_stability_metrics: dict[str, Any] | None = None,
+        semantic_metrics: dict[str, Any] | None = None,
+        gateway_metrics: dict[str, Any] | None = None,
+        sampled_at: str = "",
+    ) -> dict[str, Any]:
+        previous_state = self.quality_state_snapshot()
+        previous = previous_state.get("current", {}) if isinstance(previous_state.get("current", {}), dict) else {}
+
+        retrieval_raw = retrieval_metrics if isinstance(retrieval_metrics, dict) else {}
+        turn_raw = turn_stability_metrics if isinstance(turn_stability_metrics, dict) else {}
+        semantic_raw = semantic_metrics if isinstance(semantic_metrics, dict) else {}
+
+        attempts = self._quality_int(retrieval_raw.get("attempts"))
+        hits = self._quality_int(retrieval_raw.get("hits"))
+        rewrites = self._quality_int(retrieval_raw.get("rewrites"))
+        if hits > attempts:
+            hits = attempts
+        hit_rate = self._quality_float((float(hits) / float(attempts)) if attempts else retrieval_raw.get("hit_rate", 0.0))
+
+        turn_successes = self._quality_int(turn_raw.get("successes"))
+        turn_errors = self._quality_int(turn_raw.get("errors"))
+        turn_total = turn_successes + turn_errors
+        success_rate = self._quality_float(
+            (float(turn_successes) / float(turn_total)) if turn_total else turn_raw.get("success_rate", 1.0),
+            default=1.0,
+        )
+        error_rate = self._quality_float(1.0 - success_rate)
+
+        semantic_coverage = self._quality_float(semantic_raw.get("coverage_ratio", 0.0))
+
+        score_float = (hit_rate * 55.0) + (success_rate * 30.0) + (semantic_coverage * 15.0)
+        score = self._quality_int(round(score_float), minimum=0)
+        if score > 100:
+            score = 100
+
+        previous_score = self._quality_int(previous.get("score", 0))
+        previous_hit_rate = self._quality_float(previous.get("retrieval", {}).get("hit_rate", 0.0)) if isinstance(previous.get("retrieval", {}), dict) else 0.0
+
+        baseline_payload = previous_state.get("baseline", {}) if isinstance(previous_state.get("baseline", {}), dict) else {}
+        baseline_score = self._quality_int(baseline_payload.get("score", score), default=score)
+        baseline_hit_rate = (
+            self._quality_float(baseline_payload.get("retrieval", {}).get("hit_rate", hit_rate))
+            if isinstance(baseline_payload.get("retrieval", {}), dict)
+            else hit_rate
+        )
+
+        score_delta_prev = score - previous_score
+        score_delta_baseline = score - baseline_score
+        hit_rate_delta_prev = round(hit_rate - previous_hit_rate, 6)
+        hit_rate_delta_baseline = round(hit_rate - baseline_hit_rate, 6)
+
+        if previous:
+            if score_delta_prev <= -5 or hit_rate_delta_prev <= -0.08:
+                drift_assessment = "degrading"
+            elif score_delta_prev >= 5 or hit_rate_delta_prev >= 0.08:
+                drift_assessment = "improving"
+            else:
+                drift_assessment = "stable"
+        else:
+            drift_assessment = "baseline"
+
+        recommendations: list[str] = []
+        if attempts < 5:
+            recommendations.append("Increase retrieval sample size to reduce score variance.")
+        if hit_rate < 0.7:
+            recommendations.append("Improve retrieval hit rate with stronger memory curation and query rewrites.")
+        if error_rate > 0.2:
+            recommendations.append("Reduce turn error rate by investigating recent memory and privacy failures.")
+        if bool(semantic_raw.get("enabled", False)) and semantic_coverage < 0.6:
+            recommendations.append("Run semantic embedding backfill to improve retrieval coverage.")
+        if drift_assessment == "degrading":
+            recommendations.append("Quality drift detected; review memory diagnostics and recent regressions.")
+        if not recommendations:
+            recommendations.append("Quality is stable; continue monitoring and periodic memory snapshots.")
+
+        report = {
+            "sampled_at": str(sampled_at or self._utcnow_iso()),
+            "score": score,
+            "retrieval": {
+                "attempts": attempts,
+                "hits": hits,
+                "rewrites": rewrites,
+                "hit_rate": round(hit_rate, 6),
+            },
+            "turn_stability": {
+                "successes": turn_successes,
+                "errors": turn_errors,
+                "success_rate": round(success_rate, 6),
+                "error_rate": round(error_rate, 6),
+            },
+            "drift": {
+                "assessment": drift_assessment,
+                "score_delta_previous": score_delta_prev,
+                "score_delta_baseline": score_delta_baseline,
+                "hit_rate_delta_previous": hit_rate_delta_prev,
+                "hit_rate_delta_baseline": hit_rate_delta_baseline,
+            },
+            "semantic": {
+                "enabled": bool(semantic_raw.get("enabled", False)),
+                "coverage_ratio": round(semantic_coverage, 6),
+            },
+            "recommendations": recommendations,
+        }
+        if isinstance(gateway_metrics, dict) and gateway_metrics:
+            report["gateway"] = gateway_metrics
+
+        history = previous_state.get("history", []) if isinstance(previous_state.get("history", []), list) else []
+        history.append(report)
+        bounded_history = history[-self._MAX_QUALITY_HISTORY :]
+        baseline = baseline_payload if baseline_payload else report
+
+        state = {
+            "version": 1,
+            "updated_at": str(report["sampled_at"]),
+            "baseline": baseline,
+            "current": report,
+            "history": bounded_history,
+        }
+        self._atomic_write_text_locked(
+            self.quality_state_path,
+            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        return report
+
     @classmethod
     def _ensure_json_file(cls, path: Path, default_payload: dict[str, Any]) -> None:
         if path.exists():
@@ -470,7 +687,7 @@ class MemoryStore:
                         return
             except Exception:
                 pass
-        path.write_text(json.dumps(default_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        cls._atomic_write_text(path, json.dumps(default_payload, ensure_ascii=False, indent=2) + "\n")
 
     @staticmethod
     def _load_json_dict(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -487,7 +704,7 @@ class MemoryStore:
 
     @staticmethod
     def _write_json_dict(path: Path, payload: dict[str, Any]) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        MemoryStore._atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
     @staticmethod
     def _normalize_user_id(user_id: str) -> str:
@@ -570,7 +787,7 @@ class MemoryStore:
     def _sync_branch_head_file(self) -> None:
         meta = self._load_branches_metadata()
         current = str(meta.get("current", "main") or "main")
-        self.branch_head_path.write_text(f"{current}\n", encoding="utf-8")
+        self._atomic_write_text(self.branch_head_path, f"{current}\n")
 
     def _set_current_branch(self, name: str) -> None:
         meta = self._load_branches_metadata()
@@ -579,7 +796,7 @@ class MemoryStore:
             raise ValueError(f"unknown branch: {name}")
         meta["current"] = name
         self._save_branches_metadata(meta)
-        self.branch_head_path.write_text(f"{name}\n", encoding="utf-8")
+        self._atomic_write_text(self.branch_head_path, f"{name}\n")
 
     def _advance_branch_head(self, branch_name: str, version_id: str) -> None:
         meta = self._load_branches_metadata()
@@ -652,7 +869,7 @@ class MemoryStore:
         try:
             with self._locked_file(self.privacy_audit_path, "a", exclusive=True) as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                fh.flush()
+                self._flush_and_fsync(fh)
             self._diagnostics["privacy_audit_writes"] = int(self._diagnostics["privacy_audit_writes"]) + 1
         except Exception as exc:
             self._diagnostics["privacy_audit_errors"] = int(self._diagnostics["privacy_audit_errors"]) + 1
@@ -712,6 +929,10 @@ class MemoryStore:
                 with os.fdopen(fd, "wb") as fh:
                     fh.write(key)
                     fh.flush()
+                    try:
+                        os.fsync(fh.fileno())
+                    except Exception:
+                        pass
             finally:
                 try:
                     os.chmod(self.privacy_key_path, 0o600)
@@ -1059,7 +1280,7 @@ class MemoryStore:
         }
         with self._locked_file(self.embeddings_path, "a", exclusive=True) as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
         try:
             self.backend.upsert_embedding(
                 str(record_id or ""),
@@ -1133,7 +1354,7 @@ class MemoryStore:
             fh.truncate()
             if kept_lines:
                 fh.write("\n".join(kept_lines) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
         try:
             self.backend.delete_embeddings(list(removed_ids))
         except Exception:
@@ -1677,7 +1898,7 @@ class MemoryStore:
             fh.seek(0)
             fh.truncate()
             fh.write("\n".join(kept) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
 
     def _read_curated_facts(self) -> list[dict[str, object]]:
         if self.curated_path is None:
@@ -1723,10 +1944,7 @@ class MemoryStore:
         normalized.sort(key=self._curated_rank, reverse=True)
         payload = {"version": 2, "facts": normalized[: self._MAX_CURATED_FACTS]}
         encoded = json.dumps(payload, ensure_ascii=False, indent=2)
-        with self._locked_file(self.curated_path, "w", exclusive=True) as fh:
-            fh.write(encoded)
-            fh.write("\n")
-            fh.flush()
+        self._atomic_write_text_locked(self.curated_path, encoded + "\n")
 
     def _read_curated_facts_from(self, curated_path: Path) -> list[dict[str, object]]:
         with self._locked_file(curated_path, "r", exclusive=False) as fh:
@@ -1768,10 +1986,7 @@ class MemoryStore:
         normalized.sort(key=self._curated_rank, reverse=True)
         payload = {"version": 2, "facts": normalized[: self._MAX_CURATED_FACTS]}
         encoded = json.dumps(payload, ensure_ascii=False, indent=2)
-        with self._locked_file(curated_path, "w", exclusive=True) as fh:
-            fh.write(encoded)
-            fh.write("\n")
-            fh.flush()
+        self._atomic_write_text_locked(curated_path, encoded + "\n")
 
     def _read_history_records_from(self, history_path: Path) -> list[MemoryRecord]:
         out: list[MemoryRecord] = []
@@ -1951,7 +2166,7 @@ class MemoryStore:
         self._ensure_file(resource_file, default="")
         with self._locked_file(resource_file, "a", exclusive=True) as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
         try:
             self.backend.upsert_layer_record(
                 layer=MemoryLayer.RESOURCE.value,
@@ -1994,7 +2209,7 @@ class MemoryStore:
             "updated_at": self._utcnow_iso(),
             "items": rows,
         }
-        item_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._atomic_write_text_locked(item_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
     def _update_category_summary_file(self, category: str) -> None:
         rows = self._load_category_items(category)
@@ -2025,7 +2240,7 @@ class MemoryStore:
             *(recent_lines or ["- none"]),
             "",
         ]
-        category_path.write_text("\n".join(body), encoding="utf-8")
+        self._atomic_write_text_locked(category_path, "\n".join(body))
 
     def _upsert_item_layer(self, record: MemoryRecord) -> None:
         category = str(record.category or "context")
@@ -2108,7 +2323,7 @@ class MemoryStore:
             "updated_at": self._utcnow_iso(),
             "items": rows,
         }
-        item_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._atomic_write_text_locked(item_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
     def _update_scope_category_summary_file(self, scope: dict[str, Path], category: str) -> None:
         rows = self._load_scope_category_items(scope, category)
@@ -2139,7 +2354,7 @@ class MemoryStore:
             *(recent_lines or ["- none"]),
             "",
         ]
-        category_path.write_text("\n".join(body), encoding="utf-8")
+        self._atomic_write_text_locked(category_path, "\n".join(body))
 
     def _persist_layer_artifacts_to_scope(self, scope: dict[str, Path], record: MemoryRecord, *, raw_resource_text: str) -> None:
         category = str(record.category or "context")
@@ -2155,7 +2370,7 @@ class MemoryStore:
         self._ensure_file(resource_file, default="")
         with self._locked_file(resource_file, "a", exclusive=True) as fh:
             fh.write(json.dumps(resource_payload, ensure_ascii=False) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
 
         rows = self._load_scope_category_items(scope, category)
         row_payload = self._serialize_hit(record)
@@ -2237,7 +2452,7 @@ class MemoryStore:
                     fh.truncate()
                     if kept_lines:
                         fh.write("\n".join(kept_lines) + "\n")
-                    fh.flush()
+                    self._flush_and_fsync(fh)
             except Exception:
                 continue
         return deleted
@@ -2286,7 +2501,7 @@ class MemoryStore:
                 fh.truncate()
                 if kept_lines:
                     fh.write("\n".join(kept_lines) + "\n")
-                fh.flush()
+                self._flush_and_fsync(fh)
         except Exception as exc:
             self._diagnostics["last_error"] = str(exc)
 
@@ -2418,7 +2633,7 @@ class MemoryStore:
             self._ensure_scope_paths(scope)
             with self._locked_file(scope["history"], "a", exclusive=True) as fh:
                 fh.write(json.dumps(stored_payload, ensure_ascii=False) + "\n")
-                fh.flush()
+                self._flush_and_fsync(fh)
             try:
                 self._persist_layer_artifacts_to_scope(scope, row, raw_resource_text=str(raw_resource_text or clean))
             except Exception:
@@ -2426,7 +2641,7 @@ class MemoryStore:
 
         with self._locked_file(self.history_path, "a", exclusive=True) as fh:
             fh.write(json.dumps(stored_payload, ensure_ascii=False) + "\n")
-            fh.flush()
+            self._flush_and_fsync(fh)
         try:
             self._persist_layer_artifacts(record=row, raw_resource_text=str(raw_resource_text or clean))
         except Exception:
@@ -2481,9 +2696,7 @@ class MemoryStore:
             rewritten = "\n".join(valid_lines)
             if rewritten:
                 rewritten = f"{rewritten}\n"
-            with self._locked_file(self.history_path, "w", exclusive=True) as fh:
-                fh.write(rewritten)
-                fh.flush()
+            self._atomic_write_text_locked(self.history_path, rewritten)
             self._diagnostics["history_repaired_files"] = int(self._diagnostics["history_repaired_files"]) + 1
             self._diagnostics["last_error"] = ""
         except Exception as exc:
@@ -2980,7 +3193,7 @@ class MemoryStore:
             checkpoints_fh.seek(0)
             checkpoints_fh.truncate()
             checkpoints_fh.write(self._format_checkpoints(checkpoints))
-            checkpoints_fh.flush()
+            self._flush_and_fsync(checkpoints_fh)
 
         curated_candidates: list[tuple[str, str]] = []
         for line in summary_lines:
@@ -3142,7 +3355,7 @@ class MemoryStore:
             checkpoints_fh.seek(0)
             checkpoints_fh.truncate()
             checkpoints_fh.write(self._format_checkpoints(checkpoints))
-            checkpoints_fh.flush()
+            self._flush_and_fsync(checkpoints_fh)
 
         curated_candidates: list[tuple[str, str]] = []
         for line in summary_lines:
@@ -3329,10 +3542,7 @@ class MemoryStore:
                 stored = asdict(parsed)
                 stored["text"] = self._encrypt_text_for_category(str(parsed.text or ""), parsed.category)
                 history_lines.append(json.dumps(stored, ensure_ascii=False))
-        with self._locked_file(self.history_path, "w", exclusive=True) as fh:
-            if history_lines:
-                fh.write("\n".join(history_lines) + "\n")
-            fh.flush()
+        self._atomic_write_text_locked(self.history_path, ("\n".join(history_lines) + "\n") if history_lines else "")
 
         if self.curated_path is not None and isinstance(curated_rows, list):
             facts = []
@@ -3342,9 +3552,7 @@ class MemoryStore:
             self._write_curated_facts(facts)
 
         if isinstance(checkpoints, dict):
-            with self._locked_file(self.checkpoints_path, "w", exclusive=True) as fh:
-                fh.write(self._format_checkpoints(checkpoints))
-                fh.flush()
+            self._atomic_write_text_locked(self.checkpoints_path, self._format_checkpoints(checkpoints))
 
         if isinstance(profile, dict):
             merged_profile = self._default_profile()

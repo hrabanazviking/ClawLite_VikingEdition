@@ -269,6 +269,23 @@ def test_memory_add_is_concurrency_safe(tmp_path: Path) -> None:
     assert len({row.id for row in rows}) == 60
 
 
+def test_memory_add_flushes_and_fsyncs_append_paths(tmp_path: Path, monkeypatch) -> None:
+    fsync_calls: list[int] = []
+    real_fsync = __import__("os").fsync
+
+    def _spy_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr("clawlite.core.memory.os.fsync", _spy_fsync)
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    baseline_calls = len(fsync_calls)
+    store.add("remember fsync durability path", source="session:fsync")
+
+    assert len(fsync_calls) > baseline_calls
+
+
 def test_memory_consolidate_promotes_repeated_facts_across_sessions(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     messages = [
@@ -1241,3 +1258,53 @@ def test_memory_merge_creates_snapshot_and_updates_target_head(tmp_path: Path) -
     assert merged["target_head_before"] == main_snap
     assert merged["target_head_after"] == merged["version"]
     assert listed["branches"]["main"]["head"] == merged["version"]
+
+
+def test_memory_quality_state_update_persists_report_with_drift_and_recommendations(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+
+    first = store.update_quality_state(
+        retrieval_metrics={"attempts": 10, "hits": 8, "rewrites": 1},
+        turn_stability_metrics={"successes": 9, "errors": 1},
+        semantic_metrics={"enabled": True, "coverage_ratio": 0.75},
+        sampled_at="2026-03-05T10:00:00+00:00",
+    )
+    second = store.update_quality_state(
+        retrieval_metrics={"attempts": 10, "hits": 4, "rewrites": 2},
+        turn_stability_metrics={"successes": 6, "errors": 4},
+        semantic_metrics={"enabled": True, "coverage_ratio": 0.45},
+        sampled_at="2026-03-05T11:00:00+00:00",
+    )
+
+    assert first["score"] >= second["score"]
+    snapshot = store.quality_state_snapshot()
+    assert snapshot["version"] == 1
+    assert snapshot["updated_at"] == "2026-03-05T11:00:00+00:00"
+    assert snapshot["current"]["score"] == second["score"]
+    assert snapshot["current"]["drift"]["assessment"] in {"stable", "degrading", "improving", "baseline"}
+    assert isinstance(snapshot["current"]["recommendations"], list)
+    assert snapshot["current"]["recommendations"]
+    assert len(snapshot["history"]) == 2
+    assert store.quality_state_path.exists()
+
+
+def test_memory_quality_state_history_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    monkeypatch.setattr(store, "_MAX_QUALITY_HISTORY", 3)
+
+    for idx in range(5):
+        store.update_quality_state(
+            retrieval_metrics={"attempts": 5, "hits": max(0, 5 - idx), "rewrites": idx},
+            turn_stability_metrics={"successes": 5, "errors": idx},
+            semantic_metrics={"enabled": False, "coverage_ratio": 0.0},
+            sampled_at=f"2026-03-05T10:0{idx}:00+00:00",
+        )
+
+    snapshot = store.quality_state_snapshot()
+    assert len(snapshot["history"]) == 3
+    sampled = [row["sampled_at"] for row in snapshot["history"]]
+    assert sampled == [
+        "2026-03-05T10:02:00+00:00",
+        "2026-03-05T10:03:00+00:00",
+        "2026-03-05T10:04:00+00:00",
+    ]
