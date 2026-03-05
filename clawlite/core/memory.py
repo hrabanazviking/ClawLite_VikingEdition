@@ -109,6 +109,7 @@ class MemoryStore:
     _MAX_CHECKPOINT_SOURCES = 4096
     _MAX_CHECKPOINT_SIGNATURES = 4096
     _MAX_QUALITY_HISTORY = 24
+    _MAX_QUALITY_TUNING_RECENT_ACTIONS = 20
     _RECENCY_MAX_BOOST = 0.35
     _RECENCY_HALF_LIFE_HOURS = 24.0 * 21.0
     _TEMPORAL_INTENT_MATCH_BOOST = 0.2
@@ -516,6 +517,21 @@ class MemoryStore:
             "baseline": {},
             "current": {},
             "history": [],
+            "tuning": MemoryStore._default_quality_tuning_state(),
+        }
+
+    @staticmethod
+    def _default_quality_tuning_state() -> dict[str, Any]:
+        return {
+            "degrading_streak": 0,
+            "last_action": "",
+            "last_action_at": "",
+            "last_action_status": "",
+            "last_reason": "",
+            "next_run_at": "",
+            "last_run_at": "",
+            "last_error": "",
+            "recent_actions": [],
         }
 
     @staticmethod
@@ -540,13 +556,105 @@ class MemoryStore:
         history = history_raw if isinstance(history_raw, list) else []
         baseline = payload.get("baseline", {}) if isinstance(payload.get("baseline", {}), dict) else {}
         current = payload.get("current", {}) if isinstance(payload.get("current", {}), dict) else {}
+        tuning = self._normalize_quality_tuning_state(payload.get("tuning", {}))
         return {
             "version": 1,
             "updated_at": str(payload.get("updated_at", "") or ""),
             "baseline": baseline,
             "current": current,
             "history": history,
+            "tuning": tuning,
         }
+
+    def _normalize_quality_tuning_state(self, raw: Any) -> dict[str, Any]:
+        payload = dict(raw) if isinstance(raw, dict) else {}
+        defaults = self._default_quality_tuning_state()
+        recent_actions_raw = payload.get("recent_actions", payload.get("recentActions", defaults["recent_actions"]))
+        if not isinstance(recent_actions_raw, list):
+            recent_actions_raw = []
+
+        normalized_recent_actions: list[dict[str, Any]] = []
+        for row in recent_actions_raw:
+            if isinstance(row, dict):
+                entry = dict(row)
+                for key in ("action", "status", "reason", "at"):
+                    if key in entry:
+                        entry[key] = str(entry.get(key, "") or "")
+                normalized_recent_actions.append(entry)
+            elif row is not None:
+                normalized_recent_actions.append({"action": str(row)})
+
+        return {
+            "degrading_streak": self._quality_int(payload.get("degrading_streak", defaults["degrading_streak"])),
+            "last_action": str(payload.get("last_action", defaults["last_action"]) or ""),
+            "last_action_at": str(payload.get("last_action_at", defaults["last_action_at"]) or ""),
+            "last_action_status": str(payload.get("last_action_status", defaults["last_action_status"]) or ""),
+            "last_reason": str(payload.get("last_reason", defaults["last_reason"]) or ""),
+            "next_run_at": str(payload.get("next_run_at", defaults["next_run_at"]) or ""),
+            "last_run_at": str(payload.get("last_run_at", defaults["last_run_at"]) or ""),
+            "last_error": str(payload.get("last_error", defaults["last_error"]) or ""),
+            "recent_actions": normalized_recent_actions[-self._MAX_QUALITY_TUNING_RECENT_ACTIONS :],
+        }
+
+    def _merge_quality_tuning_state(self, current: Any, patch: Any) -> dict[str, Any]:
+        merged = self._normalize_quality_tuning_state(current)
+        payload = dict(patch) if isinstance(patch, dict) else {}
+        if not payload:
+            return merged
+
+        for key in (
+            "degrading_streak",
+            "last_action",
+            "last_action_at",
+            "last_action_status",
+            "last_reason",
+            "next_run_at",
+            "last_run_at",
+            "last_error",
+        ):
+            if key not in payload:
+                continue
+            if key == "degrading_streak":
+                merged[key] = self._quality_int(payload.get(key), minimum=0, default=int(merged.get(key, 0) or 0))
+            else:
+                merged[key] = str(payload.get(key, "") or "")
+
+        if "recentActions" in payload and "recent_actions" not in payload:
+            recent_patch_raw = payload.get("recentActions")
+        else:
+            recent_patch_raw = payload.get("recent_actions")
+
+        if isinstance(recent_patch_raw, list):
+            merged["recent_actions"] = self._normalize_quality_tuning_state(
+                {"recent_actions": list(merged.get("recent_actions", [])) + list(recent_patch_raw)}
+            )["recent_actions"]
+        elif isinstance(recent_patch_raw, dict):
+            merged["recent_actions"] = self._normalize_quality_tuning_state(
+                {"recent_actions": list(merged.get("recent_actions", [])) + [recent_patch_raw]}
+            )["recent_actions"]
+
+        return merged
+
+    def update_quality_tuning_state(self, tuning_patch: dict[str, Any] | None = None) -> dict[str, Any]:
+        previous_state = self.quality_state_snapshot()
+        tuning = self._merge_quality_tuning_state(previous_state.get("tuning", {}), tuning_patch)
+        updated_at = str(previous_state.get("updated_at", "") or self._utcnow_iso())
+        if isinstance(tuning_patch, dict) and tuning_patch:
+            updated_at = self._utcnow_iso()
+
+        state = {
+            "version": 1,
+            "updated_at": updated_at,
+            "baseline": previous_state.get("baseline", {}),
+            "current": previous_state.get("current", {}),
+            "history": previous_state.get("history", []),
+            "tuning": tuning,
+        }
+        self._atomic_write_text_locked(
+            self.quality_state_path,
+            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        return tuning
 
     def update_quality_state(
         self,
@@ -556,6 +664,7 @@ class MemoryStore:
         semantic_metrics: dict[str, Any] | None = None,
         gateway_metrics: dict[str, Any] | None = None,
         sampled_at: str = "",
+        tuning_patch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         previous_state = self.quality_state_snapshot()
         previous = previous_state.get("current", {}) if isinstance(previous_state.get("current", {}), dict) else {}
@@ -669,6 +778,7 @@ class MemoryStore:
             "baseline": baseline,
             "current": report,
             "history": bounded_history,
+            "tuning": self._merge_quality_tuning_state(previous_state.get("tuning", {}), tuning_patch),
         }
         self._atomic_write_text_locked(
             self.quality_state_path,

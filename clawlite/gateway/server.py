@@ -97,6 +97,7 @@ class DiagnosticsResponse(BaseModel):
     autonomy_wake: dict[str, Any] = {}
     bootstrap: dict[str, Any]
     memory_monitor: dict[str, Any] = {}
+    memory_quality_tuning: dict[str, Any] = {}
     engine: dict[str, Any] = {}
     environment: dict[str, Any] = {}
     http: dict[str, Any] = {}
@@ -380,6 +381,7 @@ class GatewayLifecycleState:
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
                 "proactive_monitor": {"enabled": False, "running": False, "last_error": ""},
+                "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
                 "bootstrap": {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
@@ -989,6 +991,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
     lifecycle.components["proactive_monitor"]["enabled"] = bool(runtime.memory_monitor is not None)
+    lifecycle.components["memory_quality_tuning"]["enabled"] = bool(cfg.gateway.autonomy.tuning_loop_enabled)
     proactive_interval_seconds = max(5, int(cfg.gateway.heartbeat.interval_s or 1800))
     proactive_task: asyncio.Task[Any] | None = None
     proactive_running = False
@@ -1006,6 +1009,35 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "last_result": "",
         "last_error": "",
         "last_run_iso": "",
+    }
+    tuning_loop_interval_seconds = max(1, int(cfg.gateway.autonomy.tuning_loop_interval_s or 1800))
+    tuning_loop_timeout_seconds = max(1.0, float(cfg.gateway.autonomy.tuning_loop_timeout_s or 45.0))
+    tuning_loop_cooldown_seconds = max(0, int(cfg.gateway.autonomy.tuning_loop_cooldown_s or 300))
+    tuning_degrading_streak_threshold = max(1, int(cfg.gateway.autonomy.tuning_degrading_streak_threshold or 2))
+    tuning_recent_actions_limit = max(1, int(cfg.gateway.autonomy.tuning_recent_actions_limit or 20))
+    tuning_error_backoff_seconds = max(1, int(cfg.gateway.autonomy.tuning_error_backoff_s or 900))
+    tuning_actions_per_hour_cap = max(1, int(cfg.gateway.autonomy.action_rate_limit_per_hour or 20))
+    tuning_task: asyncio.Task[Any] | None = None
+    tuning_running = False
+    tuning_stop_event = asyncio.Event()
+    tuning_runner_state: dict[str, Any] = {
+        "enabled": bool(cfg.gateway.autonomy.tuning_loop_enabled),
+        "running": False,
+        "interval_seconds": tuning_loop_interval_seconds,
+        "timeout_seconds": tuning_loop_timeout_seconds,
+        "cooldown_seconds": tuning_loop_cooldown_seconds,
+        "actions_per_hour_cap": tuning_actions_per_hour_cap,
+        "ticks": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "action_count": 0,
+        "last_result": "",
+        "last_error": "",
+        "last_run_iso": "",
+        "next_run_iso": "",
+        "last_action": "",
+        "last_action_status": "",
+        "last_action_reason": "",
     }
     memory_quality_cache: dict[str, Any] = {
         "fingerprint": "",
@@ -1164,6 +1196,333 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             memory_proactive_enabled=bool(runtime.memory_monitor is not None),
         )
 
+    def _parse_iso(value: str) -> dt.datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+
+    def _semantic_metrics_from_payload(payload: Any) -> dict[str, Any]:
+        semantic_raw = payload.get("semantic", {}) if isinstance(payload, dict) else {}
+        if not isinstance(semantic_raw, dict):
+            semantic_raw = {}
+        return {
+            "enabled": bool(semantic_raw.get("enabled", False)),
+            "coverage_ratio": float(semantic_raw.get("coverage_ratio", 0.0) or 0.0),
+            "missing_records": int(semantic_raw.get("missing_records", 0) or 0),
+            "total_records": int(semantic_raw.get("total_records", 0) or 0),
+        }
+
+    async def _collect_semantic_metrics() -> dict[str, Any]:
+        semantic_metrics = {
+            "enabled": False,
+            "coverage_ratio": 0.0,
+            "missing_records": 0,
+            "total_records": 0,
+        }
+        memory_store = getattr(runtime.engine, "memory", None)
+        diagnostics_payload: dict[str, Any] = {}
+
+        analysis_stats_fn = getattr(memory_store, "analysis_stats", None)
+        if callable(analysis_stats_fn):
+            try:
+                raw_payload = await asyncio.wait_for(
+                    asyncio.to_thread(analysis_stats_fn),
+                    timeout=tuning_loop_timeout_seconds,
+                )
+            except Exception:
+                raw_payload = {}
+            if isinstance(raw_payload, dict):
+                diagnostics_payload = raw_payload
+
+        if not diagnostics_payload:
+            analyze_fn = getattr(memory_store, "analyze", None)
+            if callable(analyze_fn):
+                try:
+                    raw_payload = await asyncio.wait_for(
+                        asyncio.to_thread(analyze_fn),
+                        timeout=tuning_loop_timeout_seconds,
+                    )
+                except Exception:
+                    raw_payload = {}
+                if isinstance(raw_payload, dict):
+                    diagnostics_payload = raw_payload
+
+        semantic_metrics.update(_semantic_metrics_from_payload(diagnostics_payload))
+        return semantic_metrics
+
+    async def _collect_memory_quality_inputs() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        retrieval_metrics_snapshot = runtime.engine.retrieval_metrics_snapshot()
+        turn_metrics_snapshot = runtime.engine.turn_metrics_snapshot()
+        retrieval_metrics = {
+            "attempts": int(retrieval_metrics_snapshot.get("retrieval_attempts", 0) or 0),
+            "hits": int(retrieval_metrics_snapshot.get("retrieval_hits", 0) or 0),
+            "rewrites": int(retrieval_metrics_snapshot.get("retrieval_rewrites", 0) or 0),
+        }
+        turn_metrics = {
+            "successes": int(turn_metrics_snapshot.get("turns_success", 0) or 0),
+            "errors": int(turn_metrics_snapshot.get("turns_provider_errors", 0) or 0)
+            + int(turn_metrics_snapshot.get("turns_cancelled", 0) or 0),
+        }
+
+        semantic_metrics = await _collect_semantic_metrics()
+
+        return retrieval_metrics, turn_metrics, semantic_metrics
+
+    async def _start_memory_quality_tuning() -> None:
+        nonlocal tuning_task, tuning_running
+        if tuning_task is not None:
+            tuning_running = True
+            tuning_runner_state["running"] = True
+            return
+
+        tuning_stop_event.clear()
+        tuning_running = True
+        tuning_runner_state["running"] = True
+
+        async def _tick() -> None:
+            now = dt.datetime.now(dt.timezone.utc)
+            now_iso = now.isoformat(timespec="seconds")
+            memory_store = getattr(runtime.engine, "memory", None)
+            update_quality_fn = getattr(memory_store, "update_quality_state", None)
+            snapshot_fn = getattr(memory_store, "quality_state_snapshot", None)
+            update_tuning_fn = getattr(memory_store, "update_quality_tuning_state", None)
+
+            if not callable(update_quality_fn) or not callable(snapshot_fn):
+                tuning_runner_state["last_result"] = "unsupported"
+                tuning_runner_state["last_error"] = "memory_quality_methods_unavailable"
+                tuning_runner_state["last_run_iso"] = now_iso
+                tuning_runner_state["next_run_iso"] = (now + dt.timedelta(seconds=tuning_loop_interval_seconds)).isoformat(timespec="seconds")
+                return
+
+            action = ""
+            action_status = "noop"
+            action_reason = ""
+            tick_error = ""
+            next_wait_seconds = tuning_loop_interval_seconds
+
+            try:
+                retrieval_metrics, turn_metrics, semantic_metrics = await _collect_memory_quality_inputs()
+                report = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        update_quality_fn,
+                        retrieval_metrics=retrieval_metrics,
+                        turn_stability_metrics=turn_metrics,
+                        semantic_metrics={
+                            "enabled": bool(semantic_metrics.get("enabled", False)),
+                            "coverage_ratio": float(semantic_metrics.get("coverage_ratio", 0.0) or 0.0),
+                        },
+                        sampled_at=now_iso,
+                    ),
+                    timeout=tuning_loop_timeout_seconds,
+                )
+                snapshot = await asyncio.wait_for(asyncio.to_thread(snapshot_fn), timeout=tuning_loop_timeout_seconds)
+                tuning_state = snapshot.get("tuning", {}) if isinstance(snapshot, dict) else {}
+
+                drift = str((report.get("drift", {}) if isinstance(report, dict) else {}).get("assessment", "") or "")
+                score = int((report.get("score", 0) if isinstance(report, dict) else 0) or 0)
+                degrading_streak = int(tuning_state.get("degrading_streak", 0) or 0)
+                if drift == "degrading":
+                    degrading_streak += 1
+                else:
+                    degrading_streak = 0
+
+                if drift == "degrading":
+                    if degrading_streak >= (tuning_degrading_streak_threshold + 2) or score <= 40:
+                        severity = "high"
+                    elif degrading_streak >= tuning_degrading_streak_threshold:
+                        severity = "medium"
+                    else:
+                        severity = "low"
+
+                    if severity == "high":
+                        action = "memory_snapshot"
+                        action_reason = "quality_drift_high"
+                    elif severity == "medium":
+                        action = "semantic_backfill"
+                        action_reason = "quality_drift_medium"
+                    else:
+                        action = "notify_operator"
+                        action_reason = "quality_drift_low"
+
+                    last_action_at = _parse_iso(str(tuning_state.get("last_action_at", "") or ""))
+                    in_cooldown = (
+                        last_action_at is not None
+                        and tuning_loop_cooldown_seconds > 0
+                        and (now - last_action_at).total_seconds() < float(tuning_loop_cooldown_seconds)
+                    )
+
+                    recent_actions_raw = tuning_state.get("recent_actions", [])
+                    recent_actions = list(recent_actions_raw) if isinstance(recent_actions_raw, list) else []
+                    recent_actions = recent_actions[-tuning_recent_actions_limit:]
+                    one_hour_ago = now - dt.timedelta(hours=1)
+                    action_events_last_hour = 0
+                    for entry in recent_actions:
+                        if not isinstance(entry, dict):
+                            continue
+                        status = str(entry.get("status", "") or "")
+                        if status in {"cooldown_skipped", "rate_limited", "noop"}:
+                            continue
+                        at_dt = _parse_iso(str(entry.get("at", "") or ""))
+                        if at_dt is None or at_dt < one_hour_ago:
+                            continue
+                        action_events_last_hour += 1
+
+                    if in_cooldown:
+                        action_status = "cooldown_skipped"
+                    elif action_events_last_hour >= tuning_actions_per_hour_cap:
+                        action_status = "rate_limited"
+                    else:
+                        if action == "notify_operator":
+                            channel, target = await _latest_memory_route(memory_store)
+                            await runtime.channels.send(
+                                channel=channel,
+                                target=target,
+                                text=(
+                                    "Memory quality drift detected (low). "
+                                    f"score={score} streak={degrading_streak}. Monitoring in progress."
+                                ),
+                                metadata={
+                                    "source": "memory_quality_tuning",
+                                    "trigger": "quality_loop",
+                                    "severity": "low",
+                                    "drift": drift,
+                                },
+                            )
+                            action_status = "ok"
+                        elif action == "semantic_backfill":
+                            missing_records = int(semantic_metrics.get("missing_records", 0) or 0)
+                            backfill_limit = max(1, min(50, missing_records if missing_records > 0 else 20))
+                            backfill_fn = getattr(memory_store, "backfill_embeddings", None)
+                            if callable(backfill_fn):
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(backfill_fn, limit=backfill_limit),
+                                    timeout=tuning_loop_timeout_seconds,
+                                )
+                                action_status = "ok"
+                            else:
+                                action_status = "unsupported"
+                        elif action == "memory_snapshot":
+                            snapshot_memory_fn = getattr(memory_store, "snapshot", None)
+                            if callable(snapshot_memory_fn):
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(snapshot_memory_fn, "quality-drift-auto"),
+                                    timeout=tuning_loop_timeout_seconds,
+                                )
+                                action_status = "ok"
+                            else:
+                                action_status = "unsupported"
+
+                action_entry = None
+                if action:
+                    action_entry = {
+                        "action": action,
+                        "status": action_status,
+                        "reason": action_reason,
+                        "at": now_iso,
+                    }
+
+                if action_status == "ok":
+                    tuning_runner_state["action_count"] = int(tuning_runner_state.get("action_count", 0) or 0) + 1
+
+                if callable(update_tuning_fn):
+                    tuning_patch: dict[str, Any] = {
+                        "degrading_streak": degrading_streak,
+                        "last_run_at": now_iso,
+                        "next_run_at": (now + dt.timedelta(seconds=tuning_loop_interval_seconds)).isoformat(timespec="seconds"),
+                        "last_error": "",
+                    }
+                    if action_entry is not None:
+                        tuning_patch["last_action"] = action_entry.get("action", "")
+                        tuning_patch["last_action_status"] = action_entry.get("status", "")
+                        tuning_patch["last_reason"] = action_entry.get("reason", "")
+                        tuning_patch["recent_actions"] = [action_entry]
+                        if action_entry.get("status", "") not in {"cooldown_skipped", "rate_limited"}:
+                            tuning_patch["last_action_at"] = action_entry.get("at", "")
+                    await asyncio.wait_for(asyncio.to_thread(update_tuning_fn, tuning_patch), timeout=tuning_loop_timeout_seconds)
+
+                tuning_runner_state["success_count"] = int(tuning_runner_state.get("success_count", 0) or 0) + 1
+                tuning_runner_state["last_result"] = "ok"
+                tuning_runner_state["last_error"] = ""
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                tick_error = str(exc)
+                next_wait_seconds = tuning_error_backoff_seconds
+                tuning_runner_state["error_count"] = int(tuning_runner_state.get("error_count", 0) or 0) + 1
+                tuning_runner_state["last_result"] = "error"
+                tuning_runner_state["last_error"] = tick_error
+                bind_event("memory.quality.tuning").warning("tuning tick failed error={}", exc)
+                if callable(update_tuning_fn):
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                update_tuning_fn,
+                                {
+                                    "last_run_at": now_iso,
+                                    "next_run_at": (now + dt.timedelta(seconds=tuning_error_backoff_seconds)).isoformat(timespec="seconds"),
+                                    "last_error": tick_error,
+                                },
+                            ),
+                            timeout=tuning_loop_timeout_seconds,
+                        )
+                    except Exception:
+                        pass
+            finally:
+                tuning_runner_state["last_run_iso"] = now_iso
+                tuning_runner_state["next_run_iso"] = (now + dt.timedelta(seconds=next_wait_seconds)).isoformat(timespec="seconds")
+                tuning_runner_state["last_action"] = str(action or "")
+                tuning_runner_state["last_action_status"] = str(action_status or "")
+                tuning_runner_state["last_action_reason"] = str(action_reason or "")
+                if tick_error and not tuning_runner_state.get("last_error"):
+                    tuning_runner_state["last_error"] = tick_error
+
+        async def _loop() -> None:
+            first_tick = True
+            while tuning_running:
+                if not first_tick:
+                    try:
+                        await asyncio.wait_for(tuning_stop_event.wait(), timeout=tuning_loop_interval_seconds)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        pass
+                    if tuning_stop_event.is_set() or not tuning_running:
+                        break
+                first_tick = False
+
+                tuning_runner_state["ticks"] = int(tuning_runner_state.get("ticks", 0) or 0) + 1
+                await _tick()
+
+        tuning_task = asyncio.create_task(_loop())
+        bind_event("memory.quality.tuning").info(
+            "memory quality tuning loop started interval={} timeout={}",
+            tuning_loop_interval_seconds,
+            tuning_loop_timeout_seconds,
+        )
+
+    async def _stop_memory_quality_tuning() -> None:
+        nonlocal tuning_task, tuning_running
+        tuning_running = False
+        tuning_stop_event.set()
+        tuning_runner_state["running"] = False
+        if tuning_task is None:
+            return
+        tuning_task.cancel()
+        try:
+            await tuning_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            tuning_runner_state["last_error"] = str(exc)
+            bind_event("memory.quality.tuning").warning("memory quality tuning stop failed error={}", exc)
+        tuning_task = None
+        bind_event("memory.quality.tuning").info("memory quality tuning loop stopped")
+
     async def _start_proactive_monitor() -> None:
         nonlocal proactive_task, proactive_running
         if proactive_task is not None:
@@ -1239,6 +1598,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("cron", runtime.cron.start, runtime.cron.stop, True),
             ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("proactive_monitor", _start_proactive_monitor, _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
+            ("memory_quality_tuning", _start_memory_quality_tuning, _stop_memory_quality_tuning, bool(cfg.gateway.autonomy.tuning_loop_enabled)),
         ]
 
         for name, start_fn, stop_fn, enabled in steps:
@@ -1255,6 +1615,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 elif name == "cron":
                     await start_fn(_submit_cron_wake)
                 elif name == "proactive_monitor":
+                    await start_fn()
+                elif name == "memory_quality_tuning":
                     await start_fn()
                 else:
                     await start_fn(_submit_heartbeat_wake)
@@ -1279,6 +1641,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         steps: list[tuple[str, Any, bool]] = [
             ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("proactive_monitor", _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
+            ("memory_quality_tuning", _stop_memory_quality_tuning, bool(cfg.gateway.autonomy.tuning_loop_enabled)),
             ("cron", runtime.cron.stop, True),
             ("autonomy_wake", runtime.autonomy_wake.stop, True),
             ("channels", runtime.channels.stop, True),
@@ -1483,6 +1846,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "updated": False,
             "report": {},
             "state": {},
+            "tuning": {},
             "error": {
                 "type": "not_supported",
                 "message": "memory_quality_methods_unavailable",
@@ -1501,7 +1865,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "errors": int(turn_metrics_snapshot.get("turns_provider_errors", 0) or 0)
                 + int(turn_metrics_snapshot.get("turns_cancelled", 0) or 0),
             }
-            semantic_raw = memory_payload.get("semantic", {}) if isinstance(memory_payload.get("semantic", {}), dict) else {}
+            semantic_raw = await _collect_semantic_metrics()
             semantic_metrics = {
                 "enabled": bool(semantic_raw.get("enabled", False)),
                 "coverage_ratio": float(semantic_raw.get("coverage_ratio", 0.0) or 0.0),
@@ -1520,6 +1884,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             cached_payload = memory_quality_cache.get("payload")
             if memory_quality_cache.get("fingerprint") == fingerprint and isinstance(cached_payload, dict):
                 memory_quality_payload = dict(cached_payload)
+                try:
+                    snapshot = quality_snapshot()
+                    if isinstance(snapshot, dict):
+                        tuning_snapshot = snapshot.get("tuning", {})
+                        tuning_payload = dict(tuning_snapshot) if isinstance(tuning_snapshot, dict) else {}
+                        state_payload = memory_quality_payload.get("state", {})
+                        if isinstance(state_payload, dict):
+                            state_payload = dict(state_payload)
+                        else:
+                            state_payload = {}
+                        state_payload["tuning"] = tuning_payload
+                        memory_quality_payload["state"] = state_payload
+                        memory_quality_payload["tuning"] = tuning_payload
+                        report_payload = memory_quality_payload.get("report", {})
+                        if isinstance(report_payload, dict):
+                            report_payload = dict(report_payload)
+                            report_payload["tuning"] = dict(tuning_payload)
+                            memory_quality_payload["report"] = report_payload
+                except Exception:
+                    pass
             else:
                 try:
                     report = quality_update(
@@ -1534,8 +1918,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         "updated": True,
                         "report": dict(report) if isinstance(report, dict) else {},
                         "state": dict(snapshot) if isinstance(snapshot, dict) else {},
+                        "tuning": (snapshot.get("tuning", {}) if isinstance(snapshot, dict) else {}),
                         "error": None,
                     }
+                    if isinstance(memory_quality_payload["report"], dict):
+                        memory_quality_payload["report"].setdefault("tuning", dict(memory_quality_payload.get("tuning", {})))
                 except Exception as exc:
                     state_payload: dict[str, Any] = {}
                     try:
@@ -1549,6 +1936,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         "updated": False,
                         "report": {},
                         "state": state_payload,
+                        "tuning": (state_payload.get("tuning", {}) if isinstance(state_payload, dict) else {}),
                         "error": {
                             "type": exc.__class__.__name__,
                             "message": str(exc),
@@ -1585,6 +1973,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             autonomy_wake=runtime.autonomy_wake.status(),
             bootstrap=_bootstrap_status_snapshot(),
             memory_monitor=monitor_payload,
+            memory_quality_tuning=dict(tuning_runner_state),
             engine=engine_payload,
             environment=environment,
             http=await http_telemetry.snapshot(),

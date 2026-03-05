@@ -1288,6 +1288,93 @@ def test_memory_quality_state_update_persists_report_with_drift_and_recommendati
     assert store.quality_state_path.exists()
 
 
+def test_memory_quality_state_snapshot_normalizes_tuning_defaults_and_legacy_shapes(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.quality_state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "updated_at": "2026-03-05T12:00:00+00:00",
+                "baseline": {},
+                "current": {},
+                "history": [],
+                "tuning": {
+                    "degrading_streak": -7,
+                    "last_action": None,
+                    "recent_actions": [{"action": f"a{idx}"} for idx in range(30)],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = store.quality_state_snapshot()
+    tuning = snapshot["tuning"]
+    assert tuning["degrading_streak"] == 0
+    assert tuning["last_action"] == ""
+    assert tuning["last_action_at"] == ""
+    assert tuning["last_action_status"] == ""
+    assert tuning["last_reason"] == ""
+    assert tuning["next_run_at"] == ""
+    assert tuning["last_run_at"] == ""
+    assert tuning["last_error"] == ""
+    assert len(tuning["recent_actions"]) == store._MAX_QUALITY_TUNING_RECENT_ACTIONS
+    assert tuning["recent_actions"][-1]["action"] == "a29"
+
+
+def test_memory_update_quality_tuning_state_persists_without_history_growth_and_supports_update_patch(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.update_quality_state(
+        retrieval_metrics={"attempts": 10, "hits": 8, "rewrites": 1},
+        turn_stability_metrics={"successes": 9, "errors": 1},
+        semantic_metrics={"enabled": True, "coverage_ratio": 0.75},
+        sampled_at="2026-03-05T10:00:00+00:00",
+    )
+    before = store.quality_state_snapshot()
+
+    tuning = store.update_quality_tuning_state(
+        {
+            "degrading_streak": 2,
+            "last_action": "diagnostics_snapshot",
+            "last_action_status": "ok",
+            "last_action_at": "2026-03-05T10:01:00+00:00",
+            "last_reason": "quality_drift",
+            "next_run_at": "2026-03-05T10:31:00+00:00",
+            "recent_actions": [{"action": "diagnostics_snapshot", "status": "ok", "at": "2026-03-05T10:01:00+00:00"}],
+        }
+    )
+    after = store.quality_state_snapshot()
+
+    assert len(after["history"]) == len(before["history"])
+    assert tuning["degrading_streak"] == 2
+    assert after["tuning"]["last_action"] == "diagnostics_snapshot"
+    assert after["tuning"]["last_action_status"] == "ok"
+    assert after["tuning"]["last_reason"] == "quality_drift"
+
+    store.update_quality_state(
+        retrieval_metrics={"attempts": 10, "hits": 7, "rewrites": 2},
+        turn_stability_metrics={"successes": 9, "errors": 1},
+        semantic_metrics={"enabled": True, "coverage_ratio": 0.72},
+        sampled_at="2026-03-05T10:30:00+00:00",
+        tuning_patch={"last_action_status": "report_only", "last_error": ""},
+    )
+    snapshot = store.quality_state_snapshot()
+    assert len(snapshot["history"]) == len(before["history"]) + 1
+    assert snapshot["tuning"]["last_action_status"] == "report_only"
+
+
+def test_memory_quality_tuning_recent_actions_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    monkeypatch.setattr(store, "_MAX_QUALITY_TUNING_RECENT_ACTIONS", 3)
+
+    store.update_quality_tuning_state({"recent_actions": [{"action": "a1"}, {"action": "a2"}]})
+    store.update_quality_tuning_state({"recent_actions": [{"action": "a3"}, {"action": "a4"}]})
+
+    actions = store.quality_state_snapshot()["tuning"]["recent_actions"]
+    assert [row["action"] for row in actions] == ["a2", "a3", "a4"]
+
+
 def test_memory_quality_state_history_is_bounded(tmp_path: Path, monkeypatch) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     monkeypatch.setattr(store, "_MAX_QUALITY_HISTORY", 3)

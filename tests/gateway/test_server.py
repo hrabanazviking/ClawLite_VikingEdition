@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -69,6 +70,92 @@ class ProviderWithUnsafeDiagnostics:
             ],
             "counters": {"requests": 3, "successes": 2},
         }
+
+
+class _FakeTuningMemory:
+    def __init__(self, *, degrade: bool = True, fail_update: bool = False, fail_tuning_update: bool = False) -> None:
+        self.degrade = degrade
+        self.fail_update = fail_update
+        self.fail_tuning_update = fail_tuning_update
+        self.snapshot_calls = 0
+        self.tuning = {
+            "degrading_streak": 0,
+            "last_action": "",
+            "last_action_at": "",
+            "last_action_status": "",
+            "last_reason": "",
+            "next_run_at": "",
+            "last_run_at": "",
+            "last_error": "",
+            "recent_actions": [],
+        }
+
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "available": True,
+            "backend_name": "fake",
+            "backend_supported": True,
+            "backend_initialized": True,
+            "backend_init_error": "",
+        }
+
+    def analyze(self) -> dict[str, object]:
+        return {
+            "semantic": {
+                "enabled": True,
+                "coverage_ratio": 0.1,
+                "missing_records": 200,
+                "total_records": 220,
+            }
+        }
+
+    def update_quality_state(self, *, retrieval_metrics, turn_stability_metrics, semantic_metrics, sampled_at):
+        del retrieval_metrics, turn_stability_metrics, semantic_metrics
+        if self.fail_update:
+            raise RuntimeError("tuning-update-failed")
+        return {
+            "sampled_at": sampled_at,
+            "score": 20 if self.degrade else 88,
+            "retrieval": {"attempts": 10, "hits": 1, "rewrites": 0, "hit_rate": 0.1},
+            "turn_stability": {"successes": 1, "errors": 3, "success_rate": 0.25, "error_rate": 0.75},
+            "drift": {
+                "assessment": "degrading" if self.degrade else "stable",
+                "score_delta_previous": -10,
+                "score_delta_baseline": -10,
+                "hit_rate_delta_previous": -0.2,
+                "hit_rate_delta_baseline": -0.2,
+            },
+            "semantic": {"enabled": True, "coverage_ratio": 0.1},
+            "recommendations": ["x"],
+        }
+
+    def quality_state_snapshot(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "updated_at": "",
+            "baseline": {},
+            "current": {},
+            "history": [],
+            "tuning": dict(self.tuning),
+        }
+
+    def update_quality_tuning_state(self, tuning_patch: dict[str, object] | None = None) -> dict[str, object]:
+        if self.fail_tuning_update:
+            raise RuntimeError("tuning-state-write-failed")
+        patch_payload = dict(tuning_patch or {})
+        for key, value in patch_payload.items():
+            if key == "recent_actions":
+                rows = value if isinstance(value, list) else [value]
+                self.tuning["recent_actions"] = list(self.tuning.get("recent_actions", [])) + [dict(row) for row in rows]
+                self.tuning["recent_actions"] = self.tuning["recent_actions"][-20:]
+            else:
+                self.tuning[key] = value
+        return dict(self.tuning)
+
+    def snapshot(self, tag: str = "") -> str:
+        del tag
+        self.snapshot_calls += 1
+        return f"v{self.snapshot_calls}"
 
 
 def _assert_connect_challenge(socket) -> dict[str, object]:
@@ -1636,6 +1723,328 @@ def test_gateway_diagnostics_memory_quality_fail_soft_when_update_errors(tmp_pat
         assert isinstance(quality["state"], dict)
         assert quality["error"]["type"] == "RuntimeError"
         assert quality["error"]["message"] == "quality update failed"
+
+
+def test_gateway_diagnostics_memory_quality_prefers_analysis_stats(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    memory = app.state.runtime.engine.memory
+    calls = {"analysis_stats": 0, "analyze": 0}
+    captured_semantic: dict[str, object] = {}
+
+    def _analysis_stats() -> dict[str, object]:
+        calls["analysis_stats"] += 1
+        return {
+            "semantic": {
+                "enabled": True,
+                "coverage_ratio": 0.73,
+                "missing_records": 27,
+                "total_records": 100,
+            }
+        }
+
+    def _analyze() -> dict[str, object]:
+        calls["analyze"] += 1
+        return {
+            "semantic": {
+                "enabled": True,
+                "coverage_ratio": 0.0,
+                "missing_records": 100,
+                "total_records": 100,
+            }
+        }
+
+    def _quality_update(*, retrieval_metrics, turn_stability_metrics, semantic_metrics, sampled_at):
+        del retrieval_metrics, turn_stability_metrics, sampled_at
+        captured_semantic.clear()
+        captured_semantic.update(dict(semantic_metrics or {}))
+        return {
+            "semantic": dict(semantic_metrics or {}),
+            "drift": {"assessment": "stable"},
+            "score": 85,
+            "recommendations": [],
+        }
+
+    def _quality_snapshot() -> dict[str, object]:
+        return {"tuning": {}}
+
+    memory.analysis_stats = _analysis_stats
+    memory.analyze = _analyze
+    memory.update_quality_state = _quality_update
+    memory.quality_state_snapshot = _quality_snapshot
+
+    with TestClient(app) as client:
+        response = client.get("/v1/diagnostics")
+        assert response.status_code == 200
+        payload = response.json()
+        semantic_report = payload["engine"]["memory_quality"]["report"]["semantic"]
+
+        assert calls["analysis_stats"] >= 1
+        assert calls["analyze"] == 0
+        assert semantic_report["enabled"] is True
+        assert semantic_report["coverage_ratio"] == pytest.approx(0.73)
+        assert captured_semantic["coverage_ratio"] == pytest.approx(0.73)
+
+
+def test_gateway_tuning_loop_runs_when_heartbeat_disabled(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {"tuning_loop_enabled": True},
+        },
+        channels={},
+    )
+    cfg.gateway.autonomy.tuning_loop_interval_s = 1
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        for _ in range(20):
+            payload = client.get("/v1/diagnostics").json()
+            if int(payload["memory_quality_tuning"]["ticks"]) >= 1:
+                break
+            time.sleep(0.05)
+
+        status_payload = client.get("/v1/status").json()
+        assert status_payload["components"]["heartbeat"]["enabled"] is False
+        tuning_component = status_payload["components"]["memory_quality_tuning"]
+        assert tuning_component["enabled"] is True
+        assert tuning_component["running"] is True
+        assert int(payload["memory_quality_tuning"]["ticks"]) >= 1
+
+
+def test_gateway_diagnostics_include_tuning_runner_and_quality_tuning_state(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {"tuning_loop_enabled": True},
+        },
+        channels={},
+    )
+    cfg.gateway.autonomy.tuning_loop_interval_s = 1
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        time.sleep(0.1)
+        payload = client.get("/v1/diagnostics").json()
+
+        assert "memory_quality_tuning" in payload
+        assert set(payload["memory_quality_tuning"].keys()) >= {
+            "enabled",
+            "running",
+            "ticks",
+            "success_count",
+            "error_count",
+            "last_result",
+            "last_error",
+            "last_run_iso",
+            "next_run_iso",
+        }
+        memory_quality = payload["engine"]["memory_quality"]
+        assert isinstance(memory_quality["state"], dict)
+        assert isinstance(memory_quality["tuning"], dict)
+        assert isinstance(memory_quality["state"].get("tuning", {}), dict)
+
+
+def test_gateway_tuning_loop_guardrails_prevent_action_spam(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {
+                "tuning_loop_enabled": True,
+                "tuning_degrading_streak_threshold": 1,
+                "action_rate_limit_per_hour": 1,
+                "tuning_loop_cooldown_s": 0,
+            },
+        },
+        channels={},
+    )
+    cfg.gateway.autonomy.tuning_loop_interval_s = 1
+    app = create_app(cfg)
+    fake_memory = _FakeTuningMemory(degrade=True)
+    app.state.runtime.engine.memory = fake_memory
+    app.state.runtime.channels.send = AsyncMock(return_value="ok")
+
+    with TestClient(app) as client:
+        time.sleep(2.4)
+        payload = client.get("/v1/diagnostics").json()
+
+        assert int(payload["memory_quality_tuning"]["ticks"]) >= 2
+        assert fake_memory.snapshot_calls == 1
+        assert payload["memory_quality_tuning"]["last_action_status"] in {"ok", "rate_limited", "cooldown_skipped"}
+        assert fake_memory.tuning["recent_actions"]
+
+
+def test_gateway_tuning_loop_cooldown_skip_does_not_advance_last_action_at(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {
+                "tuning_loop_enabled": True,
+                "tuning_degrading_streak_threshold": 1,
+                "action_rate_limit_per_hour": 10,
+                "tuning_loop_cooldown_s": 3600,
+            },
+        },
+        channels={},
+    )
+    cfg.gateway.autonomy.tuning_loop_interval_s = 1
+    app = create_app(cfg)
+    fake_memory = _FakeTuningMemory(degrade=True)
+    app.state.runtime.engine.memory = fake_memory
+    app.state.runtime.channels.send = AsyncMock(return_value="ok")
+
+    with TestClient(app) as client:
+        first_last_action_at = ""
+        for _ in range(40):
+            payload = client.get("/v1/diagnostics").json()
+            first_last_action_at = str(fake_memory.tuning.get("last_action_at", "") or "")
+            if int(payload["memory_quality_tuning"]["ticks"]) >= 1 and first_last_action_at:
+                break
+            time.sleep(0.05)
+
+        assert first_last_action_at
+
+        final_payload = payload
+        for _ in range(50):
+            final_payload = client.get("/v1/diagnostics").json()
+            if int(final_payload["memory_quality_tuning"]["ticks"]) >= 2:
+                break
+            time.sleep(0.05)
+
+        assert int(final_payload["memory_quality_tuning"]["ticks"]) >= 2
+        skipped_entries = [
+            entry
+            for entry in fake_memory.tuning.get("recent_actions", [])
+            if isinstance(entry, dict) and str(entry.get("status", "")) == "cooldown_skipped"
+        ]
+        assert skipped_entries
+        assert str(fake_memory.tuning.get("last_action_at", "") or "") == first_last_action_at
+
+
+def test_gateway_diagnostics_memory_quality_cache_hit_refreshes_tuning_from_state(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {"tuning_loop_enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    memory = app.state.runtime.engine.memory
+    calls = {"quality_update": 0}
+    tuning_state = {
+        "degrading_streak": 1,
+        "last_action": "notify_operator",
+        "last_action_at": "2026-03-05T10:00:00+00:00",
+        "last_action_status": "ok",
+    }
+
+    def _analysis_stats() -> dict[str, object]:
+        return {
+            "semantic": {
+                "enabled": True,
+                "coverage_ratio": 0.5,
+                "missing_records": 50,
+                "total_records": 100,
+            }
+        }
+
+    def _quality_update(*, retrieval_metrics, turn_stability_metrics, semantic_metrics, sampled_at):
+        del retrieval_metrics, turn_stability_metrics, sampled_at
+        calls["quality_update"] += 1
+        return {
+            "semantic": dict(semantic_metrics or {}),
+            "drift": {"assessment": "stable"},
+            "score": 90,
+            "recommendations": [],
+        }
+
+    def _quality_snapshot() -> dict[str, object]:
+        return {
+            "version": 1,
+            "updated_at": "",
+            "baseline": {},
+            "current": {},
+            "history": [],
+            "tuning": dict(tuning_state),
+        }
+
+    memory.analysis_stats = _analysis_stats
+    memory.update_quality_state = _quality_update
+    memory.quality_state_snapshot = _quality_snapshot
+
+    with TestClient(app) as client:
+        first_payload = client.get("/v1/diagnostics").json()
+        first_tuning = first_payload["engine"]["memory_quality"]["tuning"]
+        assert first_tuning["last_action_at"] == "2026-03-05T10:00:00+00:00"
+
+        tuning_state["last_action"] = "memory_snapshot"
+        tuning_state["last_action_at"] = "2026-03-05T10:30:00+00:00"
+        tuning_state["last_action_status"] = "unsupported"
+
+        second_payload = client.get("/v1/diagnostics").json()
+        second_quality = second_payload["engine"]["memory_quality"]
+
+        assert calls["quality_update"] == 1
+        assert second_quality["tuning"]["last_action"] == "memory_snapshot"
+        assert second_quality["tuning"]["last_action_at"] == "2026-03-05T10:30:00+00:00"
+        assert second_quality["state"]["tuning"]["last_action"] == "memory_snapshot"
+        assert second_quality["report"]["tuning"]["last_action"] == "memory_snapshot"
+
+
+def test_gateway_tuning_loop_fail_soft_on_action_and_state_update_exceptions(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+            "autonomy": {"tuning_loop_enabled": True},
+        },
+        channels={},
+    )
+    cfg.gateway.autonomy.tuning_loop_interval_s = 1
+    app = create_app(cfg)
+    app.state.runtime.engine.memory = _FakeTuningMemory(degrade=True, fail_update=True, fail_tuning_update=True)
+
+    with TestClient(app) as client:
+        time.sleep(0.2)
+        payload = client.get("/v1/diagnostics").json()
+
+        assert payload["memory_quality_tuning"]["enabled"] is True
+        assert int(payload["memory_quality_tuning"]["error_count"]) >= 1
+        assert isinstance(payload["memory_quality_tuning"]["last_error"], str)
+        assert payload["memory_quality_tuning"]["last_error"]
 
 
 def test_gateway_diagnostics_http_telemetry_tracks_success_and_errors(tmp_path: Path) -> None:

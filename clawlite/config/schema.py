@@ -109,6 +109,13 @@ class GatewayAutonomyConfig:
     degraded_supervisor_error_threshold: int = 3
     audit_export_path: str = ""
     audit_max_entries: int = 200
+    tuning_loop_enabled: bool = False
+    tuning_loop_interval_s: int = 1800
+    tuning_loop_timeout_s: float = 45.0
+    tuning_loop_cooldown_s: int = 300
+    tuning_degrading_streak_threshold: int = 2
+    tuning_recent_actions_limit: int = 20
+    tuning_error_backoff_s: int = 900
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
@@ -213,6 +220,17 @@ class GatewayAutonomyConfig:
         )
         audit_export_path_raw = _raw_with_alias("audit_export_path", "auditExportPath", "")
         audit_max_entries_raw = _raw_with_alias("audit_max_entries", "auditMaxEntries", 200)
+        tuning_loop_enabled_raw = _raw_with_alias("tuning_loop_enabled", "tuningLoopEnabled", False)
+        tuning_loop_interval_raw = _raw_with_alias("tuning_loop_interval_s", "tuningLoopIntervalS", 1800)
+        tuning_loop_timeout_raw = _raw_with_alias("tuning_loop_timeout_s", "tuningLoopTimeoutS", 45.0)
+        tuning_loop_cooldown_raw = _raw_with_alias("tuning_loop_cooldown_s", "tuningLoopCooldownS", 300)
+        tuning_degrading_streak_threshold_raw = _raw_with_alias(
+            "tuning_degrading_streak_threshold",
+            "tuningDegradingStreakThreshold",
+            2,
+        )
+        tuning_recent_actions_limit_raw = _raw_with_alias("tuning_recent_actions_limit", "tuningRecentActionsLimit", 20)
+        tuning_error_backoff_raw = _raw_with_alias("tuning_error_backoff_s", "tuningErrorBackoffS", 900)
 
         action_cooldown_s = max(0.0, float(action_cooldown_raw or 120.0))
         action_rate_limit_per_hour = max(1, int(action_rate_limit_raw or 20))
@@ -242,6 +260,13 @@ class GatewayAutonomyConfig:
             degraded_supervisor_error_threshold=degraded_supervisor_error_threshold,
             audit_export_path=str(audit_export_path_raw or "").strip(),
             audit_max_entries=max(1, int(audit_max_entries_raw or 200)),
+            tuning_loop_enabled=bool(tuning_loop_enabled_raw),
+            tuning_loop_interval_s=max(30, int(tuning_loop_interval_raw or 1800)),
+            tuning_loop_timeout_s=max(1.0, float(tuning_loop_timeout_raw or 45.0)),
+            tuning_loop_cooldown_s=max(0, int(tuning_loop_cooldown_raw or 300)),
+            tuning_degrading_streak_threshold=max(1, int(tuning_degrading_streak_threshold_raw or 2)),
+            tuning_recent_actions_limit=max(1, int(tuning_recent_actions_limit_raw or 20)),
+            tuning_error_backoff_s=max(1, int(tuning_error_backoff_raw or 900)),
         )
 
 
