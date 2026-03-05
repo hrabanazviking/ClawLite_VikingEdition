@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from clawlite.cli.commands import main
+from clawlite.workspace.loader import TEMPLATE_FILES
 
 
 def test_cli_onboard_generates_workspace_files(tmp_path: Path) -> None:
@@ -407,6 +408,204 @@ def test_cli_validate_config_does_not_import_gateway_runtime(tmp_path: Path, cap
 
     sys.modules.pop("clawlite.gateway.server", None)
     rc = main(["--config", str(config_path), "validate", "config"])
+    assert rc == 0
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+
+def test_cli_validate_preflight_local_success(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
+
+    workspace_path = tmp_path / "workspace"
+    for rel in TEMPLATE_FILES:
+        target = workspace_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "validate", "preflight"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["strict_config"]["ok"] is True
+    assert payload["local_checks"]["provider"]["ok"] is True
+    assert payload["local_checks"]["channels"]["ok"] is True
+    assert payload["local_checks"]["onboarding"]["ok"] is True
+    assert payload["gateway_probe"] == {"enabled": False, "ok": True}
+    assert payload["provider_live_probe"] == {"enabled": False, "ok": True}
+    assert payload["telegram_live_probe"] == {"enabled": False, "ok": True}
+
+
+def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
+
+    workspace_path = tmp_path / "workspace"
+    for rel in TEMPLATE_FILES:
+        target = workspace_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "channels": {"telegram": {"token": "12345:ABCDE"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "clawlite.cli.commands.fetch_gateway_diagnostics",
+        lambda **kwargs: {
+            "base_url": kwargs["gateway_url"],
+            "endpoints": {
+                "/health": {"ok": True, "status_code": 200},
+                "/v1/status": {"ok": True, "status_code": 200},
+                "/v1/diagnostics": {"ok": True, "status_code": 200},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "clawlite.cli.commands.provider_live_probe",
+        lambda config, timeout: {
+            "ok": True,
+            "provider": "openai",
+            "provider_detected": "openai",
+            "model": str(config.provider.model),
+            "status_code": 200,
+            "error": "",
+            "base_url": "https://api.openai.com/v1",
+            "base_url_source": "spec:openai.default_base_url",
+            "endpoint": "/models",
+            "api_key_masked": "********1234",
+            "api_key_source": "env:OPENAI_API_KEY",
+        },
+    )
+    monkeypatch.setattr(
+        "clawlite.cli.commands.telegram_live_probe",
+        lambda config, timeout: {
+            "ok": True,
+            "status_code": 200,
+            "error": "",
+            "endpoint": "https://api.telegram.org/bot***/getMe",
+            "token_masked": "******BCDE",
+        },
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "validate",
+            "preflight",
+            "--gateway-url",
+            "http://127.0.0.1:8787",
+            "--provider-live",
+            "--telegram-live",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["gateway_probe"]["enabled"] is True
+    assert payload["gateway_probe"]["ok"] is True
+    assert payload["provider_live_probe"]["enabled"] is True
+    assert payload["provider_live_probe"]["ok"] is True
+    assert payload["telegram_live_probe"]["enabled"] is True
+    assert payload["telegram_live_probe"]["ok"] is True
+
+
+def test_cli_validate_preflight_gateway_failure_returns_rc2(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
+
+    workspace_path = tmp_path / "workspace"
+    for rel in TEMPLATE_FILES:
+        target = workspace_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "clawlite.cli.commands.fetch_gateway_diagnostics",
+        lambda **kwargs: {
+            "base_url": kwargs["gateway_url"],
+            "endpoints": {
+                "/health": {"ok": True, "status_code": 200},
+                "/v1/status": {"ok": False, "status_code": 500, "error": "boom"},
+                "/v1/diagnostics": {"ok": True, "status_code": 200},
+            },
+        },
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "validate",
+            "preflight",
+            "--gateway-url",
+            "http://127.0.0.1:8787",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["gateway_probe"]["enabled"] is True
+    assert payload["gateway_probe"]["ok"] is False
+    assert payload["gateway_probe"]["endpoints"]["/v1/status"]["status_code"] == 500
+
+
+def test_cli_validate_preflight_does_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
+
+    workspace_path = tmp_path / "workspace"
+    for rel in TEMPLATE_FILES:
+        target = workspace_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc = main(["--config", str(config_path), "validate", "preflight"])
     assert rc == 0
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()

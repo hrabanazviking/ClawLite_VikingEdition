@@ -24,6 +24,15 @@ Preflight de config estrita (falha com rc=2 em chave invalida/erro de parse):
 clawlite validate config
 ```
 
+## Release preflight
+
+```bash
+clawlite validate preflight
+clawlite validate preflight --gateway-url http://127.0.0.1:8787
+clawlite validate preflight --gateway-url http://127.0.0.1:8787 --provider-live --telegram-live
+bash scripts/release_preflight.sh --config ~/.clawlite/config.json --gateway-url http://127.0.0.1:8787
+```
+
 ## Verificar saúde
 
 ```bash
@@ -168,6 +177,19 @@ Notas:
 - `openai-codex/*` usa caminho dedicado Codex (sem fallback silencioso para OpenAI LiteLLM).
 - Em erro de token ausente/expirado, gateway retorna orientação explícita para `clawlite provider login openai-codex`.
 - `clawlite provider status` também suporta providers de API key (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`) com payload seguro de origem/configuração.
+
+Provider API-key auth ops:
+
+```bash
+clawlite provider set-auth openai --api-key "sk-..."
+clawlite provider clear-auth openai --clear-api-base
+```
+
+Heartbeat manual trigger:
+
+```bash
+clawlite heartbeat trigger --gateway-url http://127.0.0.1:8787
+```
 
 Troca segura de provider/modelo ativo:
 

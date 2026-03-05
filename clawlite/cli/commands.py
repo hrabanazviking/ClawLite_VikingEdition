@@ -28,12 +28,14 @@ from clawlite.cli.ops import memory_doctor_snapshot
 from clawlite.cli.ops import onboarding_validation
 from clawlite.cli.ops import heartbeat_trigger
 from clawlite.cli.ops import provider_clear_auth
+from clawlite.cli.ops import provider_live_probe
 from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_openai_codex
 from clawlite.cli.ops import provider_set_auth
 from clawlite.cli.ops import provider_logout_openai_codex
 from clawlite.cli.ops import provider_status
 from clawlite.cli.ops import provider_use_model
+from clawlite.cli.ops import telegram_live_probe
 from clawlite.cli.onboarding import run_onboarding_wizard
 from clawlite.config.loader import load_config
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
@@ -331,6 +333,125 @@ def cmd_validate_config(args: argparse.Namespace) -> int:
         }
     )
     return 0
+
+
+def _gateway_preflight_from_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    endpoints = payload.get("endpoints")
+    endpoint_rows: dict[str, Any] = endpoints if isinstance(endpoints, dict) else {}
+    required = ("/health", "/v1/status", "/v1/diagnostics")
+    normalized: dict[str, dict[str, Any]] = {}
+    all_ok = True
+    for endpoint in required:
+        row = endpoint_rows.get(endpoint, {}) if isinstance(endpoint_rows.get(endpoint, {}), dict) else {}
+        status_code = int(row.get("status_code", 0) or 0)
+        ok = bool(row.get("ok", False))
+        error = str(row.get("error", "") or "")
+        normalized[endpoint] = {
+            "ok": ok,
+            "status_code": status_code,
+            "error": error,
+        }
+        if not ok:
+            all_ok = False
+    return {
+        "enabled": True,
+        "ok": all_ok,
+        "base_url": str(payload.get("base_url", "") or ""),
+        "endpoints": normalized,
+    }
+
+
+def cmd_validate_preflight(args: argparse.Namespace) -> int:
+    config_path = str(args.config) if args.config else str(DEFAULT_CONFIG_PATH)
+    strict_block: dict[str, Any]
+    try:
+        strict_cfg = load_config(args.config, strict=True)
+        strict_block = {
+            "ok": True,
+            "strict": True,
+            "config_path": config_path,
+            "provider_model": str(strict_cfg.agents.defaults.model or strict_cfg.provider.model),
+        }
+    except Exception as exc:
+        strict_block = {
+            "ok": False,
+            "strict": True,
+            "config_path": config_path,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+
+    cfg = load_config(args.config)
+    local_checks = {
+        "provider": provider_validation(cfg),
+        "channels": channels_validation(cfg),
+        "onboarding": onboarding_validation(cfg, fix=False),
+    }
+
+    gateway_check: dict[str, Any] = {"enabled": False, "ok": True}
+    gateway_url = str(args.gateway_url or "").strip()
+    if gateway_url:
+        diagnostics = fetch_gateway_diagnostics(
+            gateway_url=gateway_url,
+            timeout=float(args.timeout),
+            token=str(args.token or ""),
+        )
+        gateway_check = _gateway_preflight_from_diagnostics(diagnostics)
+
+    provider_live_check: dict[str, Any] = {"enabled": bool(args.provider_live), "ok": True}
+    if bool(args.provider_live):
+        probe = provider_live_probe(cfg, timeout=float(args.timeout))
+        provider_live_check = {
+            "enabled": True,
+            "ok": bool(probe.get("ok", False)),
+            "provider": str(probe.get("provider", "") or ""),
+            "provider_detected": str(probe.get("provider_detected", "") or ""),
+            "model": str(probe.get("model", "") or ""),
+            "status_code": int(probe.get("status_code", 0) or 0),
+            "error": str(probe.get("error", "") or ""),
+            "base_url": str(probe.get("base_url", "") or ""),
+            "base_url_source": str(probe.get("base_url_source", "") or ""),
+            "endpoint": str(probe.get("endpoint", "") or ""),
+            "api_key_masked": str(probe.get("api_key_masked", "") or ""),
+            "api_key_source": str(probe.get("api_key_source", "") or ""),
+        }
+
+    telegram_live_check: dict[str, Any] = {"enabled": bool(args.telegram_live), "ok": True}
+    if bool(args.telegram_live):
+        probe = telegram_live_probe(cfg, timeout=float(args.timeout))
+        telegram_live_check = {
+            "enabled": True,
+            "ok": bool(probe.get("ok", False)),
+            "status_code": int(probe.get("status_code", 0) or 0),
+            "error": str(probe.get("error", "") or ""),
+            "endpoint": str(probe.get("endpoint", "") or ""),
+            "token_masked": str(probe.get("token_masked", "") or ""),
+        }
+
+    enabled_blocks = [
+        strict_block,
+        local_checks["provider"],
+        local_checks["channels"],
+        local_checks["onboarding"],
+    ]
+    if gateway_check.get("enabled", False):
+        enabled_blocks.append(gateway_check)
+    if provider_live_check.get("enabled", False):
+        enabled_blocks.append(provider_live_check)
+    if telegram_live_check.get("enabled", False):
+        enabled_blocks.append(telegram_live_check)
+
+    ok = all(bool(block.get("ok", False)) for block in enabled_blocks)
+    payload = {
+        "ok": ok,
+        "strict_config": strict_block,
+        "local_checks": local_checks,
+        "gateway_probe": gateway_check,
+        "provider_live_probe": provider_live_check,
+        "telegram_live_probe": telegram_live_check,
+    }
+    _print_json(payload)
+    return 0 if ok else 2
 
 
 def cmd_diagnostics(args: argparse.Namespace) -> int:
@@ -676,6 +797,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_validate_config = validate_sub.add_parser("config", help="Validate config structure with strict key checks")
     p_validate_config.set_defaults(handler=cmd_validate_config)
+
+    p_validate_preflight = validate_sub.add_parser("preflight", help="Run release-grade local and optional integration checks")
+    p_validate_preflight.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")
+    p_validate_preflight.add_argument("--token", default="", help="Bearer token for protected gateway probes")
+    p_validate_preflight.add_argument("--timeout", type=float, default=3.0, help="Probe timeout in seconds")
+    p_validate_preflight.add_argument("--provider-live", action="store_true", help="Run live provider connectivity probe")
+    p_validate_preflight.add_argument("--telegram-live", action="store_true", help="Run live Telegram token probe")
+    p_validate_preflight.set_defaults(handler=cmd_validate_preflight)
 
     p_provider = sub.add_parser("provider", help="Provider auth lifecycle commands")
     provider_sub = p_provider.add_subparsers(dest="provider_command", required=True)

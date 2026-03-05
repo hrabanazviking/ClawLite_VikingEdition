@@ -455,6 +455,295 @@ SUPPORTED_PROVIDER_USE: tuple[str, ...] = (
     "custom",
 )
 
+OPENAI_COMPATIBLE_PROBE_PROVIDERS: tuple[str, ...] = (
+    "openai",
+    "gemini",
+    "groq",
+    "deepseek",
+    "openrouter",
+    "custom",
+    "openai_codex",
+)
+
+
+def _provider_spec(name: str) -> Any:
+    provider_name = str(name or "").strip().lower().replace("-", "_")
+    return next((row for row in SPECS if row.name == provider_name), None)
+
+
+def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dict[str, Any]:
+    provider_key = str(provider_name or "").strip().lower().replace("-", "_")
+
+    if provider_key == "openai_codex":
+        codex = resolve_codex_auth(config)
+        cfg_openai_base = str(getattr(config.providers.openai, "api_base", "") or "").strip()
+        global_base = str(config.provider.litellm_base_url or "").strip()
+        base_url = cfg_openai_base or global_base or "https://api.openai.com/v1"
+        base_url_source = (
+            "config:providers.openai.api_base"
+            if cfg_openai_base
+            else "config:provider.litellm_base_url"
+            if global_base
+            else "spec:openai.default_base_url"
+        )
+        return {
+            "ok": True,
+            "provider": provider_key,
+            "api_key": str(codex.get("access_token", "") or "").strip(),
+            "api_key_masked": str(codex.get("token_masked", "") or ""),
+            "api_key_source": str(codex.get("source", "") or ""),
+            "base_url": base_url,
+            "base_url_source": base_url_source,
+            "auth_mode": "oauth",
+        }
+
+    if provider_key == "ollama":
+        cfg_base = str(config.providers.custom.api_base or "").strip()
+        global_base = str(config.provider.litellm_base_url or "").strip()
+        env_base = str(os.getenv("OLLAMA_BASE_URL", "") or "").strip()
+        base_url = cfg_base or global_base or env_base or "http://127.0.0.1:11434"
+        base_url_source = (
+            "config:providers.custom.api_base"
+            if cfg_base
+            else "config:provider.litellm_base_url"
+            if global_base
+            else "env:OLLAMA_BASE_URL"
+            if env_base
+            else "default:ollama"
+        )
+        return {
+            "ok": True,
+            "provider": provider_key,
+            "api_key": "",
+            "api_key_masked": "",
+            "api_key_source": "",
+            "base_url": base_url,
+            "base_url_source": base_url_source,
+            "auth_mode": "none",
+        }
+
+    spec = _provider_spec(provider_key)
+    if spec is None:
+        return {"ok": False, "provider": provider_key, "error": f"unsupported_provider:{provider_key}"}
+
+    selected = getattr(config.providers, spec.name, None)
+    cfg_api_key = str(getattr(selected, "api_key", "") or "").strip()
+    cfg_base_url = str(getattr(selected, "api_base", "") or "").strip()
+    global_api_key = str(config.provider.litellm_api_key or "").strip()
+    global_base_url = str(config.provider.litellm_base_url or "").strip()
+
+    env_names: list[str] = list(spec.key_envs)
+    env_names.extend(["CLAWLITE_LITELLM_API_KEY", "CLAWLITE_API_KEY"])
+    env_first_name = ""
+    env_first_value = ""
+    seen: set[str] = set()
+    for env_name in env_names:
+        if env_name in seen:
+            continue
+        seen.add(env_name)
+        env_value = os.getenv(env_name, "").strip()
+        if env_value:
+            env_first_name = env_name
+            env_first_value = env_value
+            break
+
+    api_key = ""
+    api_key_source = ""
+    if cfg_api_key:
+        api_key = cfg_api_key
+        api_key_source = f"config:providers.{spec.name}.api_key"
+    elif global_api_key:
+        api_key = global_api_key
+        api_key_source = "config:provider.litellm_api_key"
+    elif env_first_value:
+        api_key = env_first_value
+        api_key_source = f"env:{env_first_name}"
+
+    base_url = ""
+    base_url_source = ""
+    if cfg_base_url:
+        base_url = cfg_base_url
+        base_url_source = f"config:providers.{spec.name}.api_base"
+    elif global_base_url:
+        base_url = global_base_url
+        base_url_source = "config:provider.litellm_base_url"
+    elif spec.default_base_url:
+        base_url = spec.default_base_url
+        base_url_source = f"spec:{spec.name}.default_base_url"
+
+    if provider_key == "openai":
+        base_norm = base_url.lower()
+        if ("11434" in base_norm) or ("ollama" in base_norm):
+            return _resolve_provider_probe_target(config, "ollama")
+
+    return {
+        "ok": True,
+        "provider": spec.name,
+        "api_key": api_key,
+        "api_key_masked": _mask_secret(api_key),
+        "api_key_source": api_key_source,
+        "base_url": base_url,
+        "base_url_source": base_url_source,
+        "auth_mode": "api_key",
+    }
+
+
+def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str, Any]:
+    model = str(config.agents.defaults.model or config.provider.model).strip() or str(config.provider.model)
+    detected = detect_provider_name(model)
+    target = _resolve_provider_probe_target(config, detected)
+    if not bool(target.get("ok", False)):
+        return {
+            "ok": False,
+            "provider": str(target.get("provider", detected) or detected),
+            "provider_detected": detected,
+            "model": model,
+            "status_code": 0,
+            "error": str(target.get("error", "provider_resolution_failed") or "provider_resolution_failed"),
+            "api_key_masked": "",
+            "api_key_source": "",
+            "base_url": "",
+            "base_url_source": "",
+            "endpoint": "",
+        }
+
+    provider = str(target.get("provider", detected) or detected)
+    base_url = str(target.get("base_url", "") or "").strip().rstrip("/")
+    api_key = str(target.get("api_key", "") or "").strip()
+    endpoint = ""
+    headers: dict[str, str] = {}
+
+    if provider in OPENAI_COMPATIBLE_PROBE_PROVIDERS:
+        endpoint = "/models"
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": provider,
+                "provider_detected": detected,
+                "model": model,
+                "status_code": 0,
+                "error": "api_key_missing",
+                "api_key_masked": str(target.get("api_key_masked", "") or ""),
+                "api_key_source": str(target.get("api_key_source", "") or ""),
+                "base_url": base_url,
+                "base_url_source": str(target.get("base_url_source", "") or ""),
+                "endpoint": endpoint,
+            }
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif provider == "anthropic":
+        endpoint = "/v1/models"
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": provider,
+                "provider_detected": detected,
+                "model": model,
+                "status_code": 0,
+                "error": "api_key_missing",
+                "api_key_masked": str(target.get("api_key_masked", "") or ""),
+                "api_key_source": str(target.get("api_key_source", "") or ""),
+                "base_url": base_url,
+                "base_url_source": str(target.get("base_url_source", "") or ""),
+                "endpoint": endpoint,
+            }
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+    elif provider == "ollama":
+        endpoint = "/api/tags"
+    else:
+        return {
+            "ok": False,
+            "provider": provider,
+            "provider_detected": detected,
+            "model": model,
+            "status_code": 0,
+            "error": f"unsupported_provider:{provider}",
+            "api_key_masked": str(target.get("api_key_masked", "") or ""),
+            "api_key_source": str(target.get("api_key_source", "") or ""),
+            "base_url": base_url,
+            "base_url_source": str(target.get("base_url_source", "") or ""),
+            "endpoint": endpoint,
+        }
+
+    if not base_url:
+        return {
+            "ok": False,
+            "provider": provider,
+            "provider_detected": detected,
+            "model": model,
+            "status_code": 0,
+            "error": "base_url_missing",
+            "api_key_masked": str(target.get("api_key_masked", "") or ""),
+            "api_key_source": str(target.get("api_key_source", "") or ""),
+            "base_url": "",
+            "base_url_source": str(target.get("base_url_source", "") or ""),
+            "endpoint": endpoint,
+        }
+
+    url = f"{base_url}{endpoint}"
+    try:
+        with httpx.Client(timeout=max(0.1, float(timeout))) as client:
+            response = client.get(url, headers=headers)
+        status_code = int(response.status_code)
+        ok = bool(response.is_success)
+        error = "" if ok else f"http_status:{status_code}"
+    except Exception as exc:
+        status_code = 0
+        ok = False
+        error = str(exc)
+
+    return {
+        "ok": ok,
+        "provider": provider,
+        "provider_detected": detected,
+        "model": model,
+        "status_code": status_code,
+        "error": error,
+        "api_key_masked": str(target.get("api_key_masked", "") or ""),
+        "api_key_source": str(target.get("api_key_source", "") or ""),
+        "base_url": base_url,
+        "base_url_source": str(target.get("base_url_source", "") or ""),
+        "endpoint": endpoint,
+    }
+
+
+def telegram_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str, Any]:
+    token = str(config.channels.telegram.token or "").strip()
+    if not token:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "error": "telegram_token_missing",
+            "token_masked": "",
+            "endpoint": "",
+        }
+
+    url = f"https://api.telegram.org/bot{token}/getMe"
+    try:
+        with httpx.Client(timeout=max(0.1, float(timeout))) as client:
+            response = client.get(url)
+        body: Any
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        ok = bool(response.is_success and isinstance(body, dict) and bool(body.get("ok", False)))
+        return {
+            "ok": ok,
+            "status_code": int(response.status_code),
+            "error": "" if ok else "telegram_probe_failed",
+            "token_masked": _mask_secret(token),
+            "endpoint": "https://api.telegram.org/bot***/getMe",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "error": str(exc),
+            "token_masked": _mask_secret(token),
+            "endpoint": "https://api.telegram.org/bot***/getMe",
+        }
+
 
 def provider_use_model(
     config: AppConfig,

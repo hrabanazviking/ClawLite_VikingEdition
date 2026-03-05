@@ -164,6 +164,12 @@ bash scripts/smoke_test.sh
 python -m pytest tests/gateway/test_server.py -q
 python -m pytest tests/channels/test_telegram.py -q
 python -m pytest tests/scheduler/ -q
+
+# Operational preflight and control checks
+clawlite validate preflight --gateway-url http://127.0.0.1:8787
+clawlite heartbeat trigger --gateway-url http://127.0.0.1:8787
+clawlite provider set-auth openai --api-key "sk-..."
+clawlite provider clear-auth openai --clear-api-base
 ```
 
 ---
@@ -183,7 +189,7 @@ python -m pytest tests/scheduler/ -q
 
 **🚧 In Progress**
 
-- Rich dashboard UI *(not yet in scope — `GET /` serves a minimal status page)*
+- Operational maturity hardening (release preflight workflows, provider auth ops, diagnostics coverage)
 
 ---
 

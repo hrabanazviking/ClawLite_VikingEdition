@@ -9,6 +9,9 @@ Relevant ClawLite changes.
 - Updated README, CONTRIBUTING, SECURITY, and ROADMAP for current commands/flows.
 - Updated documentation to remove stale legacy pages.
 - ClawMemory hardening shipped: hybrid semantic+BM25 retrieval, async memorize/retrieve APIs, proactive monitor integrated with heartbeat/diagnostics, multimodal ingest fallback, memory profile/privacy/versioning controls, branch/checkout/merge lifecycle, and optional backend embedding sync (`sqlite` default, `pgvector` optional).
+- Operational maturity increment: `clawlite provider set-auth` / `clawlite provider clear-auth` and `clawlite heartbeat trigger` integrated into operator runbooks.
+- Diagnostics now expose WebSocket telemetry visibility for runtime operator checks.
+- Release preflight workflow added with `clawlite validate preflight` and `scripts/release_preflight.sh` automation.
 
 ### Removed
 - Legacy internal analysis/context files that are not part of public documentation.

@@ -59,10 +59,10 @@
 
 #### Checklist
 - [x] Improve prompt/memory pipeline.
-- [ ] Expand provider + config capability.
-- [ ] Align workspace/bootstrap/templates with runtime lifecycle.
-- [ ] Expand CLI operations.
-- [ ] Add structured observability.
+- [x] Expand provider + config capability.
+- [x] Align workspace/bootstrap/templates with runtime lifecycle.
+- [x] Expand CLI operations.
+- [x] Add structured observability.
 
 #### Progress updates (2026-03-04)
 - `agents.defaults.memory_window` connected end-to-end
@@ -94,6 +94,12 @@
 - Telegram parity increment: context-aware ingress authorization delivered (`dm_policy`, `group_policy`, `topic_policy`, per-context allowlists, and `group_overrides` with topic-level overrides) across message, callback_query, and message_reaction paths.
 - Telegram parity increment: outbound action surface (`edit`, `delete`, `react`, `create_topic`, `reply`) now exposed through tool metadata bridge with channel-side dispatch and action counters.
 - Telegram parity increment: webhook/polling hardening with unified dedupe keys, stale-update skip telemetry, atomic offset store v2 (`schema_version`, `token_fingerprint`), and webhook payload timeout contract (`telegram_webhook_payload_timeout`).
+
+#### Progress updates (2026-03-05)
+- Stage 7 provider auth lifecycle completed with deterministic `clawlite provider set-auth` / `clawlite provider clear-auth` and config persistence semantics.
+- Stage 7 heartbeat operations expanded with `clawlite heartbeat trigger` for explicit control-plane activation.
+- Stage 8 diagnostics matured with WebSocket telemetry visibility in operator diagnostics snapshots.
+- Stage 8 release readiness added via `clawlite validate preflight` and automated `scripts/release_preflight.sh` flow.
 
 ### FUTURE (Scale + polish)
 
