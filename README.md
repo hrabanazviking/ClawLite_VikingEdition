@@ -1,77 +1,152 @@
-# ClawLite Documentation
+# ClawLite
 
-![Logo](path/to/logo.png)
+Portable runtime-first autonomous assistant for Linux.
 
-## Badges
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
-![Status](https://img.shields.io/badge/status-active-brightgreen)
+## What ClawLite is
 
-## Architecture Diagram
-![Architecture](path/to/architecture-diagram.png)
+ClawLite is a Python agent runtime centered on CLI + gateway operation:
 
-## Features
-1. 🚀 **Feature 1**: Description of feature 1
-2. 🏗️ **Feature 2**: Description of feature 2
-3. 📍 **Feature 3**: Description of feature 3
-4. 🔍 **Feature 4**: Description of feature 4
-5. 🎉 **Feature 5**: Description of feature 5
-6. 🛠️ **Feature 6**: Description of feature 6
-7. 📧 **Feature 7**: Description of feature 7
-8. 📱 **Feature 8**: Description of feature 8
-9. 🧩 **Feature 9**: Description of feature 9
+- FastAPI gateway (`/v1/*` + compatibility aliases under `/api/*`)
+- WebSocket + HTTP chat entrypoints
+- Scheduler services (cron + heartbeat + supervision)
+- Multi-provider inference routing and provider auth lifecycle commands
+- Memory subsystem with diagnostics, versioning, branching, and quality tuning
 
-## Installation Instructions
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/eobarretooo/ClawLite.git
-   ```
-2. Install the dependencies:
-   ```bash
-   npm install
-   ```
+The runtime does not depend on a dashboard UI. The gateway root (`GET /`) serves a minimal static HTML entrypoint for endpoint visibility.
 
-## Quickstart Guide
-To start the application, run:
+## Current status snapshot (through Stage 17)
+
+Major shipped capabilities visible in current code/tests:
+
+- Production-grade gateway contract with auth modes (`off|optional|required`), diagnostics, token masking, HTTP/WS telemetry, and compatibility aliases.
+- Runtime scheduler and control-plane paths for heartbeat and cron (`/v1/control/heartbeat/trigger`, `/v1/cron/*`).
+- Provider operations in CLI (`provider login/status/logout/use/set-auth/clear-auth`) and release preflight checks.
+- ClawMemory lifecycle controls (`doctor`, `quality`, snapshot/version/rollback, branches/merge, export/import, privacy/share-optin).
+- Stage 15/16/17 memory-quality/autonomy progression:
+  - Stage 15: reasoning-layer quality signals (`fact/hypothesis/decision/outcome`) included in quality state/reporting.
+  - Stage 16: autonomous memory-quality tuning loop with cooldown/rate limits and persisted tuning state.
+  - Stage 17: layer-aware tuning playbooks with action metadata (`playbook_id`, `weakest_layer`, `severity`) and legacy layer alias normalization.
+
+## Quickstart
+
+Prerequisite: Python 3.10+.
+
+1) Install locally
+
 ```bash
-npm start
+pip install -e .
 ```
 
-## Configuration
-Add your configuration settings in the `config.js` file.
+2) Generate workspace templates / onboarding baseline
 
-## Gateway Endpoints Table
-| Method | Endpoint          | Description           |
-|--------|--------------------|-----------------------|
-| GET    | /api/v1/resource     | Fetches resource       |
-| POST   | /api/v1/resource     | Creates resource       |
-| PUT    | /api/v1/resource/{id} | Updates resource       |
-| DELETE | /api/v1/resource/{id} | Deletes resource       |
-
-## Testing
-Run the tests with:
 ```bash
-npm test
+clawlite onboard
+# interactive wizard variant:
+clawlite onboard --wizard
 ```
 
-## Status
-**Shipped:**
-- Feature 1
-- Feature 2
+3) Configure provider (example)
 
-**In Progress:**
-- Feature 3
+```bash
+export CLAWLITE_MODEL="gemini/gemini-2.5-flash"
+export CLAWLITE_LITELLM_API_KEY="<your-key>"
+```
 
-## Contributing
-To contribute, please follow these steps:
-1. Fork the repository
-2. Create a new branch (`git checkout -b feature/YourFeature`)
-3. Commit your changes (`git commit -m 'Add some feature'`)
-4. Push to the branch (`git push origin feature/YourFeature`)
-5. Open a pull request
+4) Start gateway
 
-## Related Projects
-- Project A: Description
-- Project B: Description
+```bash
+clawlite start --host 127.0.0.1 --port 8787
+# alias:
+clawlite gateway --host 127.0.0.1 --port 8787
+```
 
----
-*This documentation is subject to change.*
+5) Send a chat request
+
+```bash
+curl -sS http://127.0.0.1:8787/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"cli:quickstart","text":"hello"}'
+```
+
+If auth mode is required, include bearer token (header or query param, per config).
+
+## Key CLI commands
+
+Provider + validation:
+
+```bash
+clawlite provider status
+clawlite provider use openai --model openai/gpt-4.1-mini
+clawlite provider set-auth openai --api-key "<key>"
+clawlite validate provider
+clawlite validate config
+clawlite validate preflight --gateway-url http://127.0.0.1:8787
+```
+
+Diagnostics + memory + scheduler + skills:
+
+```bash
+clawlite diagnostics --gateway-url http://127.0.0.1:8787
+clawlite memory
+clawlite memory doctor
+clawlite memory quality --gateway-url http://127.0.0.1:8787
+clawlite cron add --session-id cli:ops --expression "every 300" --prompt "status"
+clawlite heartbeat trigger --gateway-url http://127.0.0.1:8787
+clawlite skills list
+clawlite skills check
+```
+
+## Gateway endpoints (v1 + compatibility aliases)
+
+| Method | Endpoint | Notes |
+|---|---|---|
+| GET | `/` | Minimal static gateway entrypoint (no dashboard dependency) |
+| GET | `/health` | Health/readiness snapshot |
+| GET | `/v1/status` | Control-plane status |
+| GET | `/api/status` | Alias of `/v1/status` |
+| GET | `/v1/diagnostics` | Runtime diagnostics snapshot |
+| GET | `/api/diagnostics` | Alias of `/v1/diagnostics` |
+| POST | `/v1/chat` | Main HTTP chat endpoint |
+| POST | `/api/message` | Alias of `/v1/chat` |
+| GET | `/api/token` | Masked token diagnostics |
+| POST | `/v1/control/heartbeat/trigger` | Trigger heartbeat cycle |
+| POST | `/v1/cron/add` | Create cron job |
+| GET | `/v1/cron/list` | List cron jobs by session |
+| DELETE | `/v1/cron/{job_id}` | Remove cron job |
+| WS | `/v1/ws` | Main WebSocket chat |
+| WS | `/ws` | Alias of `/v1/ws` |
+
+## Memory and autonomy highlights
+
+- Hybrid memory retrieval and quality tracking are integrated into runtime diagnostics and CLI operations.
+- Memory quality state persists scoring, drift assessment, recommendations, and tuning history.
+- Tuning loop runs as an autonomous runtime component when enabled, with fail-soft behavior, cooldown, and rate limiting.
+- Layer-aware playbooks pick actions based on drift severity and weakest reasoning layer.
+- Action metadata is persisted for auditability (`last_action`, `last_reason`, `recent_actions`, `playbook_id`, `weakest_layer`).
+
+## Testing and CI commands
+
+Local checks:
+
+```bash
+pytest -q tests
+ruff check clawlite/ --select E9,F --ignore F401,F811
+bash scripts/smoke_test.sh
+clawlite validate preflight --gateway-url http://127.0.0.1:8787
+```
+
+CI workflows in `.github/workflows/`:
+
+- `ci.yml` (pytest matrix, lint, smoke, autonomy contract)
+- `coverage.yml` (pytest + coverage XML)
+- `secret-scan.yml` (gitleaks)
+
+## Docs index
+
+- `docs/QUICKSTART.md`
+- `docs/API.md`
+- `docs/ARCHITECTURE.md`
+- `docs/CONFIGURATION.md`
+- `docs/OPERATIONS.md`
+- `docs/SKILLS.md`
+- `docs/TELEGRAM_RELIABILITY_SEMANTICS.md`
