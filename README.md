@@ -29,28 +29,20 @@ It was designed for Linux servers and Android Termux environments where reliabil
 ## Architecture at a Glance
 
 ```
-┌─────────────────────────────────────────────┐
-│                  CLI  (clawlite)             │
-│   start · run · status · cron · memory …    │
-└───────────────────┬─────────────────────────┘
-                    │
-        ┌───────────▼───────────┐
-        │   Gateway (HTTP/WS)   │  ← control plane
-        │   /v1/chat  /api/msg  │
-        └──────┬──────┬─────────┘
-               │      │
-     ┌──────────┘      └──────────────┐
-     │                               │
-┌────▼────────┐            ┌─────────▼──────┐
-│  Scheduler  │            │    Channels    │
-│ heartbeat   │            │  Telegram …    │
-│ cron/lease  │            └────────────────┘
-└──────┬──────┘
-       │
-┌──────▼──────────────────────────────┐
-│         Persistent Memory           │
-│  runtime · backend · monitor        │
-└─────────────────────────────────────┘
+         CLI  (clawlite)
+   start / run / status / cron / memory
+                   |
+          Gateway (HTTP + WS)          <-- control plane
+          /v1/chat  /api/message
+                   |
+       .-----------+-----------.
+       |                       |
+   Scheduler               Channels
+   heartbeat                Telegram
+   cron / lease
+       |
+   Persistent Memory
+   runtime / backend / monitor
 ```
 
 ---
