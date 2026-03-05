@@ -37,6 +37,51 @@ def test_sqlite_memory_backend_roundtrip(tmp_path: Path) -> None:
     assert backend.fetch_layer_records(layer="item", limit=10) == []
 
 
+def test_sqlite_embedding_roundtrip(tmp_path: Path) -> None:
+    backend = resolve_memory_backend("sqlite")
+    backend.initialize(tmp_path)
+
+    backend.upsert_embedding(
+        "emb-1",
+        [0.1, 0.9],
+        "2026-03-01T00:00:00+00:00",
+        "user",
+    )
+    backend.upsert_embedding(
+        "emb-2",
+        [0.8, 0.2],
+        "2026-03-01T00:00:01+00:00",
+        "seed",
+    )
+
+    fetched_all = backend.fetch_embeddings(limit=10)
+    assert fetched_all["emb-1"] == [0.1, 0.9]
+    assert fetched_all["emb-2"] == [0.8, 0.2]
+
+    fetched_filtered = backend.fetch_embeddings(record_ids=["emb-2"], limit=10)
+    assert fetched_filtered == {"emb-2": [0.8, 0.2]}
+
+    deleted = backend.delete_embeddings(["emb-1"])
+    assert deleted >= 1
+    remaining = backend.fetch_embeddings(limit=10)
+    assert "emb-1" not in remaining
+    assert remaining["emb-2"] == [0.8, 0.2]
+
+
+def test_sqlite_query_similar_embeddings_returns_best_match(tmp_path: Path) -> None:
+    backend = resolve_memory_backend("sqlite")
+    backend.initialize(tmp_path)
+
+    backend.upsert_embedding("alpha", [1.0, 0.0], "2026-03-01T00:00:00+00:00", "seed")
+    backend.upsert_embedding("beta", [0.0, 1.0], "2026-03-01T00:00:00+00:00", "seed")
+    backend.upsert_embedding("gamma", [0.5, 0.5], "2026-03-01T00:00:00+00:00", "seed")
+
+    hits = backend.query_similar_embeddings([0.9, 0.1], limit=2)
+    assert hits
+    assert hits[0]["record_id"] == "alpha"
+    assert float(hits[0]["score"]) > float(hits[1]["score"])
+
+
 def test_pgvector_backend_remains_graceful_when_unsupported(tmp_path: Path) -> None:
     backend = resolve_memory_backend("pgvector", pgvector_url="")
     assert backend.is_supported() is False
@@ -50,8 +95,12 @@ def test_pgvector_backend_remains_graceful_when_unsupported(tmp_path: Path) -> N
         created_at="",
         updated_at="",
     )
+    backend.upsert_embedding("rec-1", [1.0, 0.0], "", "ignored")
     assert backend.fetch_layer_records(layer="item", limit=5) == []
+    assert backend.fetch_embeddings(limit=5) == {}
+    assert backend.query_similar_embeddings([1.0, 0.0], limit=5) == []
     assert backend.delete_layer_records(["rec-1"]) == 0
+    assert backend.delete_embeddings(["rec-1"]) == 0
 
 
 def test_pgvector_support_detection_requires_valid_url_and_driver(monkeypatch) -> None:

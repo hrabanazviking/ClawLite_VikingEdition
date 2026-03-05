@@ -43,6 +43,23 @@ class MemoryBackend(Protocol):
     def fetch_layer_records(self, *, layer: str, category: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         ...
 
+    def upsert_embedding(self, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
+        ...
+
+    def delete_embeddings(self, record_ids: list[str] | set[str]) -> int:
+        ...
+
+    def fetch_embeddings(self, record_ids: list[str] | None = None, limit: int = 5000) -> dict[str, list[float]]:
+        ...
+
+    def query_similar_embeddings(
+        self,
+        query_embedding: list[float],
+        record_ids: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        ...
+
 
 @dataclass(slots=True)
 class SQLiteMemoryBackend:
@@ -60,6 +77,40 @@ class SQLiteMemoryBackend:
 
     def is_supported(self) -> bool:
         return True
+
+    @staticmethod
+    def _normalize_embedding(raw: Any) -> list[float] | None:
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return None
+        if not isinstance(raw, list) or not raw:
+            return None
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                return None
+        return out if out else None
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = 0.0
+        left_norm = 0.0
+        right_norm = 0.0
+        for idx in range(len(left)):
+            lval = float(left[idx])
+            rval = float(right[idx])
+            dot += lval * rval
+            left_norm += lval * lval
+            right_norm += rval * rval
+        if left_norm <= 0.0 or right_norm <= 0.0:
+            return 0.0
+        return float(dot / ((left_norm * right_norm) ** 0.5))
 
     def initialize(self, memory_home: str | Path) -> None:
         with self._lock:
@@ -81,9 +132,20 @@ class SQLiteMemoryBackend:
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS embeddings (
+                        record_id TEXT PRIMARY KEY,
+                        embedding TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        source TEXT NOT NULL
+                    )
+                    """
+                )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_layer ON layer_records(layer)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_category ON layer_records(category)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_updated_at ON layer_records(updated_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at)")
                 conn.commit()
 
     def upsert_layer_record(
@@ -176,6 +238,97 @@ class SQLiteMemoryBackend:
             )
         return out
 
+    def upsert_embedding(self, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
+        clean_id = str(record_id or "").strip()
+        normalized = self._normalize_embedding(embedding)
+        if not clean_id or normalized is None:
+            return
+        if self._db_file is None:
+            return
+        with self._lock:
+            with sqlite3.connect(str(self._db_file)) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO embeddings (record_id, embedding, created_at, source)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(record_id) DO UPDATE SET
+                        embedding = excluded.embedding,
+                        created_at = excluded.created_at,
+                        source = excluded.source
+                    """,
+                    (
+                        clean_id,
+                        json.dumps(normalized, ensure_ascii=False),
+                        str(created_at or ""),
+                        str(source or ""),
+                    ),
+                )
+                conn.commit()
+
+    def delete_embeddings(self, record_ids: list[str] | set[str]) -> int:
+        ids = [str(item).strip() for item in record_ids if str(item).strip()]
+        if not ids:
+            return 0
+        if self._db_file is None:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self._lock:
+            with sqlite3.connect(str(self._db_file)) as conn:
+                cursor = conn.execute(f"DELETE FROM embeddings WHERE record_id IN ({placeholders})", ids)
+                conn.commit()
+                return int(cursor.rowcount or 0)
+
+    def fetch_embeddings(self, record_ids: list[str] | None = None, limit: int = 5000) -> dict[str, list[float]]:
+        bounded_limit = max(1, int(limit or 1))
+        if self._db_file is None:
+            return {}
+
+        params: list[Any] = []
+        query = "SELECT record_id, embedding FROM embeddings"
+        clean_ids = [str(item).strip() for item in (record_ids or []) if str(item).strip()]
+        if clean_ids:
+            placeholders = ", ".join("?" for _ in clean_ids)
+            query += f" WHERE record_id IN ({placeholders})"
+            params.extend(clean_ids)
+        query += " ORDER BY created_at DESC, record_id DESC LIMIT ?"
+        params.append(bounded_limit)
+
+        with self._lock:
+            with sqlite3.connect(str(self._db_file)) as conn:
+                rows = conn.execute(query, params).fetchall()
+
+        out: dict[str, list[float]] = {}
+        for row_id, row_embedding in rows:
+            clean_id = str(row_id or "").strip()
+            if not clean_id:
+                continue
+            parsed = self._normalize_embedding(row_embedding)
+            if parsed is None:
+                continue
+            out[clean_id] = parsed
+        return out
+
+    def query_similar_embeddings(
+        self,
+        query_embedding: list[float],
+        record_ids: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        normalized_query = self._normalize_embedding(query_embedding)
+        if normalized_query is None:
+            return []
+        bounded_limit = max(1, int(limit or 1))
+        embeddings = self.fetch_embeddings(record_ids=record_ids, limit=max(bounded_limit, 5000))
+        if not embeddings:
+            return []
+
+        scored: list[dict[str, Any]] = []
+        for row_id, vector in embeddings.items():
+            score = self._cosine_similarity(normalized_query, vector)
+            scored.append({"record_id": row_id, "score": float(score)})
+        scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
+        return scored[:bounded_limit]
+
 
 @dataclass(slots=True)
 class PgvectorMemoryBackend:
@@ -193,6 +346,40 @@ class PgvectorMemoryBackend:
         if not self._is_valid_pg_url():
             return False
         return self._detect_driver()[0] is not None
+
+    @staticmethod
+    def _normalize_embedding(raw: Any) -> list[float] | None:
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                return None
+        if not isinstance(raw, list) or not raw:
+            return None
+        out: list[float] = []
+        for item in raw:
+            try:
+                out.append(float(item))
+            except Exception:
+                return None
+        return out if out else None
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = 0.0
+        left_norm = 0.0
+        right_norm = 0.0
+        for idx in range(len(left)):
+            lval = float(left[idx])
+            rval = float(right[idx])
+            dot += lval * rval
+            left_norm += lval * lval
+            right_norm += rval * rval
+        if left_norm <= 0.0 or right_norm <= 0.0:
+            return 0.0
+        return float(dot / ((left_norm * right_norm) ** 0.5))
 
     def _is_valid_pg_url(self) -> bool:
         raw_url = str(self.pgvector_url or "").strip()
@@ -248,9 +435,20 @@ class PgvectorMemoryBackend:
                     )
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS embeddings (
+                        record_id TEXT PRIMARY KEY,
+                        embedding TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        source TEXT NOT NULL
+                    )
+                    """
+                )
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_layer ON layer_records(layer)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_category ON layer_records(category)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_updated_at ON layer_records(updated_at)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at)")
                 conn.commit()
             except Exception:
                 try:
@@ -416,6 +614,150 @@ class PgvectorMemoryBackend:
                 }
             )
         return out
+
+    def upsert_embedding(self, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
+        clean_id = str(record_id or "").strip()
+        normalized = self._normalize_embedding(embedding)
+        if not clean_id or normalized is None:
+            return
+        conn = self._open_connection()
+        if conn is None:
+            return
+        with self._lock:
+            cursor = None
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO embeddings (record_id, embedding, created_at, source)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT(record_id) DO UPDATE SET
+                        embedding = EXCLUDED.embedding,
+                        created_at = EXCLUDED.created_at,
+                        source = EXCLUDED.source
+                    """,
+                    (
+                        clean_id,
+                        json.dumps(normalized, ensure_ascii=False),
+                        str(created_at or ""),
+                        str(source or ""),
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def delete_embeddings(self, record_ids: list[str] | set[str]) -> int:
+        ids = [str(item).strip() for item in record_ids if str(item).strip()]
+        if not ids:
+            return 0
+        conn = self._open_connection()
+        if conn is None:
+            return 0
+
+        placeholders = ", ".join("%s" for _ in ids)
+        with self._lock:
+            cursor = None
+            try:
+                cursor = conn.cursor()
+                cursor.execute(f"DELETE FROM embeddings WHERE record_id IN ({placeholders})", tuple(ids))
+                deleted = int(getattr(cursor, "rowcount", 0) or 0)
+                conn.commit()
+                return deleted
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return 0
+            finally:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def fetch_embeddings(self, record_ids: list[str] | None = None, limit: int = 5000) -> dict[str, list[float]]:
+        bounded_limit = max(1, int(limit or 1))
+        conn = self._open_connection()
+        if conn is None:
+            return {}
+
+        clean_ids = [str(item).strip() for item in (record_ids or []) if str(item).strip()]
+        query = "SELECT record_id, embedding FROM embeddings"
+        params: list[Any] = []
+        if clean_ids:
+            placeholders = ", ".join("%s" for _ in clean_ids)
+            query += f" WHERE record_id IN ({placeholders})"
+            params.extend(clean_ids)
+        query += " ORDER BY created_at DESC, record_id DESC LIMIT %s"
+        params.append(bounded_limit)
+
+        with self._lock:
+            cursor = None
+            try:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                rows = cursor.fetchall()
+            except Exception:
+                return {}
+            finally:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        out: dict[str, list[float]] = {}
+        for row_id, row_embedding in rows:
+            clean_id = str(row_id or "").strip()
+            if not clean_id:
+                continue
+            parsed = self._normalize_embedding(row_embedding)
+            if parsed is None:
+                continue
+            out[clean_id] = parsed
+        return out
+
+    def query_similar_embeddings(
+        self,
+        query_embedding: list[float],
+        record_ids: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        normalized_query = self._normalize_embedding(query_embedding)
+        if normalized_query is None:
+            return []
+        bounded_limit = max(1, int(limit or 1))
+        embeddings = self.fetch_embeddings(record_ids=record_ids, limit=max(bounded_limit, 5000))
+        if not embeddings:
+            return []
+        scored: list[dict[str, Any]] = []
+        for row_id, vector in embeddings.items():
+            scored.append({"record_id": row_id, "score": self._cosine_similarity(normalized_query, vector)})
+        scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
+        return scored[:bounded_limit]
 
 
 def resolve_memory_backend(backend_name: str, pgvector_url: str = "") -> MemoryBackend:

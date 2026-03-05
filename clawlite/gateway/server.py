@@ -22,7 +22,7 @@ from clawlite.config.schema import AppConfig
 from clawlite.core.engine import AgentEngine, LoopDetectionSettings
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_backend import resolve_memory_backend
-from clawlite.core.memory_monitor import MemoryMonitor
+from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
@@ -652,6 +652,7 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
 
     monitor = getattr(runtime, "memory_monitor", None)
     channels = getattr(runtime, "channels", None)
+    memory_store = getattr(getattr(runtime, "engine", None), "memory", None)
     if monitor is not None and channels is not None:
         try:
             suggestions = await monitor.scan()
@@ -700,6 +701,87 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
                         suggestion.suggestion_id,
                         exc,
                     )
+
+        try:
+            channel = "cli"
+            target = "profile"
+            if memory_store is not None and hasattr(memory_store, "all"):
+                try:
+                    history_rows = await asyncio.to_thread(memory_store.all)
+                except Exception:
+                    history_rows = []
+                latest_source = ""
+                latest_stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+                for row in history_rows:
+                    source = str(getattr(row, "source", "") or "").strip()
+                    created_raw = str(getattr(row, "created_at", "") or "")
+                    try:
+                        created_at = dt.datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=dt.timezone.utc)
+                    except Exception:
+                        created_at = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+                    if source and created_at >= latest_stamp:
+                        latest_stamp = created_at
+                        latest_source = source
+                if latest_source:
+                    channel, target = MemoryMonitor._delivery_route_from_source(latest_source)
+
+            if memory_store is not None and hasattr(memory_store, "retrieve"):
+                proactive = await memory_store.retrieve(
+                    "What should be the next proactive follow-up question?",
+                    method="llm",
+                    limit=5,
+                )
+                next_step_query = str(proactive.get("next_step_query", "") or "").strip()
+                if next_step_query:
+                    suggestion = MemorySuggestion(
+                        text=next_step_query,
+                        priority=0.74,
+                        trigger="next_step_query",
+                        channel=channel,
+                        target=target,
+                        metadata={
+                            "trigger": "next_step_query",
+                            "source": "memory_llm",
+                        },
+                    )
+                    if monitor.should_deliver(suggestion, min_priority=0.7):
+                        metadata = {
+                            "source": "memory_monitor",
+                            "suggestion_id": suggestion.suggestion_id,
+                            "trigger": "next_step_query",
+                            "priority": float(getattr(suggestion, "priority", 0.0) or 0.0),
+                            **dict(getattr(suggestion, "metadata", {}) or {}),
+                        }
+                        try:
+                            await channels.send(
+                                channel=suggestion.channel,
+                                target=suggestion.target,
+                                text=suggestion.text,
+                                metadata=metadata,
+                            )
+                        except Exception as exc:
+                            bind_event("heartbeat.memory", session="heartbeat:system").warning(
+                                "next-step suggestion delivery failed channel={} target={} error={}",
+                                suggestion.channel,
+                                suggestion.target,
+                                exc,
+                            )
+                            try:
+                                monitor.mark_failed(suggestion, error=str(exc))
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                monitor.mark_delivered(suggestion)
+                            except Exception:
+                                pass
+        except Exception as exc:
+            bind_event("heartbeat.memory", session="heartbeat:system").warning(
+                "next-step proactive retrieval failed error={}",
+                exc,
+            )
 
     return decision
 

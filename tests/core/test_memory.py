@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import sys
 import types
 import asyncio
@@ -762,6 +763,62 @@ def test_memory_async_memorize_ingests_url_audio_fallback_text_and_modality(tmp_
     asyncio.run(_scenario())
 
 
+def test_memory_async_memorize_ingests_url_html_extracts_text_without_network(tmp_path: Path, monkeypatch) -> None:
+    class _Headers:
+        @staticmethod
+        def get_content_type() -> str:
+            return "text/html"
+
+        @staticmethod
+        def get_content_charset() -> str:
+            return "utf-8"
+
+    class _Response:
+        headers = _Headers()
+
+        @staticmethod
+        def read(_max_bytes: int = -1) -> bytes:
+            return b"<html><body><h1>Alpha</h1><p>Launch timeline updated.</p></body></html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+    def _fake_urlopen(request, timeout: float = 0.0):
+        del request, timeout
+        return _Response()
+
+    monkeypatch.setattr("clawlite.core.memory.urllib.request.urlopen", _fake_urlopen)
+
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        result = await store.memorize(url="https://example.com/news", modality="text", source="session:url")
+        assert result["status"] == "ok"
+        text = str(result["record"]["text"]).lower()
+        assert "alpha" in text
+        assert "launch timeline updated" in text
+
+    asyncio.run(_scenario())
+
+
+def test_memory_async_memorize_non_text_modality_fallback_keeps_reference_and_modality(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        image_path = tmp_path / "diagram.png"
+        result = await store.memorize(file_path=str(image_path), modality="image", source="session:image")
+
+        assert result["status"] == "ok"
+        assert result["record"]["modality"] == "image"
+        text = str(result["record"]["text"]).lower()
+        assert "ingested image file reference" in text
+        assert "diagram.png" in text
+
+    asyncio.run(_scenario())
+
+
 def test_memory_async_retrieve_rag_and_llm_fallback(tmp_path: Path, monkeypatch) -> None:
     async def _scenario() -> None:
         store = MemoryStore(tmp_path / "memory.jsonl")
@@ -932,11 +989,34 @@ def test_memory_encrypted_category_roundtrip_preserves_plain_reads(tmp_path: Pat
     raw_lines = [line for line in store.history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert raw_lines
     stored = json.loads(raw_lines[0])
-    assert stored["text"].startswith("enc:v1:")
+    assert stored["text"].startswith("enc:v2:")
+    assert store.privacy_key_path.exists()
 
     read_back = store.all()
     assert read_back[0].text == "sensitive context text"
     assert store.search("sensitive", limit=1)[0].text == "sensitive context text"
+
+
+def test_memory_decrypt_supports_legacy_enc_v1_rows(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    legacy_text = base64.urlsafe_b64encode("legacy encrypted text".encode("utf-8")).decode("ascii")
+    store.history_path.write_text(
+        json.dumps(
+            {
+                "id": "legacy-v1",
+                "text": f"enc:v1:{legacy_text}",
+                "source": "session:legacy",
+                "created_at": "2026-03-01T00:00:00+00:00",
+                "category": "context",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = store.all()
+    assert len(rows) == 1
+    assert rows[0].text == "legacy encrypted text"
 
 
 def test_memory_profile_auto_update_from_preferences_timezone_and_topics(tmp_path: Path) -> None:

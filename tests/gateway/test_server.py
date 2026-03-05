@@ -534,6 +534,115 @@ def test_run_heartbeat_sends_high_priority_memory_suggestions() -> None:
     asyncio.run(_scenario())
 
 
+def test_run_heartbeat_sends_next_step_query_proactive_suggestion() -> None:
+    class _Memory:
+        async def retrieve(self, query: str, *, method: str = "rag", limit: int = 5):
+            assert query
+            assert method == "llm"
+            assert limit == 5
+            return {
+                "status": "ok",
+                "method": "llm",
+                "next_step_query": "Should we confirm the deployment owner?",
+            }
+
+        def all(self):
+            return [SimpleNamespace(source="session:telegram:chat42", created_at="2026-03-05T00:00:00+00:00")]
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.memory = _Memory()
+
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id, user_text
+            return SimpleNamespace(text="HEARTBEAT_OK")
+
+    class _Monitor:
+        def __init__(self) -> None:
+            self.delivered = 0
+            self.failed = 0
+
+        async def scan(self):
+            return []
+
+        def should_deliver(self, suggestion, *, min_priority: float = 0.0) -> bool:
+            return float(getattr(suggestion, "priority", 0.0) or 0.0) >= float(min_priority)
+
+        def mark_delivered(self, suggestion) -> bool:
+            del suggestion
+            self.delivered += 1
+            return True
+
+        def mark_failed(self, suggestion, *, error: str = "") -> bool:
+            del suggestion, error
+            self.failed += 1
+            return True
+
+    async def _scenario() -> None:
+        monitor = _Monitor()
+        channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
+        runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=monitor)
+
+        decision = await _run_heartbeat(runtime)
+
+        assert decision.action == "skip"
+        channels.send.assert_awaited_once()
+        kwargs = channels.send.await_args.kwargs
+        assert kwargs["channel"] == "telegram"
+        assert kwargs["target"] == "chat42"
+        assert kwargs["text"] == "Should we confirm the deployment owner?"
+        assert kwargs["metadata"]["trigger"] == "next_step_query"
+        assert monitor.delivered == 1
+        assert monitor.failed == 0
+
+    asyncio.run(_scenario())
+
+
+def test_run_heartbeat_next_step_retrieve_fail_soft() -> None:
+    class _Memory:
+        async def retrieve(self, query: str, *, method: str = "rag", limit: int = 5):
+            del query, method, limit
+            raise RuntimeError("retrieve failed")
+
+        def all(self):
+            return [SimpleNamespace(source="session:cli:profile", created_at="2026-03-05T00:00:00+00:00")]
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.memory = _Memory()
+
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id, user_text
+            return SimpleNamespace(text="HEARTBEAT_OK")
+
+    class _Monitor:
+        async def scan(self):
+            return []
+
+        def should_deliver(self, suggestion, *, min_priority: float = 0.0) -> bool:
+            del suggestion
+            return min_priority <= 0.0
+
+        def mark_delivered(self, suggestion) -> bool:
+            del suggestion
+            return False
+
+        def mark_failed(self, suggestion, *, error: str = "") -> bool:
+            del suggestion, error
+            return False
+
+    async def _scenario() -> None:
+        channels = SimpleNamespace(send=AsyncMock(return_value="msg-1"))
+        runtime = SimpleNamespace(engine=_Engine(), channels=channels, memory_monitor=_Monitor())
+        decision = await _run_heartbeat(runtime)
+
+        assert decision.action == "skip"
+        assert decision.reason == "heartbeat_ok"
+        channels.send.assert_not_awaited()
+
+    asyncio.run(_scenario())
+
+
 def test_run_heartbeat_skips_low_priority_suggestions() -> None:
     class _Engine:
         async def run(self, *, session_id: str, user_text: str):

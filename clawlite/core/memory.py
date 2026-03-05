@@ -4,17 +4,23 @@ import json
 import gzip
 import hashlib
 import base64
+import hmac
 import math
+import os
 import re
 import asyncio
+import secrets
 import threading
 import unicodedata
 import uuid
+import urllib.error
+import urllib.request
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from html import unescape
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -288,6 +294,7 @@ class MemoryStore:
         self.embeddings_home = self.memory_home / "embeddings"
         self.emotional_path = self.memory_home / "emotional"
         self.privacy_path = self.memory_home / "privacy.json"
+        self.privacy_key_path = self.memory_home / "privacy.key"
         self.privacy_audit_path = self.memory_home / "privacy-audit.jsonl"
         self.versions_path = self.memory_home / "versions"
         self.users_path = self.memory_home / "users"
@@ -379,8 +386,12 @@ class MemoryStore:
             "privacy_encrypt_errors": 0,
             "privacy_decrypt_events": 0,
             "privacy_decrypt_errors": 0,
+            "privacy_key_load_events": 0,
+            "privacy_key_create_events": 0,
+            "privacy_key_errors": 0,
             "last_error": "",
         }
+        self._privacy_key: bytes | None = None
 
     @staticmethod
     def _ensure_file(path: Path, *, default: str) -> None:
@@ -632,7 +643,70 @@ class MemoryStore:
 
     @staticmethod
     def _encrypted_prefix() -> str:
+        return "enc:v2:"
+
+    @staticmethod
+    def _legacy_encrypted_prefix() -> str:
         return "enc:v1:"
+
+    @staticmethod
+    def _xor_with_keystream(data: bytes, *, key: bytes, nonce: bytes) -> bytes:
+        output = bytearray(len(data))
+        counter = 0
+        cursor = 0
+        while cursor < len(data):
+            block = hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+            take = min(len(block), len(data) - cursor)
+            for idx in range(take):
+                output[cursor + idx] = data[cursor + idx] ^ block[idx]
+            cursor += take
+            counter += 1
+        return bytes(output)
+
+    def _load_or_create_privacy_key(self) -> bytes | None:
+        cached = self._privacy_key
+        if isinstance(cached, (bytes, bytearray)) and len(cached) == 32:
+            return bytes(cached)
+
+        try:
+            if self.privacy_key_path.exists():
+                raw = self.privacy_key_path.read_bytes()
+                if len(raw) == 32:
+                    self._privacy_key = raw
+                    self._diagnostics["privacy_key_load_events"] = int(self._diagnostics["privacy_key_load_events"]) + 1
+                    return raw
+                stripped = raw.strip()
+                try:
+                    decoded = base64.urlsafe_b64decode(stripped)
+                except Exception:
+                    decoded = b""
+                if len(decoded) == 32:
+                    self._privacy_key = decoded
+                    self._diagnostics["privacy_key_load_events"] = int(self._diagnostics["privacy_key_load_events"]) + 1
+                    return decoded
+        except Exception as exc:
+            self._diagnostics["privacy_key_errors"] = int(self._diagnostics["privacy_key_errors"]) + 1
+            self._diagnostics["last_error"] = str(exc)
+
+        key = secrets.token_bytes(32)
+        try:
+            fd = os.open(str(self.privacy_key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(key)
+                    fh.flush()
+            finally:
+                try:
+                    os.chmod(self.privacy_key_path, 0o600)
+                except Exception:
+                    pass
+            self._privacy_key = key
+            self._diagnostics["privacy_key_create_events"] = int(self._diagnostics["privacy_key_create_events"]) + 1
+            return key
+        except Exception as exc:
+            self._diagnostics["privacy_key_errors"] = int(self._diagnostics["privacy_key_errors"]) + 1
+            self._diagnostics["last_error"] = str(exc)
+            return None
 
     def _is_encrypted_category(self, category: str, *, settings: dict[str, Any] | None = None) -> bool:
         payload = settings if isinstance(settings, dict) else self._privacy_settings()
@@ -649,7 +723,13 @@ class MemoryStore:
         if not self._is_encrypted_category(category, settings=settings):
             return clean
         try:
-            encoded = base64.urlsafe_b64encode(clean.encode("utf-8")).decode("ascii")
+            key = self._load_or_create_privacy_key()
+            if key is None:
+                return clean
+            nonce = secrets.token_bytes(16)
+            ciphertext = self._xor_with_keystream(clean.encode("utf-8"), key=key, nonce=nonce)
+            tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+            encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
             self._diagnostics["privacy_encrypt_events"] = int(self._diagnostics["privacy_encrypt_events"]) + 1
             return f"{self._encrypted_prefix()}{encoded}"
         except Exception as exc:
@@ -661,16 +741,33 @@ class MemoryStore:
         clean = str(text or "")
         if not clean:
             return clean
-        prefix = self._encrypted_prefix()
-        if not clean.startswith(prefix):
+        prefix_v2 = self._encrypted_prefix()
+        prefix_v1 = self._legacy_encrypted_prefix()
+        if not clean.startswith(prefix_v2) and not clean.startswith(prefix_v1):
             return clean
         # Decrypt whenever marker is present to preserve backward compatibility
         # when privacy.encrypted_categories changes over time.
         _ = category
         _ = settings
         try:
-            encoded = clean[len(prefix) :]
-            decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8")
+            if clean.startswith(prefix_v2):
+                encoded = clean[len(prefix_v2) :]
+                payload = base64.urlsafe_b64decode(encoded.encode("ascii"))
+                if len(payload) < 16 + 32:
+                    raise ValueError("invalid_enc_v2_payload")
+                nonce = payload[:16]
+                ciphertext = payload[16:-32]
+                tag = payload[-32:]
+                key = self._load_or_create_privacy_key()
+                if key is None:
+                    return clean
+                expected_tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+                if not hmac.compare_digest(tag, expected_tag):
+                    raise ValueError("invalid_enc_v2_tag")
+                decoded = self._xor_with_keystream(ciphertext, key=key, nonce=nonce).decode("utf-8")
+            else:
+                encoded = clean[len(prefix_v1) :]
+                decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8")
             self._diagnostics["privacy_decrypt_events"] = int(self._diagnostics["privacy_decrypt_events"]) + 1
             return decoded
         except Exception as exc:
@@ -946,6 +1043,15 @@ class MemoryStore:
         with self._locked_file(self.embeddings_path, "a", exclusive=True) as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
             fh.flush()
+        try:
+            self.backend.upsert_embedding(
+                str(record_id or ""),
+                list(embedding),
+                str(created_at or ""),
+                str(source or ""),
+            )
+        except Exception:
+            pass
 
     def _read_embeddings_map(self) -> dict[str, list[float]]:
         out: dict[str, list[float]] = {}
@@ -968,6 +1074,17 @@ class MemoryStore:
             if embedding is None:
                 continue
             out[row_id] = embedding
+        try:
+            backend_embeddings = self.backend.fetch_embeddings(limit=20000)
+            if isinstance(backend_embeddings, dict):
+                for row_id, vector in backend_embeddings.items():
+                    clean_id = str(row_id or "").strip()
+                    normalized = self._normalize_embedding(vector)
+                    if not clean_id or normalized is None:
+                        continue
+                    out[clean_id] = normalized
+        except Exception:
+            pass
         return out
 
     def _prune_embeddings_for_ids(self, removed_ids: set[str]) -> int:
@@ -1000,6 +1117,10 @@ class MemoryStore:
             if kept_lines:
                 fh.write("\n".join(kept_lines) + "\n")
             fh.flush()
+        try:
+            self.backend.delete_embeddings(list(removed_ids))
+        except Exception:
+            pass
         return removed
 
     def backfill_embeddings(self, *, limit: int | None = None) -> dict[str, int | bool]:
@@ -1217,6 +1338,45 @@ class MemoryStore:
                 return value[:600]
         return ""
 
+    @staticmethod
+    def _compact_whitespace(value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    @classmethod
+    def _try_ocr_image_text(cls, target: Path) -> str:
+        try:
+            from PIL import Image  # type: ignore
+            import pytesseract  # type: ignore
+        except Exception:
+            return ""
+        try:
+            with Image.open(target) as image:
+                extracted = pytesseract.image_to_string(image)
+        except Exception:
+            return ""
+        return cls._compact_whitespace(extracted)
+
+    @classmethod
+    def _try_transcribe_audio_text(cls, target: Path) -> str:
+        try:
+            import whisper  # type: ignore
+
+            model = whisper.load_model("base")
+            result = model.transcribe(str(target))
+            if isinstance(result, dict):
+                return cls._compact_whitespace(str(result.get("text", "") or ""))
+        except Exception:
+            pass
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(str(target))
+            joined = " ".join(str(getattr(seg, "text", "") or "") for seg in segments)
+            return cls._compact_whitespace(joined)
+        except Exception:
+            return ""
+
     @classmethod
     def _memory_text_from_file(
         cls,
@@ -1233,14 +1393,32 @@ class MemoryStore:
                 content = target.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 content = ""
-            excerpt = content[:4000].strip()
+            excerpt = cls._compact_whitespace(content)[:4000].strip()
             if excerpt:
                 return excerpt
 
+        image_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+        audio_suffixes = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"}
+        modality_clean = str(modality or "").strip().lower()
+
+        if suffix in image_suffixes or modality_clean == "image":
+            ocr_text = cls._try_ocr_image_text(target)
+            if ocr_text:
+                return ocr_text[:4000]
+
+        if suffix in audio_suffixes or modality_clean == "audio":
+            transcript = cls._try_transcribe_audio_text(target)
+            if transcript:
+                return transcript[:4000]
+
         synthetic = [f"Ingested {modality} file reference: {target.name} ({target})."]
+        if modality_clean == "image":
+            synthetic.append("OCR hook unavailable; stored as reference.")
+        if modality_clean == "audio":
+            synthetic.append("Transcription hook unavailable; stored as reference.")
         if hint:
             synthetic.append(f"Supplemental metadata: {hint}")
-        return " ".join(synthetic)[:4000]
+        return cls._compact_whitespace(" ".join(synthetic))[:4000]
 
     @classmethod
     def _memory_text_from_url(
@@ -1250,11 +1428,68 @@ class MemoryStore:
         modality: str,
         metadata: dict[str, Any] | None,
     ) -> str:
+        raw_url = str(url or "").strip()
         hint = cls._metadata_hint(metadata)
-        parts = [f"Ingested {modality} URL reference: {url.strip()}."]
+        if not raw_url:
+            parts = [f"Ingested {modality} URL reference: {raw_url}."]
+            if hint:
+                parts.append(f"Supplemental metadata: {hint}")
+            return cls._compact_whitespace(" ".join(parts))[:4000]
+
+        try:
+            request = urllib.request.Request(raw_url, headers={"User-Agent": "ClawLiteMemory/1.0"})
+            with urllib.request.urlopen(request, timeout=6.0) as response:
+                payload = response.read(200_000)
+                headers = getattr(response, "headers", None)
+
+            content_type = ""
+            charset = "utf-8"
+            if headers is not None:
+                try:
+                    content_type = str(headers.get_content_type() or "").strip().lower()
+                except Exception:
+                    content_type = ""
+                try:
+                    charset = str(headers.get_content_charset() or "utf-8").strip() or "utf-8"
+                except Exception:
+                    charset = "utf-8"
+                if not content_type:
+                    try:
+                        content_type = str(headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
+                    except Exception:
+                        content_type = ""
+
+            decoded = payload.decode(charset, errors="ignore")
+            extracted = ""
+            if "json" in content_type:
+                try:
+                    parsed = json.loads(decoded)
+                    if isinstance(parsed, (dict, list)):
+                        extracted = json.dumps(parsed, ensure_ascii=False)
+                    else:
+                        extracted = str(parsed)
+                except Exception:
+                    extracted = decoded
+            elif "html" in content_type:
+                without_scripts = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", decoded)
+                without_styles = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", without_scripts)
+                no_tags = re.sub(r"(?s)<[^>]+>", " ", without_styles)
+                extracted = unescape(no_tags)
+            elif content_type.startswith("text/") or not content_type:
+                extracted = decoded
+
+            compact = cls._compact_whitespace(extracted)[:4000]
+            if compact:
+                return compact
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            pass
+        except Exception:
+            pass
+
+        parts = [f"Ingested {modality} URL reference: {raw_url}."]
         if hint:
             parts.append(f"Supplemental metadata: {hint}")
-        return " ".join(parts)[:4000]
+        return cls._compact_whitespace(" ".join(parts))[:4000]
 
     @staticmethod
     def _detect_emotional_tone(text: str) -> str:
@@ -2495,14 +2730,41 @@ class MemoryStore:
         if semantic_enabled:
             query_embedding = self._generate_embedding(query)
             if query_embedding is not None:
-                embeddings = self._read_embeddings_map()
-                if embeddings:
-                    for idx, row in enumerate(records):
-                        vector = embeddings.get(row.id)
-                        if vector is None:
+                similarity_hits: list[dict[str, Any]] = []
+                try:
+                    similarity_hits = self.backend.query_similar_embeddings(
+                        query_embedding,
+                        record_ids=[row.id for row in records if str(row.id or "").strip()],
+                        limit=max(1, len(records)),
+                    )
+                except Exception:
+                    similarity_hits = []
+
+                if similarity_hits:
+                    score_by_id: dict[str, float] = {}
+                    for hit in similarity_hits:
+                        if not isinstance(hit, dict):
                             continue
-                        semantic_scores[idx] = self._cosine_similarity(query_embedding, vector)
-                    semantic_active = True
+                        row_id = str(hit.get("record_id", "")).strip()
+                        if not row_id:
+                            continue
+                        try:
+                            score_by_id[row_id] = float(hit.get("score", 0.0) or 0.0)
+                        except Exception:
+                            continue
+                    if score_by_id:
+                        for idx, row in enumerate(records):
+                            semantic_scores[idx] = score_by_id.get(str(row.id or ""), 0.0)
+                        semantic_active = True
+                if not semantic_active:
+                    embeddings = self._read_embeddings_map()
+                    if embeddings:
+                        for idx, row in enumerate(records):
+                            vector = embeddings.get(row.id)
+                            if vector is None:
+                                continue
+                            semantic_scores[idx] = self._cosine_similarity(query_embedding, vector)
+                        semantic_active = True
 
         scored: list[tuple[float, float, float, int]] = []
         for idx, toks in enumerate(corpus_tokens):
@@ -2940,6 +3202,9 @@ class MemoryStore:
             "privacy_encrypt_errors": int(self._diagnostics["privacy_encrypt_errors"]),
             "privacy_decrypt_events": int(self._diagnostics["privacy_decrypt_events"]),
             "privacy_decrypt_errors": int(self._diagnostics["privacy_decrypt_errors"]),
+            "privacy_key_load_events": int(self._diagnostics["privacy_key_load_events"]),
+            "privacy_key_create_events": int(self._diagnostics["privacy_key_create_events"]),
+            "privacy_key_errors": int(self._diagnostics["privacy_key_errors"]),
             "last_error": str(self._diagnostics["last_error"]),
         }
 
