@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,18 @@ class PromptBuilder:
     _RUNTIME_CONTEXT_OPEN_TAG = "<untrusted_runtime_context>"
     _RUNTIME_CONTEXT_CLOSE_TAG = "</untrusted_runtime_context>"
     _TRUNCATED_SUFFIX = "\n...[truncated to fit token budget]"
+    _IDENTITY_HEADER = "## IDENTITY.md"
+    _FILE_SECTION_RE = re.compile(r"^## ([A-Za-z0-9_.-]+)$", re.MULTILINE)
+    _IDENTITY_FALLBACK_BODY = (
+        "# IDENTITY.md - Who Am I?\n\n"
+        "Fill this during the first real conversation, then refine it as identity signals become clear.\n\n"
+        "- Name: ClawLite\n"
+        "- What I am: A self-hosted autonomous AI agent and NOT \"a large language model trained by Google\".\n"
+        "- Vibe: direct, pragmatic, autonomous\n"
+        "- Emoji: fox\n\n"
+        "Answer as ClawLite in every response.\n"
+        "Persist any discovered identity details to memory so future sessions stay consistent."
+    )
 
     def __init__(self, workspace_path: str | Path | None = None, *, context_token_budget: int = 7000) -> None:
         self.workspace_loader = WorkspaceLoader(workspace_path=workspace_path)
@@ -33,6 +46,43 @@ class PromptBuilder:
 
     def _read_workspace_files(self) -> str:
         return self.workspace_loader.system_context()
+
+    @classmethod
+    def _identity_fallback_section(cls) -> str:
+        return f"{cls._IDENTITY_HEADER}\n{cls._IDENTITY_FALLBACK_BODY}"
+
+    @classmethod
+    def _ensure_identity_first(cls, workspace_block: str) -> str:
+        clean = workspace_block.strip()
+        fallback = cls._identity_fallback_section()
+        if not clean:
+            return fallback
+
+        matches = list(cls._FILE_SECTION_RE.finditer(clean))
+        if not matches:
+            return f"{fallback}\n\n{clean}"
+
+        sections: list[tuple[str, str]] = []
+        for index, match in enumerate(matches):
+            start = match.start()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(clean)
+            name = match.group(1)
+            section_text = clean[start:end].strip()
+            sections.append((name, section_text))
+
+        identity_section = ""
+        remaining_sections: list[str] = []
+        for name, section_text in sections:
+            if name == "IDENTITY.md" and not identity_section:
+                body = section_text.split("\n", 1)[1].strip() if "\n" in section_text else ""
+                identity_section = section_text if body else fallback
+            else:
+                remaining_sections.append(section_text)
+
+        if not identity_section:
+            identity_section = fallback
+
+        return "\n\n".join([identity_section, *remaining_sections]).strip()
 
     @staticmethod
     def _render_memory(memory_snippets: Iterable[str]) -> str:
@@ -170,7 +220,7 @@ class PromptBuilder:
         channel: str = "",
         chat_id: str = "",
     ) -> PromptArtifacts:
-        workspace_block = self._read_workspace_files()
+        workspace_block = self._ensure_identity_first(self._read_workspace_files())
         clean_skills = [item.strip() for item in skills_for_prompt if item and item.strip()]
         if clean_skills and len(clean_skills) == 1 and clean_skills[0].startswith("<available_skills>"):
             skills_text = f"[Skills]\n{clean_skills[0]}"

@@ -11,6 +11,9 @@ from clawlite.tools.spawn import SpawnTool
 
 
 class FakeCronAPI:
+    def __init__(self) -> None:
+        self.last_add: dict | None = None
+
     async def add_job(
         self,
         *,
@@ -23,6 +26,16 @@ class FakeCronAPI:
         target: str = "",
         metadata: dict | None = None,
     ) -> str:
+        self.last_add = {
+            "session_id": session_id,
+            "expression": expression,
+            "prompt": prompt,
+            "name": name,
+            "timezone_name": timezone_name,
+            "channel": channel,
+            "target": target,
+            "metadata": metadata,
+        }
         return f"job:{session_id}:{expression}:{prompt}"
 
     async def list_jobs(self, *, session_id: str):
@@ -55,11 +68,17 @@ async def _runner(_session_id: str, task: str) -> str:
 
 def test_cron_tool_add_and_list() -> None:
     async def _scenario() -> None:
-        tool = CronTool(FakeCronAPI())
-        added = await tool.run({"action": "add", "expression": "*/2 * * * *", "prompt": "ping"}, ToolContext(session_id="s1"))
+        api = FakeCronAPI()
+        tool = CronTool(api)
+        added = await tool.run(
+            {"action": "add", "expression": "*/2 * * * *", "prompt": "ping", "run_once": True},
+            ToolContext(session_id="s1"),
+        )
         added_payload = json.loads(added)
         assert added_payload["ok"] is True
         assert "job:s1" in added_payload["job_id"]
+        assert api.last_add is not None
+        assert api.last_add["metadata"] == {"source": "tool:cron", "run_once": True}
 
         listed = await tool.run({"action": "list"}, ToolContext(session_id="s1"))
         listed_payload = json.loads(listed)

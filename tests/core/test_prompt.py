@@ -70,3 +70,36 @@ def test_prompt_builder_applies_token_budget_shaping_deterministically(tmp_path:
     assert len(out.history_messages) == 1
     assert "recent-message" in out.history_messages[0]["content"]
     assert "old-message" not in out.history_messages[0]["content"]
+
+
+def test_prompt_builder_injects_identity_first_when_identity_missing(tmp_path: Path) -> None:
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=[],
+    )
+
+    assert out.system_prompt.startswith("## IDENTITY.md")
+    assert "self-hosted autonomous AI agent" in out.system_prompt
+    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find("## IDENTITY.md")
+
+
+def test_prompt_builder_injects_identity_first_when_identity_empty(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=[],
+    )
+
+    assert out.system_prompt.startswith("## IDENTITY.md")
+    assert "Answer as ClawLite in every response." in out.system_prompt
+    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find("## IDENTITY.md")

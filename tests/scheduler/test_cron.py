@@ -60,6 +60,53 @@ def test_cron_service_enable_disable_and_manual_run(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_cron_service_run_once_is_auto_removed_in_loop(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json")
+        completed = asyncio.Event()
+
+        async def _on_job(_job):
+            completed.set()
+            return "ok"
+
+        job_id = await service.add_job(
+            session_id="s1",
+            expression="every 1",
+            prompt="single shot",
+            metadata={"run_once": True},
+        )
+
+        await service.start(_on_job)
+        await asyncio.wait_for(completed.wait(), timeout=3.0)
+        await asyncio.sleep(0.1)
+        await service.stop()
+
+        assert service.get_job(job_id) is None
+
+    asyncio.run(_scenario())
+
+
+def test_cron_service_run_once_is_auto_removed_in_manual_run(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json")
+
+        async def _on_job(_job):
+            return "ok"
+
+        job_id = await service.add_job(
+            session_id="s1",
+            expression="every 60",
+            prompt="manual single shot",
+            metadata={"run_once": True},
+        )
+
+        out = await service.run_job(job_id, on_job=_on_job)
+        assert out == "ok"
+        assert service.get_job(job_id) is None
+
+    asyncio.run(_scenario())
+
+
 def test_cron_service_timezone_validation_and_next_run(tmp_path: Path) -> None:
     async def _scenario() -> None:
         store = tmp_path / "cron.json"

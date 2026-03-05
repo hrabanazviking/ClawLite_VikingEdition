@@ -53,6 +53,10 @@ class CronTool(Tool):
                 "channel": {"type": "string"},
                 "target": {"type": "string"},
                 "force": {"type": "boolean"},
+                "run_once": {
+                    "type": "boolean",
+                    "description": "If true, runs exactly once and is automatically removed. Use for one-time delays like 'send in 5 minutes'.",
+                },
             },
             "required": ["action"],
         }
@@ -68,6 +72,7 @@ class CronTool(Tool):
             timezone_name = str(arguments.get("timezone", "")).strip() or str(arguments.get("tz", "")).strip() or None
             channel = str(arguments.get("channel", "")).strip() or ctx.channel
             target = str(arguments.get("target", "")).strip() or ctx.user_id
+            run_once = self._coerce_bool(arguments.get("run_once"), default=False)
             if not expression or not prompt:
                 raise ValueError("expression and prompt are required for action=add")
 
@@ -79,7 +84,7 @@ class CronTool(Tool):
                 timezone_name=timezone_name,
                 channel=channel,
                 target=target,
-                metadata={"source": "tool:cron"},
+                metadata={"source": "tool:cron", "run_once": run_once},
             )
             return json.dumps({"ok": True, "action": action, "job_id": job_id})
 

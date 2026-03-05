@@ -80,9 +80,26 @@ def test_tool_registry_allows_risky_tools_for_cli_channel() -> None:
     asyncio.run(_scenario())
 
 
-def test_tool_registry_default_safety_blocks_run_skill_for_telegram() -> None:
+def test_tool_registry_default_safety_allows_run_skill_for_telegram() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry()
+        reg.register(RunSkillLikeTool())
+        out = await reg.execute("run_skill", {"name": "echo"}, session_id="telegram:1", channel="telegram", user_id="1")
+        assert out == "skill=echo"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_run_skill_for_telegram_when_explicitly_configured() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["run_skill"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
         reg.register(RunSkillLikeTool())
         try:
             await reg.execute("run_skill", {"name": "echo"}, session_id="telegram:1", channel="telegram", user_id="1")

@@ -220,7 +220,7 @@ class CronService:
         while True:
             now = self._now()
             changed = False
-            for job in self._jobs.values():
+            for job in list(self._jobs.values()):
                 if not job.enabled:
                     continue
                 if not job.next_run_iso:
@@ -273,6 +273,12 @@ class CronService:
                     changed = True
                     continue
                 job.last_run_iso = now.isoformat()
+                run_once = bool(job.payload.metadata.get("run_once"))
+                if run_once:
+                    self._jobs.pop(job.id, None)
+                    bind_event("cron.job", session=job.session_id).info("cron job auto-removed after run_once id={}", job.id)
+                    changed = True
+                    continue
                 try:
                     after = self._compute_next(job.schedule, now)
                 except Exception as exc:
@@ -384,6 +390,12 @@ class CronService:
             raise
         now = self._now()
         job.last_run_iso = now.isoformat()
+        run_once = bool(job.payload.metadata.get("run_once"))
+        if run_once:
+            self._jobs.pop(job.id, None)
+            self._save()
+            bind_event("cron.job", session=job.session_id).info("cron job manually auto-removed after run_once id={}", job.id)
+            return out
         try:
             after = self._compute_next(job.schedule, now)
         except Exception as exc:
