@@ -37,6 +37,19 @@ def test_workspace_bootstrap_lifecycle(tmp_path: Path) -> None:
     assert loader.should_run_bootstrap() is False
 
 
+def test_workspace_explicit_bootstrap_cycle_api(tmp_path: Path) -> None:
+    loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
+    loader.bootstrap()
+
+    assert loader.should_run() is True
+    prompt = loader.get_prompt()
+    assert "This file is one-shot only." in prompt
+
+    assert loader.complete() is True
+    assert not (tmp_path / "ws" / "BOOTSTRAP.md").exists()
+    assert loader.should_run() is False
+
+
 def test_workspace_sync_templates_is_deterministic(tmp_path: Path) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
     first = loader.sync_templates()

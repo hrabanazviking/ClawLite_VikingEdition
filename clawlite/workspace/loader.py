@@ -229,6 +229,9 @@ class WorkspaceLoader:
     def should_run_bootstrap(self) -> bool:
         return bool(self.bootstrap_status().get("pending", False))
 
+    def should_run(self) -> bool:
+        return self.should_run_bootstrap()
+
     def bootstrap_prompt(self) -> str:
         if not self.should_run_bootstrap():
             return ""
@@ -237,12 +240,18 @@ class WorkspaceLoader:
             return ""
         return path.read_text(encoding="utf-8", errors="ignore").strip()
 
+    def get_prompt(self) -> str:
+        return self.bootstrap_prompt()
+
     def complete_bootstrap(self) -> bool:
         path = self.bootstrap_path()
         if not path.exists():
             return False
         path.unlink()
         return True
+
+    def complete(self) -> bool:
+        return self.complete_bootstrap()
 
     def heartbeat_prompt(self) -> str:
         path = self.workspace / "HEARTBEAT.md"
