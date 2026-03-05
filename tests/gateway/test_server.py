@@ -1202,6 +1202,56 @@ def test_gateway_ws_req_res_openclaw_compatibility_methods(tmp_path: Path) -> No
             }
 
 
+def test_gateway_diagnostics_ws_telemetry_tracks_frames_and_errors(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as socket:
+            _assert_connect_challenge(socket)
+
+            socket.send_json({"type": "req", "id": "c1", "method": "connect", "params": {}})
+            connect_payload = socket.receive_json()
+            assert connect_payload["ok"] is True
+
+            socket.send_json({"type": "req", "id": "p1", "method": "ping", "params": {}})
+            ping_payload = socket.receive_json()
+            assert ping_payload["ok"] is True
+
+            socket.send_json({"type": "req", "id": "u1", "method": "unsupported.method", "params": {}})
+            unsupported = socket.receive_json()
+            assert unsupported["ok"] is False
+            assert unsupported["error"]["code"] == "unsupported_method"
+
+        ws_payload = client.get("/v1/diagnostics").json()["ws"]
+        ws_alias_payload = client.get("/api/diagnostics").json()["ws"]
+        assert ws_alias_payload == ws_payload
+
+        assert ws_payload["connections_opened"] >= 1
+        assert ws_payload["connections_closed"] >= 1
+        assert ws_payload["active_connections"] == 0
+        assert ws_payload["frames_in"] >= 3
+        assert ws_payload["frames_out"] >= 4
+        assert ws_payload["by_path"]["/ws"] >= 1
+        assert ws_payload["by_message_type_in"]["req"] >= 3
+        assert ws_payload["by_message_type_out"]["event"] >= 1
+        assert ws_payload["by_message_type_out"]["res"] >= 3
+        assert ws_payload["req_methods"]["connect"] >= 1
+        assert ws_payload["req_methods"]["ping"] >= 1
+        assert ws_payload["req_methods"]["unsupported.method"] >= 1
+        assert ws_payload["error_codes"]["unsupported_method"] >= 1
+
+
 def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -1267,6 +1317,19 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert payload["memory_monitor"]["enabled"] is False
         assert "engine" in payload
         assert "http" in payload
+        assert "ws" in payload
+        assert set(payload["ws"].keys()) >= {
+            "connections_opened",
+            "connections_closed",
+            "active_connections",
+            "frames_in",
+            "frames_out",
+            "by_path",
+            "by_message_type_in",
+            "by_message_type_out",
+            "req_methods",
+            "error_codes",
+        }
         assert "retrieval_metrics" in payload["engine"]
         assert "turn_metrics" in payload["engine"]
         assert "memory" in payload["engine"]

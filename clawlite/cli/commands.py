@@ -26,8 +26,11 @@ from clawlite.cli.ops import memory_suggest_snapshot
 from clawlite.cli.ops import memory_version_snapshot
 from clawlite.cli.ops import memory_doctor_snapshot
 from clawlite.cli.ops import onboarding_validation
+from clawlite.cli.ops import heartbeat_trigger
+from clawlite.cli.ops import provider_clear_auth
 from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_openai_codex
+from clawlite.cli.ops import provider_set_auth
 from clawlite.cli.ops import provider_logout_openai_codex
 from clawlite.cli.ops import provider_status
 from clawlite.cli.ops import provider_use_model
@@ -225,6 +228,65 @@ def cmd_provider_use(args: argparse.Namespace) -> int:
         model=str(args.model or ""),
         fallback_model=str(args.fallback_model or ""),
         clear_fallback=bool(args.clear_fallback),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def _parse_cli_headers(header_values: list[str]) -> tuple[dict[str, str], str]:
+    parsed: dict[str, str] = {}
+    for raw in header_values:
+        item = str(raw or "").strip()
+        if not item or "=" not in item:
+            return {}, f"invalid_header_format:{item}"
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            return {}, f"invalid_header_format:{item}"
+        parsed[key] = value
+    return parsed, ""
+
+
+def cmd_provider_set_auth(args: argparse.Namespace) -> int:
+    headers, header_error = _parse_cli_headers(list(args.header or []))
+    if header_error:
+        _print_json({"ok": False, "error": header_error})
+        return 2
+
+    cfg = load_config(args.config)
+    payload = provider_set_auth(
+        cfg,
+        config_path=args.config,
+        provider=str(args.provider or ""),
+        api_key=str(args.api_key or ""),
+        api_base=str(args.api_base or ""),
+        extra_headers=headers,
+        clear_headers=bool(args.clear_headers),
+        clear_api_base=bool(args.clear_api_base),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_provider_clear_auth(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = provider_clear_auth(
+        cfg,
+        config_path=args.config,
+        provider=str(args.provider or ""),
+        clear_api_base=bool(args.clear_api_base),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_heartbeat_trigger(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = heartbeat_trigger(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
     )
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
@@ -640,6 +702,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_use.add_argument("--fallback-model", default="")
     p_provider_use.add_argument("--clear-fallback", action="store_true")
     p_provider_use.set_defaults(handler=cmd_provider_use)
+
+    p_provider_set_auth = provider_sub.add_parser("set-auth", help="Set provider API-key auth and persist config")
+    p_provider_set_auth.add_argument("provider")
+    p_provider_set_auth.add_argument("--api-key", required=True)
+    p_provider_set_auth.add_argument("--api-base", default="")
+    p_provider_set_auth.add_argument("--header", action="append", default=[])
+    p_provider_set_auth.add_argument("--clear-headers", action="store_true")
+    p_provider_set_auth.add_argument("--clear-api-base", action="store_true")
+    p_provider_set_auth.set_defaults(handler=cmd_provider_set_auth)
+
+    p_provider_clear_auth = provider_sub.add_parser("clear-auth", help="Clear provider API-key auth and headers")
+    p_provider_clear_auth.add_argument("provider")
+    p_provider_clear_auth.add_argument("--clear-api-base", action="store_true")
+    p_provider_clear_auth.set_defaults(handler=cmd_provider_clear_auth)
+
+    p_heartbeat = sub.add_parser("heartbeat", help="Heartbeat control commands")
+    heartbeat_sub = p_heartbeat.add_subparsers(dest="heartbeat_command", required=True)
+
+    p_heartbeat_trigger = heartbeat_sub.add_parser("trigger", help="Trigger heartbeat cycle via gateway control endpoint")
+    p_heartbeat_trigger.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_heartbeat_trigger.add_argument("--token", default="", help="Bearer token for control endpoint")
+    p_heartbeat_trigger.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_heartbeat_trigger.set_defaults(handler=cmd_heartbeat_trigger)
 
     p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
     p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")

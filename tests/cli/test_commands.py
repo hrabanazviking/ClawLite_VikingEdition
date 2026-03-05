@@ -1248,6 +1248,292 @@ def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, cap
     assert "clawlite.gateway.server" not in sys.modules
 
 
+def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "providers": {
+                    "openai": {
+                        "api_key": "",
+                        "api_base": "https://api.openai.com/v1",
+                        "extra_headers": {"X-Old": "1"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_set = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "set-auth",
+            "openai",
+            "--api-key",
+            "sk-live-new-1234",
+            "--api-base",
+            "https://alt.example/v1",
+            "--clear-headers",
+            "--header",
+            "X-Trace=abc",
+            "--header",
+            "X-Env=prod",
+        ]
+    )
+    assert rc_set == 0
+    set_payload = json.loads(capsys.readouterr().out)
+    assert set_payload["ok"] is True
+    assert set_payload["provider"] == "openai"
+    assert set_payload["api_key_masked"].endswith("1234")
+    assert set_payload["api_base"] == "https://alt.example/v1"
+    assert set_payload["extra_headers"] == {"X-Trace": "abc", "X-Env": "prod"}
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["providers"]["openai"]["api_key"] == "sk-live-new-1234"
+    assert persisted["providers"]["openai"]["api_base"] == "https://alt.example/v1"
+    assert persisted["providers"]["openai"]["extra_headers"] == {"X-Trace": "abc", "X-Env": "prod"}
+
+    rc_clear = main(["--config", str(config_path), "provider", "clear-auth", "openai", "--clear-api-base"])
+    assert rc_clear == 0
+    clear_payload = json.loads(capsys.readouterr().out)
+    assert clear_payload["ok"] is True
+    assert clear_payload["provider"] == "openai"
+    assert clear_payload["api_key_masked"] == ""
+    assert clear_payload["api_base"] == ""
+    assert clear_payload["extra_headers"] == {}
+
+    persisted_after = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted_after["providers"]["openai"]["api_key"] == ""
+    assert persisted_after["providers"]["openai"]["api_base"] == ""
+    assert persisted_after["providers"]["openai"]["extra_headers"] == {}
+
+
+def test_cli_provider_set_auth_invalid_header_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "set-auth",
+            "openai",
+            "--api-key",
+            "sk-test-1234",
+            "--header",
+            "INVALID_HEADER",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_header_format:INVALID_HEADER"
+
+
+def test_cli_provider_set_auth_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "set-auth",
+            "unknown-provider",
+            "--api-key",
+            "sk-test-1234",
+        ]
+    )
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "unsupported_provider:unknown-provider"
+
+
+def test_cli_heartbeat_trigger_success_uses_default_url_and_token(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {
+                    "host": "127.0.0.9",
+                    "port": 8877,
+                    "auth": {"token": "gw-token-abc"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {
+                "ok": True,
+                "decision": {
+                    "action": "send",
+                    "reason": "heartbeat_signal",
+                    "text": "ping",
+                },
+            }
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            captured["timeout"] = timeout
+            captured["headers"] = dict(headers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url):
+            captured["url"] = url
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "heartbeat", "trigger"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["status_code"] == 200
+    assert payload["decision"]["action"] == "send"
+    assert payload["base_url"] == "http://127.0.0.9:8877"
+    assert captured["url"] == "http://127.0.0.9:8877/v1/control/heartbeat/trigger"
+    assert captured["headers"] == {"Authorization": "Bearer gw-token-abc"}
+
+
+def test_cli_heartbeat_trigger_failure_returns_rc2(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 409
+            self.is_success = False
+
+        def json(self) -> dict[str, object]:
+            return {"detail": "heartbeat_disabled"}
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            del timeout, headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url):
+            del url
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "heartbeat", "trigger", "--gateway-url", "http://127.0.0.1:8787"])
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["status_code"] == 409
+    assert payload["error"] == "heartbeat_disabled"
+
+
+def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "t"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "decision": {"action": "send", "reason": "ok", "text": ""}}
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            del timeout, headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url):
+            del url
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_set = main(["--config", str(config_path), "provider", "set-auth", "openai", "--api-key", "sk-test-1234"])
+    assert rc_set == 0
+    assert "clawlite.gateway.server" not in sys.modules
+    capsys.readouterr()
+
+    sys.modules.pop("clawlite.gateway.server", None)
+    rc_hb = main(["--config", str(config_path), "heartbeat", "trigger"])
+    assert rc_hb == 0
+    assert "clawlite.gateway.server" not in sys.modules
+
+
 def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)

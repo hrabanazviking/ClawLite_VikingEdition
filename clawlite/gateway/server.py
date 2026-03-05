@@ -98,6 +98,7 @@ class DiagnosticsResponse(BaseModel):
     engine: dict[str, Any] = {}
     environment: dict[str, Any] = {}
     http: dict[str, Any] = {}
+    ws: dict[str, Any] = {}
 
 
 @dataclass(slots=True)
@@ -152,6 +153,109 @@ class HttpRequestTelemetry:
                     "max": round(self.latency_max_ms, 3) if self.latency_count else 0.0,
                     "avg": round(avg_ms, 3),
                 },
+            }
+
+
+@dataclass(slots=True)
+class WebSocketTelemetry:
+    connections_opened: int = 0
+    connections_closed: int = 0
+    active_connections: int = 0
+    frames_in: int = 0
+    frames_out: int = 0
+    by_path: dict[str, int] = field(default_factory=dict)
+    by_message_type_in: dict[str, int] = field(default_factory=dict)
+    by_message_type_out: dict[str, int] = field(default_factory=dict)
+    req_methods: dict[str, int] = field(default_factory=dict)
+    error_codes: dict[str, int] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @staticmethod
+    def _message_type(payload: Any) -> str:
+        if isinstance(payload, dict):
+            value = str(payload.get("type", "") or "").strip().lower()
+            return value or "legacy"
+        return "non_object"
+
+    @staticmethod
+    def _error_code(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        payload_type = str(payload.get("type", "") or "").strip().lower()
+        if payload_type == "res" and payload.get("ok") is False:
+            error = payload.get("error")
+            if isinstance(error, dict):
+                explicit_code = str(error.get("code", "") or "").strip()
+                if explicit_code:
+                    return explicit_code
+                status_code = error.get("status_code")
+            else:
+                status_code = payload.get("status_code")
+            if status_code is not None:
+                try:
+                    return f"http_{int(status_code)}"
+                except Exception:
+                    pass
+            return "error"
+        if payload_type == "error" or ("error" in payload and not payload_type):
+            explicit_code = str(payload.get("code", "") or "").strip()
+            if explicit_code:
+                return explicit_code
+            status_code = payload.get("status_code")
+            if status_code is not None:
+                try:
+                    return f"http_{int(status_code)}"
+                except Exception:
+                    pass
+            return "error"
+        return None
+
+    async def connection_opened(self, *, path: str) -> None:
+        normalized_path = str(path or "") or "/"
+        async with self.lock:
+            self.connections_opened += 1
+            self.active_connections += 1
+            self.by_path[normalized_path] = self.by_path.get(normalized_path, 0) + 1
+
+    async def connection_closed(self) -> None:
+        async with self.lock:
+            self.connections_closed += 1
+            self.active_connections = max(0, self.active_connections - 1)
+
+    async def frame_inbound(self, *, path: str, payload: Any) -> None:
+        normalized_path = str(path or "") or "/"
+        message_type = self._message_type(payload)
+        async with self.lock:
+            self.frames_in += 1
+            self.by_message_type_in[message_type] = self.by_message_type_in.get(message_type, 0) + 1
+            self.by_path.setdefault(normalized_path, self.by_path.get(normalized_path, 0))
+            if isinstance(payload, dict) and message_type == "req":
+                method = str(payload.get("method", "") or "").strip().lower()
+                if method:
+                    self.req_methods[method] = self.req_methods.get(method, 0) + 1
+
+    async def frame_outbound(self, *, payload: Any) -> None:
+        message_type = self._message_type(payload)
+        error_code = self._error_code(payload)
+        async with self.lock:
+            self.frames_out += 1
+            self.by_message_type_out[message_type] = self.by_message_type_out.get(message_type, 0) + 1
+            if error_code:
+                self.error_codes[error_code] = self.error_codes.get(error_code, 0) + 1
+
+    async def snapshot(self) -> dict[str, Any]:
+        async with self.lock:
+            return {
+                "connections_opened": self.connections_opened,
+                "connections_closed": self.connections_closed,
+                "active_connections": self.active_connections,
+                "frames_in": self.frames_in,
+                "frames_out": self.frames_out,
+                "by_path": dict(self.by_path),
+                "by_message_type_in": dict(self.by_message_type_in),
+                "by_message_type_out": dict(self.by_message_type_out),
+                "req_methods": dict(self.req_methods),
+                "error_codes": dict(self.error_codes),
             }
 
 
@@ -863,6 +967,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         bind_event("gateway.auth").warning("gateway running on non-loopback host without auth host={}", cfg.gateway.host)
     lifecycle = GatewayLifecycleState()
     http_telemetry = HttpRequestTelemetry()
+    ws_telemetry = WebSocketTelemetry()
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
 
@@ -1046,6 +1151,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.lifecycle = lifecycle
     app.state.auth_guard = auth_guard
     app.state.http_telemetry = http_telemetry
+    app.state.ws_telemetry = ws_telemetry
     telegram_webhook_path = _normalize_webhook_path(cfg.channels.telegram.webhook_path)
 
     @app.middleware("http")
@@ -1229,6 +1335,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             engine=engine_payload,
             environment=environment,
             http=await http_telemetry.snapshot(),
+            ws=await ws_telemetry.snapshot(),
         )
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
@@ -1440,7 +1547,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if not await auth_guard.check_ws(socket=socket, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth):
             return
         await socket.accept()
-        await socket.send_json(
+        await ws_telemetry.connection_opened(path=path_label)
+
+        async def _send_ws(payload: Any) -> None:
+            await socket.send_json(payload)
+            await ws_telemetry.frame_outbound(payload=payload)
+
+        await _send_ws(
             {
                 "type": "event",
                 "event": "connect.challenge",
@@ -1455,8 +1568,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         try:
             while True:
                 payload = await socket.receive_json()
+                await ws_telemetry.frame_inbound(path=path_label, payload=payload)
                 if not isinstance(payload, dict):
-                    await socket.send_json({"error": "session_id and text are required"})
+                    await _send_ws({"error": "session_id and text are required"})
                     continue
 
                 message_type = str(payload.get("type", "") or "").strip().lower()
@@ -1464,7 +1578,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     if message_type == "req":
                         request_id, method, params = _coerce_req_payload(payload)
                         if request_id is None or not method or params is None:
-                            await socket.send_json(
+                            await _send_ws(
                                 _ws_req_error(
                                     request_id=request_id,
                                     code="invalid_request",
@@ -1477,7 +1591,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         normalized_method = method.lower()
                         if normalized_method == "connect":
                             req_connected = True
-                            await socket.send_json(
+                            await _send_ws(
                                 {
                                     "type": "res",
                                     "id": request_id,
@@ -1491,7 +1605,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             )
                             continue
                         if not req_connected:
-                            await socket.send_json(
+                            await _send_ws(
                                 _ws_req_error(
                                     request_id=request_id,
                                     code="not_connected",
@@ -1501,7 +1615,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             )
                             continue
                         if normalized_method == "ping":
-                            await socket.send_json(
+                            await _send_ws(
                                 {
                                     "type": "res",
                                     "id": request_id,
@@ -1513,7 +1627,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             )
                             continue
                         if normalized_method == "health":
-                            await socket.send_json(
+                            await _send_ws(
                                 {
                                     "type": "res",
                                     "id": request_id,
@@ -1530,7 +1644,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             continue
                         if normalized_method == "status":
                             status_payload = _control_plane_payload().dict()
-                            await socket.send_json(
+                            await _send_ws(
                                 {
                                     "type": "res",
                                     "id": request_id,
@@ -1540,12 +1654,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             )
                             continue
                         if normalized_method in {"chat.send", "message.send"}:
-                            await socket.send_json(
+                            await _send_ws(
                                 await _ws_req_chat_send(request_id=request_id, params=params)
                             )
                             continue
 
-                        await socket.send_json(
+                        await _send_ws(
                             _ws_req_error(
                                 request_id=request_id,
                                 code="unsupported_method",
@@ -1557,7 +1671,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
                     request_id = str(payload.get("request_id", "") or "").strip() or None
                     if message_type == "hello":
-                        await socket.send_json(
+                        await _send_ws(
                             {
                                 "type": "ready",
                                 "contract_version": GATEWAY_CONTRACT_VERSION,
@@ -1566,10 +1680,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         )
                         continue
                     if message_type == "ping":
-                        await socket.send_json({"type": "pong", "server_time": _utc_now_iso()})
+                        await _send_ws({"type": "pong", "server_time": _utc_now_iso()})
                         continue
                     if message_type != "message":
-                        await socket.send_json(
+                        await _send_ws(
                             _ws_envelope_error(
                                 error="unsupported_message_type",
                                 status_code=400,
@@ -1581,7 +1695,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     session_id = str(payload.get("session_id", "") or "").strip()
                     text = str(payload.get("text", "") or "").strip()
                     if not session_id or not text:
-                        await socket.send_json(
+                        await _send_ws(
                             _ws_envelope_error(
                                 error="session_id and text are required",
                                 status_code=400,
@@ -1599,7 +1713,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             status_code,
                             detail,
                         )
-                        await socket.send_json(
+                        await _send_ws(
                             _ws_envelope_error(error=detail, status_code=status_code, request_id=request_id)
                         )
                         continue
@@ -1613,7 +1727,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     }
                     if request_id:
                         response_payload["request_id"] = request_id
-                    await socket.send_json(response_payload)
+                    await _send_ws(response_payload)
                     bind_event("gateway.ws", session=session_id, channel="ws").debug(
                         "websocket response sent model={}",
                         out.model,
@@ -1623,21 +1737,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 session_id = str(payload.get("session_id", "")).strip()
                 text = str(payload.get("text", "")).strip()
                 if not session_id or not text:
-                    await socket.send_json({"error": "session_id and text are required"})
+                    await _send_ws({"error": "session_id and text are required"})
                     continue
                 try:
                     out = await runtime.engine.run(session_id=session_id, user_text=text)
                 except RuntimeError as exc:
                     status_code, detail = _provider_error_payload(exc)
                     bind_event("gateway.ws", session=session_id, channel="ws").error("websocket request failed status={} detail={}", status_code, detail)
-                    await socket.send_json({"error": detail, "status_code": status_code})
+                    await _send_ws({"error": detail, "status_code": status_code})
                     continue
                 _finalize_bootstrap_for_user_turn(session_id)
-                await socket.send_json({"text": out.text, "model": out.model})
+                await _send_ws({"text": out.text, "model": out.model})
                 bind_event("gateway.ws", session=session_id, channel="ws").debug("websocket response sent model={}", out.model)
         except WebSocketDisconnect:
             bind_event("gateway.ws", channel="ws").info("websocket client disconnected path={}", path_label)
-            return
+        finally:
+            await ws_telemetry.connection_closed()
 
     @app.websocket("/v1/ws")
     async def ws_chat(socket: WebSocket) -> None:

@@ -28,6 +28,164 @@ def _mask_secret(value: str, *, keep: int = 4) -> str:
     return f"{'*' * max(3, len(token) - keep)}{token[-keep:]}"
 
 
+SUPPORTED_PROVIDER_AUTH: tuple[str, ...] = (
+    "openai",
+    "gemini",
+    "groq",
+    "deepseek",
+    "anthropic",
+    "openrouter",
+    "custom",
+)
+
+
+def _normalize_provider_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _resolve_supported_provider(provider: str) -> str:
+    provider_norm = _normalize_provider_name(provider)
+    provider_key = provider_norm.replace("-", "_")
+    if provider_key not in SUPPORTED_PROVIDER_AUTH:
+        raise ValueError(f"unsupported_provider:{provider_norm or provider}")
+    return provider_key
+
+
+def provider_set_auth(
+    config: AppConfig,
+    *,
+    config_path: str | Path | None,
+    provider: str,
+    api_key: str,
+    api_base: str = "",
+    extra_headers: dict[str, str] | None = None,
+    clear_headers: bool = False,
+    clear_api_base: bool = False,
+) -> dict[str, Any]:
+    try:
+        provider_key = _resolve_supported_provider(provider)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    token = str(api_key or "").strip()
+    if not token:
+        return {
+            "ok": False,
+            "error": "api_key_required",
+            "provider": provider_key,
+        }
+
+    selected = getattr(config.providers, provider_key)
+    selected.api_key = token
+
+    if clear_headers:
+        selected.extra_headers = {}
+    if extra_headers:
+        merged = dict(selected.extra_headers)
+        merged.update({str(k): str(v) for k, v in extra_headers.items()})
+        selected.extra_headers = merged
+
+    if clear_api_base:
+        selected.api_base = ""
+    else:
+        base_value = str(api_base or "").strip()
+        if base_value:
+            selected.api_base = base_value
+
+    saved_path = save_config(config, path=config_path)
+    return {
+        "ok": True,
+        "provider": provider_key,
+        "api_key_masked": _mask_secret(selected.api_key),
+        "api_base": str(selected.api_base or ""),
+        "extra_headers": dict(selected.extra_headers or {}),
+        "saved_path": str(saved_path),
+    }
+
+
+def provider_clear_auth(
+    config: AppConfig,
+    *,
+    config_path: str | Path | None,
+    provider: str,
+    clear_api_base: bool = False,
+) -> dict[str, Any]:
+    try:
+        provider_key = _resolve_supported_provider(provider)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    selected = getattr(config.providers, provider_key)
+    selected.api_key = ""
+    selected.extra_headers = {}
+    if clear_api_base:
+        selected.api_base = ""
+
+    saved_path = save_config(config, path=config_path)
+    return {
+        "ok": True,
+        "provider": provider_key,
+        "api_key_masked": _mask_secret(selected.api_key),
+        "api_base": str(selected.api_base or ""),
+        "extra_headers": dict(selected.extra_headers or {}),
+        "saved_path": str(saved_path),
+    }
+
+
+def heartbeat_trigger(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    base_url = str(gateway_url or "").strip().rstrip("/")
+    if not base_url:
+        base_url = f"http://{config.gateway.host}:{int(config.gateway.port)}"
+
+    resolved_token = str(token or "").strip() or str(config.gateway.auth.token or "").strip()
+    endpoint = "/v1/control/heartbeat/trigger"
+    headers: dict[str, str] = {}
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+
+    payload: dict[str, Any] = {
+        "ok": False,
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "token_configured": bool(resolved_token),
+    }
+
+    try:
+        with httpx.Client(timeout=max(0.1, float(timeout)), headers=headers) as client:
+            response = client.post(f"{base_url}{endpoint}")
+    except Exception as exc:
+        payload["error"] = str(exc)
+        payload["error_type"] = exc.__class__.__name__
+        return payload
+
+    body: Any
+    try:
+        body = response.json()
+    except Exception:
+        body = response.text
+
+    payload["status_code"] = int(response.status_code)
+    payload["response"] = body
+
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["decision"] = body.get("decision", {})
+        return payload
+
+    if isinstance(body, dict):
+        detail = body.get("detail", body.get("error", "heartbeat_trigger_failed"))
+    else:
+        detail = str(body or "heartbeat_trigger_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
 def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
     codex = config.auth.providers.openai_codex
     cfg_token = str(codex.access_token or "").strip()
