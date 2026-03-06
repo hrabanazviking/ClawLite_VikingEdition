@@ -567,6 +567,43 @@ class AgentEngine:
             return True, "warning", streak
         return False, "", streak
 
+    def _detect_ping_pong_loop(
+        self,
+        history: list[_ToolExecutionRecord],
+        signature: str,
+    ) -> tuple[bool, str, int, str]:
+        if len(history) < 2:
+            return False, "", 0, ""
+
+        last = history[-1]
+        previous = history[-2]
+        if last.signature == signature or previous.signature != signature:
+            return False, "", 0, ""
+
+        alternating_signature = last.signature
+        outcome_by_signature: dict[str, str] = {}
+        streak = 0
+
+        for idx, record in enumerate(reversed(history)):
+            expected_signature = alternating_signature if idx % 2 == 0 else signature
+            if record.signature != expected_signature:
+                break
+            expected_outcome = outcome_by_signature.get(record.signature)
+            if expected_outcome is None:
+                outcome_by_signature[record.signature] = record.outcome_hash
+            elif expected_outcome != record.outcome_hash:
+                break
+            streak += 1
+
+        alternating_length = streak + 1
+        repeat_threshold = max(4, int(self.loop_detection.repeat_threshold) * 2)
+        critical_threshold = max(repeat_threshold + 1, int(self.loop_detection.critical_threshold) * 2)
+        if alternating_length >= critical_threshold:
+            return True, "critical", alternating_length, last.tool_name
+        if alternating_length >= repeat_threshold:
+            return True, "warning", alternating_length, last.tool_name
+        return False, "", alternating_length, last.tool_name
+
     @staticmethod
     def _tool_call_id(tool_call: Any, idx: int) -> str:
         raw = str(getattr(tool_call, "id", "") or "").strip()
@@ -1444,6 +1481,55 @@ class AgentEngine:
                                         "threshold": self.loop_detection.repeat_threshold,
                                         "critical_threshold": self.loop_detection.critical_threshold,
                                         "history_size": self.loop_detection.history_size,
+                                    },
+                                ),
+                                counter=progress_counter,
+                                limit=budget.max_progress_events or 1,
+                            )
+                            break
+                        ping_pong_stop, ping_pong_severity, ping_pong_streak, alternating_tool_name = self._detect_ping_pong_loop(
+                            tool_history,
+                            signature,
+                        )
+                        if ping_pong_stop:
+                            if alternating_tool_name and alternating_tool_name != name:
+                                loop_detail = f"between `{name}` and `{alternating_tool_name}`"
+                            else:
+                                loop_detail = f"for `{name}` with alternating inputs"
+                            final = ProviderResult(
+                                text=(
+                                    "I stopped this turn because loop detection found alternating "
+                                    f"no-progress tool calls {loop_detail} ({ping_pong_streak} steps)."
+                                ),
+                                tool_calls=[],
+                                model="engine/loop-detected",
+                            )
+                            run_log.warning(
+                                "tool ping-pong detected iteration={} tool={} other_tool={} streak={} severity={} threshold={} critical_threshold={}",
+                                iteration,
+                                name,
+                                alternating_tool_name or "-",
+                                ping_pong_streak,
+                                ping_pong_severity,
+                                self.loop_detection.repeat_threshold,
+                                self.loop_detection.critical_threshold,
+                            )
+                            await self._emit_progress(
+                                progress_hook=progress_hook,
+                                event=ProgressEvent(
+                                    stage="loop_detected",
+                                    session_id=session_id,
+                                    iteration=iteration,
+                                    message=final.text,
+                                    tool_name=name,
+                                    metadata={
+                                        "detector": "ping_pong_no_progress",
+                                        "severity": ping_pong_severity,
+                                        "repeats": ping_pong_streak,
+                                        "threshold": self.loop_detection.repeat_threshold,
+                                        "critical_threshold": self.loop_detection.critical_threshold,
+                                        "history_size": self.loop_detection.history_size,
+                                        "other_tool": alternating_tool_name,
                                     },
                                 ),
                                 counter=progress_counter,

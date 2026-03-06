@@ -379,6 +379,26 @@ class FakeLoopingToolProvider:
         )
 
 
+class FakePingPongToolProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, *, messages, tools):
+        del messages, tools
+        self.calls += 1
+        if self.calls % 2 == 1:
+            return ProviderResult(
+                text="try alpha",
+                tool_calls=[ToolCall(name="alpha", arguments={"value": "x"})],
+                model="fake/model",
+            )
+        return ProviderResult(
+            text="try beta",
+            tool_calls=[ToolCall(name="beta", arguments={"value": "y"})],
+            model="fake/model",
+        )
+
+
 class FakeDiagnosticSwitchProvider:
     def __init__(self) -> None:
         self.calls = 0
@@ -418,6 +438,22 @@ class FakeWhitespaceVariantFailTools:
 
     def schema(self):
         return [{"name": "echo", "description": "echo text", "arguments": {"text": "string"}}]
+
+
+class FakePingPongTools:
+    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+        del arguments, session_id, channel, user_id
+        if name == "alpha":
+            return "alpha:still waiting"
+        if name == "beta":
+            return "beta:still waiting"
+        return f"{name}:unknown"
+
+    def schema(self):
+        return [
+            {"name": "alpha", "description": "alpha tool", "arguments": {"value": "string"}},
+            {"name": "beta", "description": "beta tool", "arguments": {"value": "string"}},
+        ]
 
 
 class FakeNeverCalledProvider:
@@ -1353,6 +1389,37 @@ def test_engine_detects_repeated_non_progress_tool_loops() -> None:
         assert "loop detection" in out.text.lower()
         assert provider.calls < 20
         assert "loop_detected" in stages
+
+    asyncio.run(_scenario())
+
+
+def test_engine_detects_ping_pong_non_progress_tool_loops() -> None:
+    async def _scenario() -> None:
+        provider = FakePingPongToolProvider()
+        loop_events: list[dict[str, Any]] = []
+
+        def _hook(event) -> None:
+            if event.stage == "loop_detected":
+                loop_events.append(event.metadata or {})
+
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakePingPongTools(),
+            max_iterations=20,
+            loop_detection=LoopDetectionSettings(
+                enabled=True,
+                history_size=10,
+                repeat_threshold=2,
+                critical_threshold=3,
+            ),
+        )
+        out = await engine.run(session_id="cli:ping-pong-detect", user_text="run", progress_hook=_hook)
+        assert out.model == "engine/loop-detected"
+        assert "alternating" in out.text.lower()
+        assert provider.calls < 20
+        assert loop_events
+        assert loop_events[0]["detector"] == "ping_pong_no_progress"
+        assert loop_events[0]["other_tool"] in {"alpha", "beta"}
 
     asyncio.run(_scenario())
 
