@@ -1,6 +1,5 @@
 # ClawLite ✨
 
-<!-- Portable runtime-first autonomous assistant for Linux. -->
 
 ClawLite is a **portable, runtime-first autonomous assistant** designed for Linux, focused on CLI and gateway operations. It provides a robust environment for intelligent agents, featuring multi-provider inference routing, an advanced memory subsystem, and scheduling services.
 
