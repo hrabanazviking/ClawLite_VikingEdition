@@ -623,6 +623,48 @@ def test_engine_identity_guard_rewrites_provider_intro_without_identity_question
     asyncio.run(_scenario())
 
 
+def test_engine_identity_guard_rewrites_embedded_provider_clause_and_persists_clean_text() -> None:
+    async def _scenario() -> None:
+        memory = FakeMemoryWithAsyncMemorize()
+        provider_text = "Summary ready. As an AI language model trained by OpenAI, I can suggest next steps."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+            memory=memory,
+        )
+        out = await engine.run(session_id="cli:identity-embedded", user_text="Summarize deployment notes")
+        assert out.text == (
+            "I am ClawLite, a self-hosted autonomous AI agent. "
+            "Summary ready. I can suggest next steps."
+        )
+        assert memory.memorize_calls
+        persisted = memory.memorize_calls[0]["messages"][1]["content"]
+        assert persisted == out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_rewrites_provider_self_sentence_before_persisting() -> None:
+    async def _scenario() -> None:
+        memory = FakeMemoryWithAsyncMemorize()
+        provider_text = "Deployment summary: shipped and stable. I am a language model trained by OpenAI."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+            memory=memory,
+        )
+        out = await engine.run(session_id="cli:identity-sentence", user_text="Summarize deployment notes")
+        assert out.text == (
+            "I am ClawLite, a self-hosted autonomous AI agent. "
+            "Deployment summary: shipped and stable."
+        )
+        assert memory.memorize_calls
+        persisted = memory.memorize_calls[0]["messages"][1]["content"]
+        assert persisted == out.text
+
+    asyncio.run(_scenario())
+
+
 def test_engine_identity_guard_keeps_normal_output_unchanged() -> None:
     async def _scenario() -> None:
         text = "Deployment summary: shipped, monitored, and stable."

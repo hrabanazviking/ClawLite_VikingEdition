@@ -269,6 +269,23 @@ class AgentEngine:
         r"[\s]*[.!?:-]*",
         re.IGNORECASE,
     )
+    _PROVIDER_SELF_ATTRIBUTION_CLAUSE_RE = re.compile(
+        r"(?:"
+        r"(?:as\s+an?\s+(?:ai\s+)?(?:large\s+)?(?:language\s+model|assistant))"
+        r"|(?:sou\s+um\s+(?:modelo\s+de\s+linguagem|assistente))"
+        r")"
+        r"(?:\s+(?:trained\s+by|created\s+by|from|da|do|de)\s+[A-Za-z0-9_ -]{1,120})?"
+        r"\s*(?:,\s*|:\s*|-\s*)",
+        re.IGNORECASE,
+    )
+    _PROVIDER_SELF_ATTRIBUTION_SENTENCE_RE = re.compile(
+        r"(?:^|(?<=[.!?]\s))"
+        r"(?:i\s+am\s+an?\s+(?:ai\s+)?(?:large\s+)?(?:language\s+model|assistant)"
+        r"|sou\s+um\s+(?:modelo\s+de\s+linguagem|assistente))"
+        r"(?:\s+(?:trained\s+by|created\s+by|from|da|do|de)\s+[A-Za-z0-9_ -]{1,120})?"
+        r"(?:\s*[.!?]+|\s*$)",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -1182,29 +1199,55 @@ class AgentEngine:
         return bool(cls._IDENTITY_QUESTION_RE.search(str(user_text or "")))
 
     @classmethod
+    def _strip_provider_self_attribution(cls, text: str) -> tuple[str, bool]:
+        value = str(text or "").strip()
+        if not value:
+            return "", False
+
+        changed = False
+        intro_match = cls._PROVIDER_SELF_ATTRIBUTION_RE.match(value)
+        if intro_match is not None:
+            value = value[intro_match.end() :].lstrip(" \t\n\r,;:-")
+            changed = True
+
+        updated = cls._PROVIDER_SELF_ATTRIBUTION_CLAUSE_RE.sub("", value)
+        if updated != value:
+            value = updated
+            changed = True
+
+        updated = cls._PROVIDER_SELF_ATTRIBUTION_SENTENCE_RE.sub("", value)
+        if updated != value:
+            value = updated
+            changed = True
+
+        value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+        value = re.sub(r"([.?!])(?=[^\s.?!])", r"\1 ", value)
+        value = " ".join(value.split()).strip(" \t\r\n,;:-")
+        return value, changed
+
+    @classmethod
     def _normalize_identity_output(cls, *, user_text: str, output_text: str) -> str:
         main, digest_suffix = cls._split_subagent_digest(output_text)
         stripped_main = str(main or "").strip()
         if not stripped_main:
             return f"{cls._IDENTITY_STATEMENT}{digest_suffix}"
 
+        sanitized_main, sanitized_changed = cls._strip_provider_self_attribution(stripped_main)
+        working_main = sanitized_main or stripped_main
         has_identity_question = cls._is_identity_question(user_text)
-        intro_match = cls._PROVIDER_SELF_ATTRIBUTION_RE.match(stripped_main)
         if not has_identity_question:
-            if intro_match is None:
+            if not sanitized_changed:
                 return str(output_text or "")
-            remainder = stripped_main[intro_match.end() :].lstrip(" \t\n\r,;:-") if intro_match else stripped_main
-            normalized_main = cls._IDENTITY_STATEMENT if not remainder else f"{cls._IDENTITY_STATEMENT} {remainder}"
+            normalized_main = cls._IDENTITY_STATEMENT if not working_main else f"{cls._IDENTITY_STATEMENT} {working_main}"
             return f"{normalized_main}{digest_suffix}"
 
-        if cls._CLAWLITE_MENTION_RE.search(stripped_main):
+        if cls._CLAWLITE_MENTION_RE.search(working_main) and not sanitized_changed:
             return str(output_text or "")
 
-        if intro_match is not None:
-            remainder = stripped_main[intro_match.end() :].lstrip(" \t\n\r,;:-")
-            normalized_main = cls._IDENTITY_STATEMENT if not remainder else f"{cls._IDENTITY_STATEMENT} {remainder}"
+        if cls._CLAWLITE_MENTION_RE.search(working_main):
+            normalized_main = working_main
         else:
-            normalized_main = f"{cls._IDENTITY_STATEMENT} {stripped_main}"
+            normalized_main = cls._IDENTITY_STATEMENT if not working_main else f"{cls._IDENTITY_STATEMENT} {working_main}"
 
         return f"{normalized_main}{digest_suffix}"
 
