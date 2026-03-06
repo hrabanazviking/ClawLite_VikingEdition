@@ -15,6 +15,7 @@ from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor
 from clawlite.providers.codex_auth import load_codex_auth_file
+from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.workspace.loader import TEMPLATE_FILES
 from clawlite.workspace.loader import WorkspaceLoader
@@ -944,6 +945,33 @@ def provider_validation(config: AppConfig) -> dict[str, Any]:
                     "name": "base_url",
                     "status": "warning",
                     "detail": "Base URL not configured; defaults depend on provider resolution.",
+                }
+            )
+
+    local_runtime_probe = probe_local_provider_runtime(model=model, base_url=resolved_base_url)
+    if local_runtime_probe["checked"]:
+        if local_runtime_probe["ok"]:
+            checks.append(
+                {
+                    "name": "local_runtime",
+                    "status": "ok",
+                    "detail": f"{local_runtime_probe['runtime']} ready at {resolved_base_url}",
+                }
+            )
+            checks.append(
+                {
+                    "name": "local_model",
+                    "status": "ok",
+                    "detail": str(local_runtime_probe["model"] or ""),
+                }
+            )
+        else:
+            errors.append(str(local_runtime_probe["error"] or "provider_config_error:local_runtime_unavailable"))
+            checks.append(
+                {
+                    "name": "local_runtime",
+                    "status": "error",
+                    "detail": str(local_runtime_probe["detail"] or local_runtime_probe["error"] or "runtime_unavailable"),
                 }
             )
 

@@ -29,6 +29,7 @@ from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
+from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
 from clawlite.session.store import SessionStore
@@ -850,6 +851,13 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     workspace_path = Path(config.workspace_path).expanduser().resolve()
 
     provider = build_provider(_provider_config(config))
+    provider_runtime = getattr(provider, "primary", provider)
+    local_runtime_probe = probe_local_provider_runtime(
+        model=provider.get_default_model(),
+        base_url=str(getattr(provider_runtime, "base_url", "") or ""),
+    )
+    if local_runtime_probe["checked"] and not local_runtime_probe["ok"]:
+        raise RuntimeError(str(local_runtime_probe["error"] or "provider_config_error:local_runtime_unavailable"))
     cron = CronService(
         store_path=Path(config.state_path) / "cron_jobs.json",
         default_timezone=config.scheduler.timezone,

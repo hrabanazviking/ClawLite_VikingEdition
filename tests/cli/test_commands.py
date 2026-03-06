@@ -1553,6 +1553,44 @@ def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_mis
     assert payload["account_id_masked"]
 
 
+def test_cli_validate_provider_reports_local_runtime_failure(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/llama3.2", "litellm_base_url": "http://127.0.0.1:11434"},
+                "providers": {
+                    "openai": {
+                        "api_base": "http://127.0.0.1:11434",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "clawlite.cli.ops.probe_local_provider_runtime",
+        lambda *, model, base_url, timeout_s=2.0: {
+            "checked": True,
+            "ok": False,
+            "runtime": "ollama",
+            "model": "llama3.2",
+            "base_url": base_url,
+            "error": "provider_config_error:ollama_unreachable:http://127.0.0.1:11434",
+            "detail": "connection_refused",
+            "available_models": [],
+        },
+    )
+
+    rc = main(["--config", str(config_path), "validate", "provider"])
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert any(check.get("name") == "local_runtime" and check.get("status") == "error" for check in payload["checks"])
+
+
 def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

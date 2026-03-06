@@ -631,6 +631,33 @@ def test_gateway_runtime_rejects_pgvector_backend_with_invalid_url(tmp_path: Pat
         build_runtime(cfg)
 
 
+def test_gateway_runtime_rejects_local_provider_when_startup_probe_fails(tmp_path: Path, monkeypatch) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        provider={"model": "openai/llama3.2", "litellm_base_url": "http://127.0.0.1:11434"},
+        providers={"openai": {"api_base": "http://127.0.0.1:11434"}},
+        channels={},
+    )
+    monkeypatch.setattr(
+        "clawlite.gateway.server.probe_local_provider_runtime",
+        lambda *, model, base_url, timeout_s=2.0: {
+            "checked": True,
+            "ok": False,
+            "runtime": "ollama",
+            "model": "llama3.2",
+            "base_url": base_url,
+            "error": "provider_config_error:ollama_unreachable:http://127.0.0.1:11434",
+            "detail": "connection_refused",
+            "available_models": [],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="provider_config_error:ollama_unreachable"):
+        build_runtime(cfg)
+
+
 def test_gateway_runtime_disables_memory_monitor_when_proactive_false(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
