@@ -85,6 +85,77 @@ _TUNING_LAYER_ACTION_PLAYBOOKS: dict[str, dict[str, str]] = {
     },
 }
 
+_TUNING_SEVERITY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+
+_TUNING_LAYER_BACKFILL_LIMITS: dict[str, dict[str, dict[str, int]]] = {
+    "fact": {
+        "low": {"floor": 8, "ceiling": 24, "default": 14},
+        "medium": {"floor": 16, "ceiling": 42, "default": 24},
+        "high": {"floor": 24, "ceiling": 64, "default": 40},
+    },
+    "hypothesis": {
+        "low": {"floor": 6, "ceiling": 20, "default": 12},
+        "medium": {"floor": 12, "ceiling": 34, "default": 20},
+        "high": {"floor": 18, "ceiling": 50, "default": 30},
+    },
+    "decision": {
+        "low": {"floor": 5, "ceiling": 16, "default": 10},
+        "medium": {"floor": 8, "ceiling": 26, "default": 16},
+        "high": {"floor": 12, "ceiling": 36, "default": 24},
+    },
+    "outcome": {
+        "low": {"floor": 7, "ceiling": 22, "default": 12},
+        "medium": {"floor": 14, "ceiling": 38, "default": 22},
+        "high": {"floor": 20, "ceiling": 56, "default": 32},
+    },
+}
+
+_TUNING_LAYER_SNAPSHOT_TAGS: dict[str, dict[str, str]] = {
+    "fact": {
+        "low": "quality-drift-fact-low",
+        "medium": "quality-drift-fact-medium",
+        "high": "quality-drift-fact-high",
+    },
+    "hypothesis": {
+        "low": "quality-drift-hypothesis-low",
+        "medium": "quality-drift-hypothesis-medium",
+        "high": "quality-drift-hypothesis-high",
+    },
+    "decision": {
+        "low": "quality-drift-decision-low",
+        "medium": "quality-drift-decision-medium",
+        "high": "quality-drift-decision-high",
+    },
+    "outcome": {
+        "low": "quality-drift-outcome-low",
+        "medium": "quality-drift-outcome-medium",
+        "high": "quality-drift-outcome-high",
+    },
+}
+
+_TUNING_NOTIFY_TEMPLATES: dict[str, dict[str, dict[str, str]]] = {
+    "fact": {
+        "low": {"template_id": "notify.fact.low.v1", "marker": "fact-low"},
+        "medium": {"template_id": "notify.fact.medium.v1", "marker": "fact-medium"},
+        "high": {"template_id": "notify.fact.high.v1", "marker": "fact-high"},
+    },
+    "hypothesis": {
+        "low": {"template_id": "notify.hypothesis.low.v1", "marker": "hypothesis-low"},
+        "medium": {"template_id": "notify.hypothesis.medium.v1", "marker": "hypothesis-medium"},
+        "high": {"template_id": "notify.hypothesis.high.v1", "marker": "hypothesis-high"},
+    },
+    "decision": {
+        "low": {"template_id": "notify.decision.low.v1", "marker": "decision-low"},
+        "medium": {"template_id": "notify.decision.medium.v1", "marker": "decision-medium"},
+        "high": {"template_id": "notify.decision.high.v1", "marker": "decision-high"},
+    },
+    "outcome": {
+        "low": {"template_id": "notify.outcome.low.v1", "marker": "outcome-low"},
+        "medium": {"template_id": "notify.outcome.medium.v1", "marker": "outcome-medium"},
+        "high": {"template_id": "notify.outcome.high.v1", "marker": "outcome-high"},
+    },
+}
+
 
 def _normalize_reasoning_layer(layer: str) -> str:
     normalized_layer = str(layer or "").strip().lower()
@@ -111,6 +182,54 @@ def _select_tuning_action_playbook(*, severity: str, weakest_layer: str) -> tupl
     if not action:
         action = default_action
     return action, f"layer_{normalized_layer}_{normalized_severity}_v1"
+
+
+def _normalize_tuning_severity(value: str) -> str:
+    severity = str(value or "").strip().lower()
+    if severity in _TUNING_SEVERITY_LEVELS:
+        return severity
+    return "low"
+
+
+def _resolve_tuning_layer(value: str) -> str:
+    layer = _normalize_reasoning_layer(value)
+    if layer in _TUNING_LAYER_ACTION_PLAYBOOKS:
+        return layer
+    return "unknown"
+
+
+def _resolve_tuning_backfill_limit(*, layer: str, severity: str, missing_records: int) -> int:
+    normalized_layer = _resolve_tuning_layer(layer)
+    normalized_severity = _normalize_tuning_severity(severity)
+    layer_cfg = _TUNING_LAYER_BACKFILL_LIMITS.get(normalized_layer) or _TUNING_LAYER_BACKFILL_LIMITS.get("hypothesis", {})
+    bounds = layer_cfg.get(normalized_severity, {"floor": 8, "ceiling": 24, "default": 16})
+    floor = max(1, int(bounds.get("floor", 8) or 8))
+    ceiling = max(floor, int(bounds.get("ceiling", 24) or 24))
+    default = int(bounds.get("default", floor) or floor)
+    if default < floor:
+        default = floor
+    if default > ceiling:
+        default = ceiling
+    if missing_records <= 0:
+        return default
+    return max(floor, min(ceiling, int(missing_records)))
+
+
+def _resolve_tuning_snapshot_tag(*, layer: str, severity: str) -> str:
+    normalized_layer = _resolve_tuning_layer(layer)
+    normalized_severity = _normalize_tuning_severity(severity)
+    layer_tags = _TUNING_LAYER_SNAPSHOT_TAGS.get(normalized_layer) or _TUNING_LAYER_SNAPSHOT_TAGS.get("hypothesis", {})
+    return str(layer_tags.get(normalized_severity, "quality-drift-auto") or "quality-drift-auto")
+
+
+def _resolve_tuning_notify_variant(*, layer: str, severity: str) -> tuple[str, str]:
+    normalized_layer = _resolve_tuning_layer(layer)
+    normalized_severity = _normalize_tuning_severity(severity)
+    layer_templates = _TUNING_NOTIFY_TEMPLATES.get(normalized_layer) or _TUNING_NOTIFY_TEMPLATES.get("hypothesis", {})
+    template = layer_templates.get(normalized_severity, {"template_id": "notify.generic.low.v1", "marker": "generic-low"})
+    template_id = str(template.get("template_id", "notify.generic.low.v1") or "notify.generic.low.v1")
+    marker = str(template.get("marker", "generic-low") or "generic-low")
+    return template_id, marker
 
 
 def _normalize_webhook_path(value: str, *, default: str = "/api/webhooks/telegram") -> str:
@@ -1100,6 +1219,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "last_action": "",
         "last_action_status": "",
         "last_action_reason": "",
+        "actions_by_layer": {},
+        "actions_by_playbook": {},
+        "actions_by_action": {},
+        "action_status_by_layer": {},
+        "last_action_metadata": {},
     }
     memory_quality_cache: dict[str, Any] = {
         "fingerprint": "",
@@ -1458,6 +1582,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     }
                     if weakest_layer:
                         action_metadata["weakest_layer"] = weakest_layer
+                    action_metadata["action_variant"] = f"{playbook_id}:{action}:v2"
 
                     last_action_at = _parse_iso(str(tuning_state.get("last_action_at", "") or ""))
                     in_cooldown = (
@@ -1490,12 +1615,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         if action == "notify_operator":
                             channel, target = await _latest_memory_route(memory_store)
                             layer_suffix = f" layer={weakest_layer}." if weakest_layer else ""
+                            template_id, text_marker = _resolve_tuning_notify_variant(
+                                layer=weakest_layer,
+                                severity=severity,
+                            )
+                            action_metadata["template_id"] = template_id
                             await runtime.channels.send(
                                 channel=channel,
                                 target=target,
                                 text=(
                                     f"Memory quality drift detected ({severity}). "
-                                    f"score={score} streak={degrading_streak}.{layer_suffix} Monitoring in progress."
+                                    f"score={score} streak={degrading_streak}.{layer_suffix} "
+                                    f"variant={text_marker} Monitoring in progress."
                                 ),
                                 metadata={
                                     "source": "memory_quality_tuning",
@@ -1507,7 +1638,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             action_status = "ok"
                         elif action == "semantic_backfill":
                             missing_records = int(semantic_metrics.get("missing_records", 0) or 0)
-                            backfill_limit = max(1, min(50, missing_records if missing_records > 0 else 20))
+                            backfill_limit = _resolve_tuning_backfill_limit(
+                                layer=weakest_layer,
+                                severity=severity,
+                                missing_records=missing_records,
+                            )
+                            action_metadata["backfill_limit"] = backfill_limit
                             backfill_fn = getattr(memory_store, "backfill_embeddings", None)
                             if callable(backfill_fn):
                                 await asyncio.wait_for(
@@ -1519,9 +1655,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                                 action_status = "unsupported"
                         elif action == "memory_snapshot":
                             snapshot_memory_fn = getattr(memory_store, "snapshot", None)
+                            snapshot_tag = _resolve_tuning_snapshot_tag(layer=weakest_layer, severity=severity)
+                            action_metadata["snapshot_tag"] = snapshot_tag
                             if callable(snapshot_memory_fn):
                                 await asyncio.wait_for(
-                                    asyncio.to_thread(snapshot_memory_fn, "quality-drift-auto"),
+                                    asyncio.to_thread(snapshot_memory_fn, snapshot_tag),
                                     timeout=tuning_loop_timeout_seconds,
                                 )
                                 action_status = "ok"
@@ -1540,6 +1678,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
                 if action_status == "ok":
                     tuning_runner_state["action_count"] = int(tuning_runner_state.get("action_count", 0) or 0) + 1
+
+                if action:
+                    layer_key = _resolve_tuning_layer(weakest_layer)
+                    actions_by_layer = tuning_runner_state.setdefault("actions_by_layer", {})
+                    actions_by_layer[layer_key] = int(actions_by_layer.get(layer_key, 0) or 0) + 1
+
+                    actions_by_playbook = tuning_runner_state.setdefault("actions_by_playbook", {})
+                    if playbook_id:
+                        actions_by_playbook[playbook_id] = int(actions_by_playbook.get(playbook_id, 0) or 0) + 1
+
+                    actions_by_action = tuning_runner_state.setdefault("actions_by_action", {})
+                    actions_by_action[action] = int(actions_by_action.get(action, 0) or 0) + 1
+
+                    status_by_layer = tuning_runner_state.setdefault("action_status_by_layer", {})
+                    layer_status_raw = status_by_layer.get(layer_key, {})
+                    layer_status = dict(layer_status_raw) if isinstance(layer_status_raw, dict) else {}
+                    layer_status[action_status] = int(layer_status.get(action_status, 0) or 0) + 1
+                    status_by_layer[layer_key] = layer_status
+                    tuning_runner_state["last_action_metadata"] = dict(action_metadata)
 
                 if callable(update_tuning_fn):
                     tuning_patch: dict[str, Any] = {
