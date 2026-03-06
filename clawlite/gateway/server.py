@@ -6,6 +6,7 @@ import hmac
 import json
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,14 +64,14 @@ from clawlite.tools.web import WebFetchTool, WebSearchTool
 from clawlite.utils.logging import bind_event, setup_logging
 from clawlite.workspace.loader import WorkspaceLoader
 
-setup_logging()
-
 
 GATEWAY_CONTRACT_VERSION = "2026-03-04"
 TELEGRAM_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
 GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S = 300.0
 GATEWAY_CRON_ENGINE_TIMEOUT_S = 90.0
 GATEWAY_HEARTBEAT_ENGINE_TIMEOUT_S = 120.0
+LATEST_MEMORY_ROUTE_CACHE_TTL_S = 5.0
+LATEST_MEMORY_ROUTE_TAIL_BYTES = 32 * 1024
 
 _TUNING_DEFAULT_ACTION_BY_SEVERITY: dict[str, str] = {
     "low": "notify_operator",
@@ -574,6 +575,20 @@ async def _run_engine_with_timeout(
         raise RuntimeError("engine_run_timeout") from exc
 
 
+async def _normalize_background_task(task: asyncio.Task[Any] | None) -> tuple[asyncio.Task[Any] | None, str]:
+    if task is None:
+        return None, "missing"
+    if not task.done():
+        return task, "running"
+    try:
+        await task
+    except asyncio.CancelledError:
+        return None, "cancelled"
+    except Exception:
+        return None, "failed"
+    return None, "done"
+
+
 @dataclass(slots=True)
 class RuntimeContainer:
     config: AppConfig
@@ -1032,14 +1047,57 @@ def _default_heartbeat_route() -> tuple[str, str]:
     return "cli", "profile"
 
 
-async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
-    channel, target = _default_heartbeat_route()
-    if memory_store is None or not hasattr(memory_store, "all"):
-        return channel, target
+_LATEST_MEMORY_ROUTE_CACHE: dict[int, tuple[float, tuple[str, str]]] = {}
+
+
+def _latest_source_from_history_tail(memory_store: Any, *, tail_bytes: int = LATEST_MEMORY_ROUTE_TAIL_BYTES) -> str:
+    history_path = getattr(memory_store, "history_path", None)
+    if history_path is None:
+        return ""
     try:
-        history_rows = await asyncio.to_thread(memory_store.all)
+        path = Path(history_path)
     except Exception:
-        return channel, target
+        return ""
+    if not path.exists() or not path.is_file():
+        return ""
+
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            start = max(0, size - max(512, int(tail_bytes)))
+            fh.seek(start)
+            chunk = fh.read()
+    except Exception:
+        return ""
+
+    if not chunk:
+        return ""
+    raw_text = chunk.decode("utf-8", errors="ignore")
+    lines = raw_text.splitlines()
+    for raw_line in reversed(lines):
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        source = str(payload.get("source", "") or "").strip()
+        if source:
+            return source
+    return ""
+
+
+def _latest_source_from_full_scan(memory_store: Any) -> str:
+    if memory_store is None or not hasattr(memory_store, "all"):
+        return ""
+    try:
+        history_rows = memory_store.all()
+    except Exception:
+        return ""
     latest_source = ""
     latest_stamp = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     for row in history_rows:
@@ -1054,9 +1112,33 @@ async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
         if source and created_at >= latest_stamp:
             latest_stamp = created_at
             latest_source = source
-    if latest_source:
-        return MemoryMonitor._delivery_route_from_source(latest_source)
-    return channel, target
+    return latest_source
+
+
+async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
+    channel, target = _default_heartbeat_route()
+    if memory_store is None:
+        return channel, target
+
+    cache_key = id(memory_store)
+    now = time.monotonic()
+    cached = _LATEST_MEMORY_ROUTE_CACHE.get(cache_key)
+    if cached is not None:
+        cached_at, cached_route = cached
+        if (now - cached_at) <= LATEST_MEMORY_ROUTE_CACHE_TTL_S:
+            return cached_route
+
+    source = ""
+    try:
+        source = await asyncio.to_thread(_latest_source_from_history_tail, memory_store)
+        if not source:
+            source = await asyncio.to_thread(_latest_source_from_full_scan, memory_store)
+    except Exception:
+        return channel, target
+
+    resolved_route = MemoryMonitor._delivery_route_from_source(source) if source else (channel, target)
+    _LATEST_MEMORY_ROUTE_CACHE[cache_key] = (now, resolved_route)
+    return resolved_route
 
 
 async def _run_proactive_monitor(runtime: RuntimeContainer) -> dict[str, Any]:
@@ -1252,6 +1334,7 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
+    setup_logging()
     cfg = config or load_config()
     runtime = build_runtime(cfg)
     auth_guard = GatewayAuthGuard.from_config(cfg)
@@ -1578,10 +1661,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _start_memory_quality_tuning() -> None:
         nonlocal tuning_task, tuning_running
-        if tuning_task is not None:
+        tuning_task, task_state = await _normalize_background_task(tuning_task)
+        if task_state == "running":
             tuning_running = True
             tuning_runner_state["running"] = True
             return
+        if task_state == "failed":
+            tuning_runner_state["last_error"] = "previous_task_failed"
 
         tuning_stop_event.clear()
         tuning_running = True
@@ -1885,10 +1971,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _start_proactive_monitor() -> None:
         nonlocal proactive_task, proactive_running
-        if proactive_task is not None:
+        proactive_task, task_state = await _normalize_background_task(proactive_task)
+        if task_state == "running":
             proactive_running = True
             proactive_runner_state["running"] = True
             return
+        if task_state == "failed":
+            proactive_runner_state["last_error"] = "previous_task_failed"
 
         proactive_stop_event.clear()
         proactive_running = True
@@ -2895,7 +2984,24 @@ def run_gateway(host: str | None = None, port: int | None = None) -> None:
     )
 
 
-app = create_app()
+class _LazyGatewayApp:
+    def __init__(self, factory: Callable[[], FastAPI]) -> None:
+        self._factory = factory
+        self._app: FastAPI | None = None
+
+    def _get(self) -> FastAPI:
+        if self._app is None:
+            self._app = self._factory()
+        return self._app
+
+    async def __call__(self, scope, receive, send) -> None:
+        await self._get()(scope, receive, send)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+
+app = _LazyGatewayApp(create_app)
 
 
 if __name__ == "__main__":

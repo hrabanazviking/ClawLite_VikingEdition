@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -15,7 +17,16 @@ from starlette.websockets import WebSocketDisconnect
 
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.core.memory_monitor import MemorySuggestion
-from clawlite.gateway.server import _route_cron_job, _run_heartbeat, _run_proactive_monitor, build_runtime, create_app
+from clawlite.gateway.server import (
+    _LATEST_MEMORY_ROUTE_CACHE,
+    _latest_memory_route,
+    _normalize_background_task,
+    _route_cron_job,
+    _run_heartbeat,
+    _run_proactive_monitor,
+    build_runtime,
+    create_app,
+)
 from clawlite.providers.base import LLMResult
 from clawlite.scheduler.heartbeat import HeartbeatDecision
 from clawlite.utils import logging as logging_utils
@@ -183,6 +194,89 @@ def _assert_connect_challenge(socket) -> dict[str, object]:
     assert isinstance(payload["params"]["nonce"], str) and payload["params"]["nonce"]
     assert isinstance(payload["params"]["issued_at"], str) and payload["params"]["issued_at"]
     return payload
+
+
+def test_gateway_server_import_has_no_runtime_side_effects() -> None:
+    server_path = Path(__file__).resolve().parents[2] / "clawlite" / "gateway" / "server.py"
+    module_name = f"_test_gateway_server_{uuid.uuid4().hex}"
+
+    with patch("clawlite.config.loader.load_config", side_effect=RuntimeError("load_config_called")):
+        with patch("clawlite.utils.logging.setup_logging", side_effect=RuntimeError("setup_logging_called")):
+            spec = importlib.util.spec_from_file_location(module_name, server_path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+    assert hasattr(module, "create_app")
+    assert hasattr(module, "app")
+    sys.modules.pop(module_name, None)
+
+
+def test_latest_memory_route_prefers_history_tail_and_skips_full_scan(tmp_path: Path) -> None:
+    _LATEST_MEMORY_ROUTE_CACHE.clear()
+    history_path = tmp_path / "memory.jsonl"
+    history_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"source": "session:cli:profile", "created_at": "2026-03-01T00:00:00+00:00"}),
+                json.dumps({"source": "session:telegram:chat42", "created_at": "2026-03-02T00:00:00+00:00"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class _Memory:
+        def __init__(self, path: Path) -> None:
+            self.history_path = path
+
+        def all(self):
+            raise AssertionError("full_scan_should_not_run")
+
+    route = asyncio.run(_latest_memory_route(_Memory(history_path)))
+    assert route == ("telegram", "chat42")
+
+
+def test_latest_memory_route_caches_full_scan_result(tmp_path: Path) -> None:
+    del tmp_path
+    _LATEST_MEMORY_ROUTE_CACHE.clear()
+
+    class _Memory:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def all(self):
+            self.calls += 1
+            return [SimpleNamespace(source="session:telegram:chat99", created_at="2026-03-04T00:00:00+00:00")]
+
+    memory = _Memory()
+    first = asyncio.run(_latest_memory_route(memory))
+    second = asyncio.run(_latest_memory_route(memory))
+
+    assert first == ("telegram", "chat99")
+    assert second == ("telegram", "chat99")
+    assert memory.calls == 1
+
+
+def test_normalize_background_task_treats_done_and_running_tasks_correctly() -> None:
+    async def _scenario() -> None:
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        normalized_done, state_done = await _normalize_background_task(done_task)
+        assert normalized_done is None
+        assert state_done == "done"
+
+        running_task = asyncio.create_task(asyncio.sleep(10))
+        normalized_running, state_running = await _normalize_background_task(running_task)
+        assert normalized_running is running_task
+        assert state_running == "running"
+        running_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running_task
+
+    asyncio.run(_scenario())
 
 
 def test_gateway_chat_endpoint(tmp_path: Path) -> None:
