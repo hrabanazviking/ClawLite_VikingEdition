@@ -197,6 +197,53 @@ def test_message_tool_maps_buttons_to_telegram_metadata() -> None:
     asyncio.run(_scenario())
 
 
+def test_message_tool_maps_media_to_telegram_metadata() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+        out = await tool.run(
+            {
+                "channel": "telegram",
+                "target": "1",
+                "text": "",
+                "media": [
+                    {"type": "photo", "file_id": "photo-1"},
+                    {"type": "document", "path": "/tmp/report.pdf", "filename": "report.pdf"},
+                ],
+            },
+            ToolContext(session_id="s"),
+        )
+        assert out.startswith("sent:telegram")
+        sent_metadata = api.calls[-1]["metadata"]
+        assert sent_metadata["_telegram_media"] == [
+            {"type": "photo", "file_id": "photo-1"},
+            {"type": "document", "path": "/tmp/report.pdf", "filename": "report.pdf"},
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_message_tool_rejects_media_for_non_telegram_channel() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+        try:
+            await tool.run(
+                {
+                    "channel": "slack",
+                    "target": "general",
+                    "text": "",
+                    "media": [{"type": "photo", "file_id": "photo-1"}],
+                },
+                ToolContext(session_id="s"),
+            )
+            raise AssertionError("expected ValueError for non-telegram media")
+        except ValueError as exc:
+            assert "telegram" in str(exc)
+
+    asyncio.run(_scenario())
+
+
 def test_message_tool_invalid_buttons_raises_value_error() -> None:
     async def _scenario() -> None:
         api = FakeMsgAPI()

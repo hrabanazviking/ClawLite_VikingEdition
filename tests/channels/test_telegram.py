@@ -699,6 +699,11 @@ def test_telegram_media_only_message_is_forwarded_with_placeholder() -> None:
         assert metadata["media_types"] == ["photo", "voice"]
         assert metadata["media_counts"] == {"photo": 2, "voice": 1}
         assert metadata["media_total_count"] == 3
+        assert metadata["media_items"] == [
+            {"type": "photo", "index": 1, "file_id": "p1"},
+            {"type": "photo", "index": 2, "file_id": "p2"},
+            {"type": "voice", "file_id": "v1"},
+        ]
 
     asyncio.run(_scenario())
 
@@ -743,6 +748,14 @@ def test_telegram_media_placeholder_covers_extended_media_types() -> None:
         _, _, text, metadata = emitted[0]
         assert text == "[telegram media message: animation, contact, location, sticker, video, video_note]"
         assert metadata["media_types"] == ["animation", "contact", "location", "sticker", "video", "video_note"]
+        assert metadata["media_items"] == [
+            {"type": "video", "file_id": "v1"},
+            {"type": "animation", "file_id": "a1"},
+            {"type": "video_note", "file_id": "vn1"},
+            {"type": "sticker", "file_id": "s1"},
+            {"type": "contact", "phone_number": "+15550001111"},
+            {"type": "location", "latitude": 1.0, "longitude": 2.0},
+        ]
 
     asyncio.run(_scenario())
 
@@ -1573,6 +1586,100 @@ def test_telegram_send_populates_delivery_receipt_for_chunked_send() -> None:
         assert receipt["chunks"] == 2
         assert receipt["message_ids"] == [101, 102]
         assert receipt["last_message_id"] == 102
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_supports_media_attachments_and_delivery_receipt() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.photo_calls: list[dict] = []
+                self.document_calls: list[dict] = []
+
+            async def send_photo(self, **kwargs):
+                self.photo_calls.append(kwargs)
+                return SimpleNamespace(message_id=101)
+
+            async def send_document(self, **kwargs):
+                self.document_calls.append(kwargs)
+                return SimpleNamespace(message_id=102)
+
+        bot = FakeBot()
+        channel.bot = bot
+        metadata: dict[str, object] = {
+            "message_thread_id": 7,
+            "media": [
+                {"type": "photo", "file_id": "photo-1"},
+                {"type": "document", "file_id": "doc-1"},
+            ],
+        }
+
+        out = await channel.send(target="42", text="**hello**", metadata=metadata)
+
+        assert out == "telegram:sent:2"
+        assert len(bot.photo_calls) == 1
+        assert bot.photo_calls[0]["chat_id"] == "42"
+        assert bot.photo_calls[0]["photo"] == "photo-1"
+        assert bot.photo_calls[0]["caption"] == markdown_to_telegram_html("**hello**")
+        assert bot.photo_calls[0]["parse_mode"] == "HTML"
+        assert bot.photo_calls[0]["message_thread_id"] == 7
+        assert len(bot.document_calls) == 1
+        assert bot.document_calls[0]["chat_id"] == "42"
+        assert bot.document_calls[0]["document"] == "doc-1"
+        assert bot.document_calls[0]["message_thread_id"] == 7
+        assert "caption" not in bot.document_calls[0]
+        receipt = metadata.get("_delivery_receipt")
+        assert isinstance(receipt, dict)
+        assert receipt["chunks"] == 2
+        assert receipt["message_ids"] == [101, 102]
+        assert receipt["media_count"] == 2
+        assert receipt["media_types"] == ["photo", "document"]
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_places_reply_markup_on_follow_up_text_when_media_caption_is_too_long() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.photo_calls: list[dict] = []
+                self.message_calls: list[dict] = []
+
+            async def send_photo(self, **kwargs):
+                self.photo_calls.append(kwargs)
+                return SimpleNamespace(message_id=201)
+
+            async def send_message(self, **kwargs):
+                self.message_calls.append(kwargs)
+                return SimpleNamespace(message_id=202)
+
+        bot = FakeBot()
+        channel.bot = bot
+        long_text = "A" * 1030
+        metadata: dict[str, object] = {
+            "media": [{"type": "photo", "file_id": "photo-1"}],
+            "telegram_inline_keyboard": [[{"text": "Open", "url": "https://example.com"}]],
+        }
+
+        out = await channel.send(target="42", text=long_text, metadata=metadata)
+
+        assert out == "telegram:sent:2"
+        assert len(bot.photo_calls) == 1
+        assert bot.photo_calls[0]["photo"] == "photo-1"
+        assert "caption" not in bot.photo_calls[0]
+        assert "reply_markup" not in bot.photo_calls[0]
+        assert len(bot.message_calls) == 1
+        assert bot.message_calls[0]["text"] == long_text
+        assert "reply_markup" in bot.message_calls[0]
+        receipt = metadata.get("_delivery_receipt")
+        assert isinstance(receipt, dict)
+        assert receipt["chunks"] == 2
+        assert receipt["message_ids"] == [201, 202]
 
     asyncio.run(_scenario())
 

@@ -19,6 +19,16 @@ class MessageAPI(Protocol):
 class MessageTool(Tool):
     name = "message"
     description = "Send proactive message to a channel target."
+    TELEGRAM_MEDIA_TYPES = {
+        "animation",
+        "audio",
+        "document",
+        "photo",
+        "sticker",
+        "video",
+        "video_note",
+        "voice",
+    }
 
     def __init__(self, api: MessageAPI) -> None:
         self.api = api
@@ -42,6 +52,23 @@ class MessageTool(Tool):
                 "topic_icon_color": {"type": "integer"},
                 "topic_icon_custom_emoji_id": {"type": "string"},
                 "metadata": {"type": "object"},
+                "media": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": sorted(self.TELEGRAM_MEDIA_TYPES),
+                            },
+                            "file_id": {"type": "string"},
+                            "url": {"type": "string"},
+                            "path": {"type": "string"},
+                            "filename": {"type": "string"},
+                        },
+                        "required": ["type"],
+                    },
+                },
                 "buttons": {
                     "type": "array",
                     "items": {
@@ -100,6 +127,37 @@ class MessageTool(Tool):
             normalized_rows.append(normalized_row)
         return normalized_rows
 
+    @classmethod
+    def _validate_media(cls, media: Any) -> list[dict[str, Any]]:
+        if not isinstance(media, list):
+            raise ValueError("media must be a list of objects")
+        normalized_media: list[dict[str, Any]] = []
+        for index, item in enumerate(media, start=1):
+            if not isinstance(item, dict):
+                raise ValueError("media items must be objects")
+            media_type = str(item.get("type", "") or "").strip().lower()
+            if media_type not in cls.TELEGRAM_MEDIA_TYPES:
+                raise ValueError(f"media item {index} has invalid type")
+
+            file_id = str(item.get("file_id", "") or "").strip()
+            url = str(item.get("url", "") or "").strip()
+            path = str(item.get("path", "") or "").strip()
+            if not any((file_id, url, path)):
+                raise ValueError(f"media item {index} requires file_id, url, or path")
+
+            normalized_item: dict[str, Any] = {"type": media_type}
+            if file_id:
+                normalized_item["file_id"] = file_id
+            if url:
+                normalized_item["url"] = url
+            if path:
+                normalized_item["path"] = path
+            filename = str(item.get("filename", "") or "").strip()
+            if filename:
+                normalized_item["filename"] = filename
+            normalized_media.append(normalized_item)
+        return normalized_media
+
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
         channel = str(arguments.get("channel", "")).strip() or ctx.channel
         target = str(arguments.get("target", "")).strip()
@@ -120,6 +178,12 @@ class MessageTool(Tool):
                 raise ValueError("metadata must be an object")
             metadata = dict(raw_metadata)
 
+        media_items: list[dict[str, Any]] | None = None
+        if "media" in arguments and arguments.get("media") is not None:
+            if channel != "telegram":
+                raise ValueError("media is currently only supported on telegram channel")
+            media_items = self._validate_media(arguments.get("media"))
+
         message_id = self._coerce_int(arguments.get("message_id"))
         reply_to_message_id = self._coerce_int(arguments.get("reply_to_message_id"))
         emoji = str(arguments.get("emoji", "") or "").strip()
@@ -128,10 +192,10 @@ class MessageTool(Tool):
         topic_icon_custom_emoji_id = str(arguments.get("topic_icon_custom_emoji_id", "") or "").strip()
 
         if action == "send":
-            if not text:
+            if not text and not media_items:
                 raise ValueError("send action requires non-empty text")
         elif action == "reply":
-            if not text:
+            if not text and not media_items:
                 raise ValueError("reply action requires non-empty text")
             metadata_reply_to = self._coerce_int((metadata or {}).get("reply_to_message_id"))
             effective_reply_to = (
@@ -178,5 +242,9 @@ class MessageTool(Tool):
             keyboard = self._validate_buttons(arguments.get("buttons"))
             metadata = dict(metadata or {})
             metadata["_telegram_inline_keyboard"] = keyboard
+
+        if media_items is not None:
+            metadata = dict(metadata or {})
+            metadata["_telegram_media"] = media_items
 
         return await self.api.send(channel=channel, target=target, text=text, metadata=metadata)

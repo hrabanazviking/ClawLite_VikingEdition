@@ -26,6 +26,7 @@ from clawlite.channels.base import BaseChannel, cancel_task
 from clawlite.config.schema import TelegramChannelConfig
 
 MAX_MESSAGE_LEN = 4000
+MAX_CAPTION_LEN = 1024
 TELEGRAM_ALLOWED_UPDATES = [
     "message",
     "edited_message",
@@ -1631,6 +1632,7 @@ class TelegramChannel(BaseChannel):
             "media_types": list(media_info.get("types", [])),
             "media_counts": dict(media_info.get("counts", {})),
             "media_total_count": int(media_info.get("total_count", 0) or 0),
+            "media_items": list(media_info.get("items", [])),
         }
         message_thread_id = self._coerce_thread_id(getattr(message, "message_thread_id", None))
         if message_thread_id is not None:
@@ -1647,12 +1649,53 @@ class TelegramChannel(BaseChannel):
             metadata["reply_to_username"] = str(getattr(reply_user, "username", "") or "")
         return metadata
 
+    @staticmethod
+    def _build_media_item(*, media_type: str, raw: Any, index: int | None = None) -> dict[str, Any]:
+        item: dict[str, Any] = {"type": media_type}
+        if index is not None:
+            item["index"] = index
+
+        for field_name in (
+            "file_id",
+            "file_unique_id",
+            "file_name",
+            "mime_type",
+            "file_size",
+            "duration",
+            "width",
+            "height",
+            "length",
+            "emoji",
+            "set_name",
+            "phone_number",
+            "first_name",
+            "last_name",
+            "user_id",
+            "latitude",
+            "longitude",
+            "horizontal_accuracy",
+            "live_period",
+            "heading",
+            "proximity_alert_radius",
+            "title",
+            "address",
+        ):
+            value = getattr(raw, field_name, None)
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                item[field_name] = value
+        return item
+
     def _extract_media_info(self, message: Any) -> dict[str, Any]:
         counts: dict[str, int] = {}
+        items: list[dict[str, Any]] = []
 
         photos = getattr(message, "photo", None)
         if photos:
             counts["photo"] = len(photos)
+            for index, photo in enumerate(photos, start=1):
+                items.append(self._build_media_item(media_type="photo", raw=photo, index=index))
 
         for media_type in (
             "voice",
@@ -1665,8 +1708,10 @@ class TelegramChannel(BaseChannel):
             "contact",
             "location",
         ):
-            if getattr(message, media_type, None) is not None:
+            raw = getattr(message, media_type, None)
+            if raw is not None:
                 counts[media_type] = counts.get(media_type, 0) + 1
+                items.append(self._build_media_item(media_type=media_type, raw=raw))
 
         media_types = sorted(counts.keys())
         total_count = sum(counts.values())
@@ -1675,6 +1720,7 @@ class TelegramChannel(BaseChannel):
             "types": media_types,
             "counts": counts,
             "total_count": total_count,
+            "items": items,
         }
 
     def _build_media_placeholder(self, media_info: dict[str, Any]) -> str:
@@ -1688,6 +1734,332 @@ class TelegramChannel(BaseChannel):
         if not details:
             return "[telegram media message]"
         return f"[telegram media message: {details}]"
+
+    @staticmethod
+    def _split_media_caption(text: str) -> tuple[str | None, str | None]:
+        trimmed = str(text or "").strip()
+        if not trimmed:
+            return None, None
+        if len(trimmed) > MAX_CAPTION_LEN:
+            return None, trimmed
+        return trimmed, None
+
+    @staticmethod
+    def _normalize_outbound_media_items(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        media_source = metadata.get("_telegram_media")
+        if media_source is None:
+            media_source = metadata.get("telegram_media")
+        if media_source is None:
+            media_source = metadata.get("media")
+        if media_source is None:
+            return []
+
+        if isinstance(media_source, dict):
+            media_items = [media_source]
+        elif isinstance(media_source, list):
+            media_items = media_source
+        else:
+            raise ValueError("telegram media must be an object or list of objects")
+
+        allowed_types = {
+            "animation",
+            "audio",
+            "document",
+            "photo",
+            "sticker",
+            "video",
+            "video_note",
+            "voice",
+        }
+        normalized: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(media_items, start=1):
+            if not isinstance(raw_item, dict):
+                raise ValueError("telegram media items must be objects")
+            media_type = str(raw_item.get("type", "") or "").strip().lower()
+            if media_type not in allowed_types:
+                raise ValueError(f"telegram media item {index} has invalid type")
+
+            file_id = str(raw_item.get("file_id", "") or "").strip()
+            url = str(raw_item.get("url", "") or "").strip()
+            path = str(raw_item.get("path", "") or "").strip()
+            value = raw_item.get("source", raw_item.get("value", raw_item.get("payload")))
+
+            item: dict[str, Any] = {"type": media_type}
+            if path:
+                item["path"] = path
+                filename = str(raw_item.get("filename", "") or "").strip() or Path(path).name
+                if filename:
+                    item["filename"] = filename
+            elif file_id:
+                item["payload"] = file_id
+            elif url:
+                item["payload"] = url
+            elif value is not None:
+                item["payload"] = value
+                filename = str(raw_item.get("filename", "") or "").strip()
+                if filename:
+                    item["filename"] = filename
+            else:
+                raise ValueError(
+                    f"telegram media item {index} requires file_id, url, path, source, value, or payload"
+                )
+            normalized.append(item)
+        return normalized
+
+    async def _resolve_outbound_media_payload(self, item: dict[str, Any]) -> Any:
+        path_value = str(item.get("path", "") or "").strip()
+        if path_value:
+            path = Path(path_value).expanduser()
+            try:
+                payload_bytes = await asyncio.to_thread(path.read_bytes)
+            except OSError as exc:
+                raise ValueError(f"telegram media path unreadable: {path}") from exc
+            from telegram import InputFile
+
+            filename = str(item.get("filename", "") or "").strip() or path.name or f"{item['type']}.bin"
+            return InputFile(payload_bytes, filename=filename)
+
+        payload = item.get("payload")
+        if isinstance(payload, bytearray):
+            payload = bytes(payload)
+        if isinstance(payload, bytes):
+            from telegram import InputFile
+
+            filename = str(item.get("filename", "") or "").strip() or f"{item['type']}.bin"
+            return InputFile(payload, filename=filename)
+        return payload
+
+    @staticmethod
+    def _resolve_media_sender(bot: Any, media_type: str) -> tuple[Any, str]:
+        mapping = {
+            "animation": ("send_animation", "animation"),
+            "audio": ("send_audio", "audio"),
+            "document": ("send_document", "document"),
+            "photo": ("send_photo", "photo"),
+            "sticker": ("send_sticker", "sticker"),
+            "video": ("send_video", "video"),
+            "video_note": ("send_video_note", "video_note"),
+            "voice": ("send_voice", "voice"),
+        }
+        method_name, payload_key = mapping[media_type]
+        sender = getattr(bot, method_name, None)
+        if not callable(sender):
+            raise ValueError(f"telegram:action_unsupported:{media_type}")
+        return sender, payload_key
+
+    async def _send_text_chunks(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        reply_markup: Any | None,
+        message_ids: list[int],
+    ) -> int:
+        chunks = split_message(text)
+        policy = self._send_retry_policy.normalized()
+
+        def _remember_message_id(result: Any) -> None:
+            if result is None:
+                return
+            raw_message_id = getattr(result, "message_id", None)
+            try:
+                message_id = int(raw_message_id)
+            except (TypeError, ValueError):
+                return
+            if message_id > 0:
+                message_ids.append(message_id)
+
+        for idx, chunk in enumerate(chunks, start=1):
+            html_payload = markdown_to_telegram_html(chunk)
+            payload_text = html_payload
+            payload_parse_mode: str | None = "HTML"
+            formatting_fallback_used = False
+
+            for attempt in range(1, policy.max_attempts + 1):
+                self._sync_auth_breaker_signal_transition(breaker=self._send_auth_breaker, key_prefix="send")
+                if self._send_auth_breaker.is_open:
+                    raise TelegramCircuitOpenError("telegram auth circuit is open")
+                try:
+                    payload: dict[str, Any] = {
+                        "chat_id": chat_id,
+                        "text": payload_text,
+                        "parse_mode": payload_parse_mode,
+                        "reply_to_message_id": reply_to_message_id,
+                    }
+                    if reply_markup is not None:
+                        payload["reply_markup"] = reply_markup
+                    if message_thread_id is not None:
+                        payload["message_thread_id"] = message_thread_id
+                    send_result = await asyncio.wait_for(
+                        self.bot.send_message(**payload),
+                        timeout=max(1.0, float(self.send_timeout_s)),
+                    )
+                    _remember_message_id(send_result)
+                    self._on_send_auth_success()
+                    break
+                except TypeError as exc:
+                    if message_thread_id is None or "message_thread_id" not in str(exc):
+                        raise
+                    send_result = await asyncio.wait_for(
+                        self.bot.send_message(
+                            chat_id=chat_id,
+                            text=payload_text,
+                            parse_mode=payload_parse_mode,
+                            reply_to_message_id=reply_to_message_id,
+                            reply_markup=reply_markup,
+                        ),
+                        timeout=max(1.0, float(self.send_timeout_s)),
+                    )
+                    _remember_message_id(send_result)
+                    self._on_send_auth_success()
+                    break
+                except Exception as exc:
+                    if payload_parse_mode and not formatting_fallback_used and _is_formatting_error(exc):
+                        payload_text = chunk
+                        payload_parse_mode = None
+                        formatting_fallback_used = True
+                        continue
+
+                    if _is_auth_failure(exc):
+                        self._on_send_auth_failure()
+                        raise
+
+                    logger.error(
+                        "telegram outbound failed chat={} chunk={}/{} attempt={}/{} error={}",
+                        chat_id,
+                        idx,
+                        len(chunks),
+                        attempt,
+                        policy.max_attempts,
+                        exc,
+                    )
+                    if attempt >= policy.max_attempts or not _is_transient_failure(exc):
+                        raise
+
+                    self._signals["send_retry_count"] += 1
+                    delay_s = _retry_after_delay_s(exc)
+                    if delay_s is None:
+                        delay_s = _retry_delay_s(policy, attempt)
+                    else:
+                        self._signals["send_retry_after_count"] += 1
+                    if delay_s > 0:
+                        await asyncio.sleep(delay_s)
+        return len(chunks)
+
+    async def _send_media_items(
+        self,
+        *,
+        chat_id: str,
+        items: list[dict[str, Any]],
+        caption_text: str | None,
+        reply_to_message_id: int | None,
+        message_thread_id: int | None,
+        reply_markup: Any | None,
+        message_ids: list[int],
+    ) -> int:
+        policy = self._send_retry_policy.normalized()
+
+        def _remember_message_id(result: Any) -> None:
+            if result is None:
+                return
+            raw_message_id = getattr(result, "message_id", None)
+            try:
+                message_id = int(raw_message_id)
+            except (TypeError, ValueError):
+                return
+            if message_id > 0:
+                message_ids.append(message_id)
+
+        for idx, item in enumerate(items, start=1):
+            sender, payload_key = self._resolve_media_sender(self.bot, str(item["type"]))
+            raw_caption = caption_text if idx == 1 else None
+            caption_payload = markdown_to_telegram_html(raw_caption) if raw_caption else None
+            caption_parse_mode: str | None = "HTML" if caption_payload else None
+            formatting_fallback_used = False
+
+            for attempt in range(1, policy.max_attempts + 1):
+                self._sync_auth_breaker_signal_transition(breaker=self._send_auth_breaker, key_prefix="send")
+                if self._send_auth_breaker.is_open:
+                    raise TelegramCircuitOpenError("telegram auth circuit is open")
+                try:
+                    media_payload = await self._resolve_outbound_media_payload(item)
+                    payload: dict[str, Any] = {
+                        "chat_id": chat_id,
+                        payload_key: media_payload,
+                    }
+                    if idx == 1 and reply_to_message_id is not None:
+                        payload["reply_to_message_id"] = reply_to_message_id
+                    if idx == 1 and reply_markup is not None:
+                        payload["reply_markup"] = reply_markup
+                    if message_thread_id is not None:
+                        payload["message_thread_id"] = message_thread_id
+                    if caption_payload is not None:
+                        payload["caption"] = caption_payload
+                        payload["parse_mode"] = caption_parse_mode
+                    send_result = await asyncio.wait_for(
+                        sender(**payload),
+                        timeout=max(1.0, float(self.send_timeout_s)),
+                    )
+                    _remember_message_id(send_result)
+                    self._on_send_auth_success()
+                    break
+                except TypeError as exc:
+                    if message_thread_id is None or "message_thread_id" not in str(exc):
+                        raise
+                    media_payload = await self._resolve_outbound_media_payload(item)
+                    payload = {
+                        "chat_id": chat_id,
+                        payload_key: media_payload,
+                    }
+                    if idx == 1 and reply_to_message_id is not None:
+                        payload["reply_to_message_id"] = reply_to_message_id
+                    if idx == 1 and reply_markup is not None:
+                        payload["reply_markup"] = reply_markup
+                    if caption_payload is not None:
+                        payload["caption"] = caption_payload
+                        payload["parse_mode"] = caption_parse_mode
+                    send_result = await asyncio.wait_for(
+                        sender(**payload),
+                        timeout=max(1.0, float(self.send_timeout_s)),
+                    )
+                    _remember_message_id(send_result)
+                    self._on_send_auth_success()
+                    break
+                except Exception as exc:
+                    if caption_parse_mode and not formatting_fallback_used and _is_formatting_error(exc):
+                        caption_payload = raw_caption
+                        caption_parse_mode = None
+                        formatting_fallback_used = True
+                        continue
+
+                    if _is_auth_failure(exc):
+                        self._on_send_auth_failure()
+                        raise
+
+                    logger.error(
+                        "telegram outbound media failed chat={} media={}/{} type={} attempt={}/{} error={}",
+                        chat_id,
+                        idx,
+                        len(items),
+                        item["type"],
+                        attempt,
+                        policy.max_attempts,
+                        exc,
+                    )
+                    if attempt >= policy.max_attempts or not _is_transient_failure(exc):
+                        raise
+
+                    self._signals["send_retry_count"] += 1
+                    delay_s = _retry_after_delay_s(exc)
+                    if delay_s is None:
+                        delay_s = _retry_delay_s(policy, attempt)
+                    else:
+                        self._signals["send_retry_after_count"] += 1
+                    if delay_s > 0:
+                        await asyncio.sleep(delay_s)
+        return len(items)
 
     async def _send_start_message(self, *, chat_id: str) -> None:
         await self.send(
@@ -1888,118 +2260,62 @@ class TelegramChannel(BaseChannel):
             metadata_payload["reply_to_message_id"] = action_message_id
         message_thread_id = self._coerce_thread_id(metadata_payload.get("message_thread_id", target_thread_id))
         await self._stop_typing_keepalive(chat_id=chat_id, message_thread_id=message_thread_id)
-        chunks = split_message(text)
-        policy = self._send_retry_policy.normalized()
         reply_to_message_id = metadata_payload.get("reply_to_message_id", metadata_payload.get("message_id"))
         try:
             reply_to_message_id = int(reply_to_message_id) if reply_to_message_id is not None else None
         except (TypeError, ValueError):
             reply_to_message_id = None
         message_ids: list[int] = []
-
-        def _remember_message_id(result: Any) -> None:
-            if result is None:
-                return
-            raw_message_id = getattr(result, "message_id", None)
-            try:
-                message_id = int(raw_message_id)
-            except (TypeError, ValueError):
-                return
-            if message_id > 0:
-                message_ids.append(message_id)
-
         reply_markup = self._build_inline_keyboard_reply_markup(metadata_payload)
-
-        for idx, chunk in enumerate(chunks, start=1):
-            html_payload = markdown_to_telegram_html(chunk)
-            payload_text = html_payload
-            payload_parse_mode: str | None = "HTML"
-            formatting_fallback_used = False
-
-            for attempt in range(1, policy.max_attempts + 1):
-                self._sync_auth_breaker_signal_transition(breaker=self._send_auth_breaker, key_prefix="send")
-                if self._send_auth_breaker.is_open:
-                    raise TelegramCircuitOpenError("telegram auth circuit is open")
-                try:
-                    payload: dict[str, Any] = {
-                        "chat_id": chat_id,
-                        "text": payload_text,
-                        "parse_mode": payload_parse_mode,
-                        "reply_to_message_id": reply_to_message_id,
-                    }
-                    if reply_markup is not None:
-                        payload["reply_markup"] = reply_markup
-                    if message_thread_id is not None:
-                        payload["message_thread_id"] = message_thread_id
-                    send_result = await asyncio.wait_for(
-                        self.bot.send_message(**payload),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except TypeError as exc:
-                    if message_thread_id is None or "message_thread_id" not in str(exc):
-                        raise
-                    send_result = await asyncio.wait_for(
-                        self.bot.send_message(
-                            chat_id=chat_id,
-                            text=payload_text,
-                            parse_mode=payload_parse_mode,
-                            reply_to_message_id=reply_to_message_id,
-                            reply_markup=reply_markup,
-                        ),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except Exception as exc:
-                    if payload_parse_mode and not formatting_fallback_used and _is_formatting_error(exc):
-                        payload_text = html.escape(chunk, quote=False)
-                        payload_parse_mode = None
-                        formatting_fallback_used = True
-                        continue
-
-                    if _is_auth_failure(exc):
-                        self._on_send_auth_failure()
-                        raise
-
-                    logger.error(
-                        "telegram outbound failed chat={} chunk={}/{} attempt={}/{} error={}",
-                        chat_id,
-                        idx,
-                        len(chunks),
-                        attempt,
-                        policy.max_attempts,
-                        exc,
-                    )
-                    if attempt >= policy.max_attempts or not _is_transient_failure(exc):
-                        raise
-
-                    self._signals["send_retry_count"] += 1
-                    delay_s = _retry_after_delay_s(exc)
-                    if delay_s is None:
-                        delay_s = _retry_delay_s(policy, attempt)
-                    else:
-                        self._signals["send_retry_after_count"] += 1
-                    if delay_s > 0:
-                        await asyncio.sleep(delay_s)
+        media_items = self._normalize_outbound_media_items(metadata_payload)
+        total_messages = 0
+        if media_items:
+            caption_text, follow_up_text = self._split_media_caption(text)
+            total_messages += await self._send_media_items(
+                chat_id=chat_id,
+                items=media_items,
+                caption_text=caption_text,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                reply_markup=None if follow_up_text else reply_markup,
+                message_ids=message_ids,
+            )
+            if follow_up_text:
+                total_messages += await self._send_text_chunks(
+                    chat_id=chat_id,
+                    text=follow_up_text,
+                    reply_to_message_id=None,
+                    message_thread_id=message_thread_id,
+                    reply_markup=reply_markup,
+                    message_ids=message_ids,
+                )
+        else:
+            total_messages += await self._send_text_chunks(
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                reply_markup=reply_markup,
+                message_ids=message_ids,
+            )
         if caller_metadata is not None:
             receipt: dict[str, Any] = {
                 "channel": "telegram",
                 "chat_id": chat_id,
-                "chunks": len(chunks),
+                "chunks": total_messages,
                 "message_ids": list(message_ids),
                 "last_message_id": message_ids[-1] if message_ids else 0,
             }
             if message_thread_id is not None:
                 receipt["message_thread_id"] = message_thread_id
+            if media_items:
+                receipt["media_count"] = len(media_items)
+                receipt["media_types"] = [str(item["type"]) for item in media_items]
             caller_metadata["_delivery_receipt"] = receipt
         if message_ids:
             self._remember_own_sent_message_ids(chat_id=chat_id, message_ids=message_ids)
-        logger.info("telegram outbound sent chat={} chunks={} chars={}", chat_id, len(chunks), len(text))
-        return f"telegram:sent:{len(chunks)}"
+        logger.info("telegram outbound sent chat={} chunks={} chars={}", chat_id, total_messages, len(text))
+        return f"telegram:sent:{total_messages}"
 
     def _build_inline_keyboard_reply_markup(self, metadata: dict[str, Any]) -> Any | None:
         keyboard_source = metadata.get("_telegram_inline_keyboard")
