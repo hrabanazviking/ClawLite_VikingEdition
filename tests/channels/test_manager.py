@@ -145,6 +145,18 @@ class StopAwareEngine(FakeEngine):
         self.subagents = SubagentStub(cancelled=cancelled_subagents)
 
 
+class FlakyNextInboundBus(MessageQueue):
+    def __init__(self, *, fail_count: int = 1) -> None:
+        super().__init__()
+        self._remaining_failures = max(0, int(fail_count or 0))
+
+    async def next_inbound(self):
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise RuntimeError("synthetic next_inbound failure")
+        return await super().next_inbound()
+
+
 class FakeChannel(BaseChannel):
     def __init__(
         self,
@@ -399,6 +411,33 @@ def test_channel_manager_sends_fallback_when_engine_raises() -> None:
         assert text == "I hit an internal error while processing your request."
         assert metadata.get("_error") == "dispatch_engine_exception"
         assert metadata.get("error_type") == "RuntimeError"
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_dispatch_loop_recovers_after_next_inbound_exception() -> None:
+    async def _scenario() -> None:
+        bus = FlakyNextInboundBus(fail_count=1)
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start({"channels": {"fake": {"enabled": True}}})
+
+        fake = mgr._channels["fake"]
+        await asyncio.sleep(0.02)
+        await fake.emit(
+            session_id="fake:recover",
+            user_id="u1",
+            text="hello",
+            metadata={"channel": "fake", "chat_id": "recover"},
+        )
+        await asyncio.sleep(0.2)
+
+        assert len(fake.sent) == 1
+        target, text, _ = fake.sent[0]
+        assert target == "recover"
+        assert text == "reply:fake:recover:hello"
 
         await mgr.stop()
 

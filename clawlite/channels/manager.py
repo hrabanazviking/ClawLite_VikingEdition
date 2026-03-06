@@ -663,29 +663,35 @@ class ChannelManager:
 
     async def _dispatch_loop(self) -> None:
         while True:
-            event = await self.bus.next_inbound()
-            if self._is_stop_command(event.text):
-                await self._handle_stop(event)
-                continue
+            try:
+                event = await self.bus.next_inbound()
+                if self._is_stop_command(event.text):
+                    await self._handle_stop(event)
+                    continue
 
-            async def _dispatch_worker(current: InboundEvent) -> None:
-                acquired = False
-                try:
-                    await self._acquire_dispatch_slot(current.session_id)
-                    acquired = True
-                    await self._dispatch_event(current)
-                finally:
-                    if acquired:
-                        self._release_dispatch_slot(current.session_id)
+                async def _dispatch_worker(current: InboundEvent) -> None:
+                    acquired = False
+                    try:
+                        await self._acquire_dispatch_slot(current.session_id)
+                        acquired = True
+                        await self._dispatch_event(current)
+                    finally:
+                        if acquired:
+                            self._release_dispatch_slot(current.session_id)
 
-            task = asyncio.create_task(_dispatch_worker(event))
-            bucket = self._active_tasks.setdefault(event.session_id, set())
-            bucket.add(task)
+                task = asyncio.create_task(_dispatch_worker(event))
+                bucket = self._active_tasks.setdefault(event.session_id, set())
+                bucket.add(task)
 
-            def _on_done(done: asyncio.Task[Any], sid: str = event.session_id) -> None:
-                self._safe_remove_task(self._active_tasks, sid, done)
+                def _on_done(done: asyncio.Task[Any], sid: str = event.session_id) -> None:
+                    self._safe_remove_task(self._active_tasks, sid, done)
 
-            task.add_done_callback(_on_done)
+                task.add_done_callback(_on_done)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                bind_event("channel.dispatch").error("dispatch loop failed error={}", exc)
+                await asyncio.sleep(0.05)
 
     async def start(self, config: dict[str, Any]) -> None:
         channels_cfg = config.get("channels", {}) if isinstance(config, dict) else {}
