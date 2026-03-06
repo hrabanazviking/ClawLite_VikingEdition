@@ -221,12 +221,15 @@ class MemoryRecallTool(Tool):
         min_confidence = _coerce_float(arguments.get("min_confidence"), default=None)
         rows: list[MemoryRecord] = []
         async_retrieved: list[dict[str, Any]] | None = None
+        retrieve_payload: dict[str, Any] | None = None
         retrieve_fn = getattr(self.memory, "retrieve", None)
         if callable(retrieve_fn):
             try:
                 retrieve_kwargs: dict[str, Any] = {"limit": limit, "method": "rag"}
                 if _accepts_parameter(retrieve_fn, "user_id"):
                     retrieve_kwargs["user_id"] = ctx.user_id
+                if _accepts_parameter(retrieve_fn, "session_id"):
+                    retrieve_kwargs["session_id"] = ctx.session_id
                 if _accepts_parameter(retrieve_fn, "include_shared"):
                     retrieve_kwargs["include_shared"] = True
                 if reasoning_layers and _accepts_parameter(retrieve_fn, "reasoning_layers"):
@@ -238,6 +241,7 @@ class MemoryRecallTool(Tool):
                 except TypeError:
                     payload = await retrieve_fn(query, limit=limit, method="rag")
                 if isinstance(payload, dict):
+                    retrieve_payload = payload
                     raw_hits = payload.get("hits", [])
                     if isinstance(raw_hits, list):
                         async_retrieved = [item for item in raw_hits if isinstance(item, dict)]
@@ -248,6 +252,8 @@ class MemoryRecallTool(Tool):
             search_fn = getattr(self.memory, "search")
             if _accepts_parameter(search_fn, "user_id"):
                 search_kwargs["user_id"] = ctx.user_id
+            if _accepts_parameter(search_fn, "session_id"):
+                search_kwargs["session_id"] = ctx.session_id
             if _accepts_parameter(search_fn, "include_shared"):
                 search_kwargs["include_shared"] = True
             if reasoning_layers and _accepts_parameter(search_fn, "reasoning_layers"):
@@ -294,6 +300,10 @@ class MemoryRecallTool(Tool):
             "count": len(results),
             "results": results,
         }
+        if isinstance(retrieve_payload, dict):
+            episodic_digest = retrieve_payload.get("episodic_digest")
+            if episodic_digest is not None:
+                payload["episodic_digest"] = episodic_digest
         return _dump_json(payload)
 
 
@@ -538,7 +548,6 @@ class MemoryForgetTool(Tool):
         }
 
     async def run(self, arguments: dict[str, Any], ctx: ToolContext) -> str:
-        del ctx
         ref = str(arguments.get("ref", "")).strip()
         query = str(arguments.get("query", "")).strip()
         source = str(arguments.get("source", "")).strip()
@@ -581,7 +590,18 @@ class MemoryForgetTool(Tool):
         candidate_rows: list[MemoryRecord]
         query_ids: set[str] | None = None
         if query:
-            query_matches = self.memory.search(query, limit=100)
+            search_kwargs: dict[str, Any] = {"limit": 100}
+            search_fn = getattr(self.memory, "search")
+            if _accepts_parameter(search_fn, "user_id"):
+                search_kwargs["user_id"] = ctx.user_id
+            if _accepts_parameter(search_fn, "session_id"):
+                search_kwargs["session_id"] = ctx.session_id
+            if _accepts_parameter(search_fn, "include_shared"):
+                search_kwargs["include_shared"] = True
+            try:
+                query_matches = search_fn(query, **search_kwargs)
+            except TypeError:
+                query_matches = search_fn(query, limit=100)
             query_ids = {str(item.id or "").strip() for item in query_matches if str(item.id or "").strip()}
             candidate_rows = list(query_matches)
         else:
@@ -694,7 +714,6 @@ class MemoryAnalyzeTool(Tool):
         }
 
     async def run(self, arguments: dict[str, Any], ctx: ToolContext) -> str:
-        del ctx
         query = str(arguments.get("query", "")).strip()
         limit = _clamp_int(arguments.get("limit"), default=5, minimum=1, maximum=20)
         include_examples = _coerce_bool(arguments.get("include_examples"), default=True)
@@ -718,7 +737,18 @@ class MemoryAnalyzeTool(Tool):
 
         if query:
             payload["query"] = query
-            matches = self.memory.search(query, limit=limit)
+            search_kwargs: dict[str, Any] = {"limit": limit}
+            search_fn = getattr(self.memory, "search")
+            if _accepts_parameter(search_fn, "user_id"):
+                search_kwargs["user_id"] = ctx.user_id
+            if _accepts_parameter(search_fn, "session_id"):
+                search_kwargs["session_id"] = ctx.session_id
+            if _accepts_parameter(search_fn, "include_shared"):
+                search_kwargs["include_shared"] = True
+            try:
+                matches = search_fn(query, **search_kwargs)
+            except TypeError:
+                matches = search_fn(query, limit=limit)
             out_matches: list[dict[str, Any]] = []
             for row in matches:
                 item: dict[str, Any] = {
@@ -730,5 +760,20 @@ class MemoryAnalyzeTool(Tool):
                     item["text"] = _truncate_text(str(row.text or ""), limit=180)
                 out_matches.append(item)
             payload["matches"] = out_matches
+            retrieve_fn = getattr(self.memory, "retrieve", None)
+            if callable(retrieve_fn):
+                try:
+                    retrieve_kwargs: dict[str, Any] = {"limit": limit, "method": "rag"}
+                    if _accepts_parameter(retrieve_fn, "user_id"):
+                        retrieve_kwargs["user_id"] = ctx.user_id
+                    if _accepts_parameter(retrieve_fn, "session_id"):
+                        retrieve_kwargs["session_id"] = ctx.session_id
+                    if _accepts_parameter(retrieve_fn, "include_shared"):
+                        retrieve_kwargs["include_shared"] = True
+                    result = await retrieve_fn(query, **retrieve_kwargs)
+                    if isinstance(result, dict) and result.get("episodic_digest") is not None:
+                        payload["episodic_digest"] = result.get("episodic_digest")
+                except Exception:
+                    pass
 
         return _dump_json(payload)

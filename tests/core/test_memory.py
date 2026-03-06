@@ -916,6 +916,83 @@ def test_memory_search_hides_parent_only_sibling_episodes_but_allows_family_scop
     )
 
 
+def test_memory_retrieve_surfaces_visible_episode_digest_by_session_relationship(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        shared = {
+            "working_memory_promoted": True,
+            "working_memory_parent_session_id": "cli:owner",
+            "working_memory_share_group": "cli:owner",
+            "skip_profile_sync": True,
+        }
+        store.add(
+            "release checklist blocker for parent coordinator",
+            source="working-session:cli:owner",
+            user_id="42",
+            memory_type="event",
+            metadata={
+                **shared,
+                "working_memory_session_id": "cli:owner",
+                "working_memory_share_scope": "family",
+            },
+        )
+        store.add(
+            "release checklist blocker for current subagent",
+            source="working-session:cli:owner:subagent-a",
+            user_id="42",
+            memory_type="event",
+            metadata={
+                **shared,
+                "working_memory_session_id": "cli:owner:subagent-a",
+                "working_memory_share_scope": "parent",
+            },
+        )
+        store.add(
+            "release checklist blocker for sibling helper",
+            source="working-session:cli:owner:subagent-b",
+            user_id="42",
+            memory_type="event",
+            metadata={
+                **shared,
+                "working_memory_session_id": "cli:owner:subagent-b",
+                "working_memory_share_scope": "family",
+            },
+        )
+        store.add(
+            "release checklist blocker for hidden sibling",
+            source="working-session:cli:owner:subagent-c",
+            user_id="42",
+            memory_type="event",
+            metadata={
+                **shared,
+                "working_memory_session_id": "cli:owner:subagent-c",
+                "working_memory_share_scope": "parent",
+            },
+        )
+
+        retrieved = await store.retrieve(
+            "release checklist blocker",
+            method="rag",
+            user_id="42",
+            session_id="cli:owner:subagent-a",
+            limit=4,
+        )
+
+        digest = retrieved["episodic_digest"]
+        assert digest is not None
+        assert retrieved["metadata"]["episodic_digest"] == digest
+        sessions = {row["session_id"]: row["label"] for row in digest["sessions"]}
+        assert sessions["cli:owner:subagent-a"] == "current"
+        assert sessions["cli:owner"] == "parent"
+        assert sessions["cli:owner:subagent-b"] == "sibling"
+        assert "cli:owner:subagent-c" not in sessions
+        assert "current:cli:owner:subagent-a" in digest["summary"]
+        assert "parent:cli:owner" in digest["summary"]
+        assert "sibling:cli:owner:subagent-b" in digest["summary"]
+
+    asyncio.run(_scenario())
+
+
 def test_memory_delete_by_prefixes_removes_from_history_and_curated(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     keep = store.add("keep history row", source="session:keep")

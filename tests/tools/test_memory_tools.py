@@ -281,6 +281,72 @@ def test_memory_forget_by_query_enforces_min_length(tmp_path) -> None:
     asyncio.run(_scenario())
 
 
+def test_memory_forget_query_uses_session_aware_search_when_supported() -> None:
+    class _QueryAwareMemory:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        def search(
+            self,
+            query: str,
+            *,
+            limit: int = 5,
+            user_id: str = "",
+            session_id: str = "",
+            include_shared: bool = False,
+        ) -> list[MemoryRecord]:
+            self.search_calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "include_shared": include_shared,
+                }
+            )
+            return [
+                MemoryRecord(
+                    id="deadbeefcafefeed",
+                    text="release blocker note",
+                    source="working-session:cli:owner",
+                    created_at="2026-03-05T12:00:00+00:00",
+                )
+            ]
+
+        @staticmethod
+        def _parse_iso_timestamp(raw: str):
+            clean = str(raw or "").strip()
+            if clean.endswith("Z"):
+                clean = clean[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(clean)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+
+    async def _scenario() -> None:
+        memory = _QueryAwareMemory()
+        tool = MemoryForgetTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(
+            await tool.run(
+                {"query": "release blocker", "dry_run": True, "limit": 1},
+                ToolContext(session_id="cli:owner:subagent-a", user_id="u-1"),
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["refs"] == ["mem:deadbeef"]
+        assert memory.search_calls == [
+            {
+                "query": "release blocker",
+                "limit": 100,
+                "user_id": "u-1",
+                "session_id": "cli:owner:subagent-a",
+                "include_shared": True,
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
 def test_memory_forget_ref_only_non_dry_run_uses_targeted_delete_path() -> None:
     class _FastPathMemory:
         def __init__(self) -> None:
@@ -501,6 +567,114 @@ def test_memory_analyze_query_returns_matches_with_refs(tmp_path) -> None:
     asyncio.run(_scenario())
 
 
+def test_memory_analyze_query_passes_session_context_and_surfaces_episodic_digest() -> None:
+    class _AnalyzeAwareMemory:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+            self.retrieve_calls: list[dict[str, object]] = []
+
+        @staticmethod
+        def analysis_stats() -> dict[str, object]:
+            return {
+                "counts": {"history": 1, "curated": 0, "total": 1},
+                "recent": {"last_24h": 1, "last_7d": 1, "last_30d": 1},
+                "temporal_marked_count": 0,
+                "top_sources": [{"source": "working-session:cli:owner", "count": 1}],
+                "categories": {"context": 1},
+            }
+
+        def search(
+            self,
+            query: str,
+            *,
+            limit: int = 5,
+            user_id: str = "",
+            session_id: str = "",
+            include_shared: bool = False,
+        ) -> list[MemoryRecord]:
+            self.search_calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "include_shared": include_shared,
+                }
+            )
+            return [
+                MemoryRecord(
+                    id="feedface12345678",
+                    text="release blocker current session",
+                    source="working-session:cli:owner:subagent-a",
+                    created_at="2026-03-05T12:00:00+00:00",
+                )
+            ]
+
+        async def retrieve(
+            self,
+            query: str,
+            *,
+            limit: int = 5,
+            method: str = "rag",
+            user_id: str = "",
+            session_id: str = "",
+            include_shared: bool = False,
+        ) -> dict[str, object]:
+            self.retrieve_calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "method": method,
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "include_shared": include_shared,
+                }
+            )
+            return {
+                "status": "ok",
+                "hits": [],
+                "episodic_digest": {
+                    "session_id": session_id,
+                    "count": 1,
+                    "summary": "current:cli:owner:subagent-a -> release blocker current session",
+                },
+            }
+
+    async def _scenario() -> None:
+        memory = _AnalyzeAwareMemory()
+        tool = MemoryAnalyzeTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(
+            await tool.run(
+                {"query": "release blocker", "limit": 3},
+                ToolContext(session_id="cli:owner:subagent-a", user_id="u-1"),
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["matches"][0]["ref"] == "mem:feedface"
+        assert payload["episodic_digest"]["session_id"] == "cli:owner:subagent-a"
+        assert memory.search_calls == [
+            {
+                "query": "release blocker",
+                "limit": 3,
+                "user_id": "u-1",
+                "session_id": "cli:owner:subagent-a",
+                "include_shared": True,
+            }
+        ]
+        assert memory.retrieve_calls == [
+            {
+                "query": "release blocker",
+                "limit": 3,
+                "method": "rag",
+                "user_id": "u-1",
+                "session_id": "cli:owner:subagent-a",
+                "include_shared": True,
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
 def test_memory_analyze_includes_semantic_coverage_metadata(tmp_path, monkeypatch) -> None:
     async def _scenario() -> None:
         def _fake_embedding(self: MemoryStore, text: str) -> list[float] | None:
@@ -631,6 +805,7 @@ def test_memory_recall_passes_user_context_when_retrieve_supports_kwargs() -> No
             limit: int = 5,
             method: str = "rag",
             user_id: str = "",
+            session_id: str = "",
             include_shared: bool = False,
         ) -> dict[str, object]:
             self.retrieve_calls.append(
@@ -639,6 +814,7 @@ def test_memory_recall_passes_user_context_when_retrieve_supports_kwargs() -> No
                     "limit": limit,
                     "method": method,
                     "user_id": user_id,
+                    "session_id": session_id,
                     "include_shared": include_shared,
                 }
             )
@@ -659,6 +835,7 @@ def test_memory_recall_passes_user_context_when_retrieve_supports_kwargs() -> No
                 "limit": 6,
                 "method": "rag",
                 "user_id": "42",
+                "session_id": "telegram:42",
                 "include_shared": True,
             }
         ]
@@ -678,6 +855,7 @@ def test_memory_recall_forwards_reasoning_filters_and_returns_metadata() -> None
             limit: int = 5,
             method: str = "rag",
             user_id: str = "",
+            session_id: str = "",
             include_shared: bool = False,
             reasoning_layers=None,
             min_confidence: float | None = None,
@@ -688,6 +866,7 @@ def test_memory_recall_forwards_reasoning_filters_and_returns_metadata() -> None
                     "limit": limit,
                     "method": method,
                     "user_id": user_id,
+                    "session_id": session_id,
                     "include_shared": include_shared,
                     "reasoning_layers": list(reasoning_layers or []),
                     "min_confidence": min_confidence,
@@ -734,11 +913,46 @@ def test_memory_recall_forwards_reasoning_filters_and_returns_metadata() -> None
                 "limit": 6,
                 "method": "rag",
                 "user_id": "u-1",
+                "session_id": "s1",
                 "include_shared": True,
                 "reasoning_layers": ["hypothesis", "decision"],
                 "min_confidence": 0.6,
             }
         ]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_recall_surfaces_episodic_digest_from_retrieve() -> None:
+    class _AsyncMemory:
+        async def retrieve(
+            self,
+            query: str,
+            *,
+            limit: int = 5,
+            method: str = "rag",
+            session_id: str = "",
+        ) -> dict[str, object]:
+            del query, limit, method
+            return {
+                "status": "ok",
+                "hits": [],
+                "episodic_digest": {
+                    "session_id": session_id,
+                    "count": 1,
+                    "summary": "current:s1 -> async hit",
+                },
+            }
+
+        def search(self, query: str, *, limit: int = 5):
+            raise AssertionError(f"search fallback should not run for query={query} limit={limit}")
+
+    async def _scenario() -> None:
+        tool = MemoryRecallTool(_AsyncMemory())  # type: ignore[arg-type]
+        payload = json.loads(await tool.run({"query": "async"}, ToolContext(session_id="s1")))
+        assert payload["status"] == "ok"
+        assert payload["episodic_digest"]["session_id"] == "s1"
+        assert payload["episodic_digest"]["count"] == 1
 
     asyncio.run(_scenario())
 

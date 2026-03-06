@@ -1954,6 +1954,91 @@ class MemoryStore:
         return 0.14
 
     @classmethod
+    def _episodic_digest_label(cls, *, active_session_id: str, target_session_id: str) -> str:
+        clean_active = cls._normalize_session_id(active_session_id)
+        clean_target = cls._normalize_session_id(target_session_id)
+        if not clean_target:
+            return "unknown"
+        if clean_target == clean_active:
+            return "current"
+        parent = cls._parent_session_id(clean_active)
+        if clean_target == parent:
+            return "parent"
+        if cls._parent_session_id(clean_target) == clean_active:
+            return "child"
+        if parent and cls._parent_session_id(clean_target) == parent:
+            return "sibling"
+        return "related"
+
+    def _synthesize_visible_episode_digest(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        records: list[MemoryRecord],
+        curated_importance: dict[str, float],
+        curated_mentions: dict[str, int],
+        semantic_enabled: bool,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        clean_session_id = self._normalize_session_id(session_id)
+        if not clean_session_id:
+            return None
+        episodic_records = [row for row in records if self._is_working_episode_record(row)]
+        if not episodic_records:
+            return None
+        ranked = self._rank_records(
+            query,
+            episodic_records,
+            curated_importance=curated_importance,
+            curated_mentions=curated_mentions,
+            limit=max(1, min(8, limit)),
+            semantic_enabled=semantic_enabled,
+            session_id=clean_session_id,
+        )
+        if not ranked:
+            return None
+
+        groups: list[dict[str, Any]] = []
+        seen_sessions: set[str] = set()
+        for row in ranked:
+            ctx = self._working_episode_context(row)
+            target_session_id = str(ctx.get("session_id", "") or "")
+            if not target_session_id or target_session_id in seen_sessions:
+                continue
+            seen_sessions.add(target_session_id)
+            groups.append(
+                {
+                    "session_id": target_session_id,
+                    "label": self._episodic_digest_label(
+                        active_session_id=clean_session_id,
+                        target_session_id=target_session_id,
+                    ),
+                    "share_scope": str(ctx.get("share_scope", "") or ""),
+                    "created_at": str(getattr(row, "created_at", "") or ""),
+                    "source": str(getattr(row, "source", "") or ""),
+                    "text": self._compact_whitespace(str(getattr(row, "text", "") or ""))[:220],
+                    "memory_id": str(getattr(row, "id", "") or ""),
+                }
+            )
+            if len(groups) >= max(1, min(4, limit)):
+                break
+        if not groups:
+            return None
+
+        summary_parts = [
+            f"{item['label']}:{item['session_id']} -> {item['text']}"
+            for item in groups
+            if str(item.get("text", "") or "")
+        ]
+        return {
+            "session_id": clean_session_id,
+            "count": len(groups),
+            "sessions": groups,
+            "summary": " | ".join(summary_parts),
+        }
+
+    @classmethod
     def _working_memory_episode_summary(cls, session_id: str, messages: list[dict[str, Any]]) -> str:
         clean_session_id = cls._normalize_session_id(session_id) or "unknown"
         recent = messages[-cls._WORKING_MEMORY_PROMOTION_WINDOW :]
@@ -5461,6 +5546,15 @@ class MemoryStore:
             )
             combined_texts = [str(row.text or "") for row in item_records] + [str(item.get("text", "") or "") for item in resource_hits]
             resource_sufficiency = self._evaluate_retrieval_sufficiency(active_query, combined_texts, stage="resource")
+        episodic_digest = self._synthesize_visible_episode_digest(
+            query=active_query,
+            session_id=session_id,
+            records=candidate_records,
+            curated_importance=curated_importance,
+            curated_mentions=curated_mentions,
+            semantic_enabled=semantic_enabled,
+            limit=limit,
+        )
 
         stages = [
             {
@@ -5503,6 +5597,7 @@ class MemoryStore:
                 "resource_sufficiency": resource_sufficiency,
                 "stages": stages,
             },
+            "episodic_digest": episodic_digest,
         }
 
     def _refine_hits_with_llm(
@@ -5610,7 +5705,12 @@ class MemoryStore:
             "hits": hits,
             "category_hits": category_hits,
             "resource_hits": resource_hits,
-            "metadata": {"fallback_to_rag": False, "progressive": progressive["progressive"]},
+            "episodic_digest": progressive.get("episodic_digest"),
+            "metadata": {
+                "fallback_to_rag": False,
+                "progressive": progressive["progressive"],
+                "episodic_digest": progressive.get("episodic_digest"),
+            },
         }
         normalized_method = str(method or "rag").strip().lower()
         if normalized_method == "rag":
@@ -5627,7 +5727,11 @@ class MemoryStore:
         )
         if llm_refinement is None:
             rag_payload["method"] = "llm"
-            rag_payload["metadata"] = {"fallback_to_rag": True, "progressive": progressive["progressive"]}
+            rag_payload["metadata"] = {
+                "fallback_to_rag": True,
+                "progressive": progressive["progressive"],
+                "episodic_digest": progressive.get("episodic_digest"),
+            }
             rag_payload["answer"] = ""
             rag_payload["next_step_query"] = ""
             return rag_payload
@@ -5642,9 +5746,14 @@ class MemoryStore:
             "hits": hits,
             "category_hits": category_hits,
             "resource_hits": resource_hits,
+            "episodic_digest": progressive.get("episodic_digest"),
             "answer": str(llm_refinement.get("answer", "") or ""),
             "next_step_query": str(llm_refinement.get("next_step_query", "") or ""),
-            "metadata": {"fallback_to_rag": False, "progressive": progressive["progressive"]},
+            "metadata": {
+                "fallback_to_rag": False,
+                "progressive": progressive["progressive"],
+                "episodic_digest": progressive.get("episodic_digest"),
+            },
         }
 
     def _rank_records(
