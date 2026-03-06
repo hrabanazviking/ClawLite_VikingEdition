@@ -2598,7 +2598,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.delete("/v1/cron/{job_id}")
     async def cron_remove(job_id: str, request: Request) -> dict[str, Any]:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        removed = runtime.cron.remove_job(job_id)
+        removed = await asyncio.to_thread(runtime.cron.remove_job, job_id)
         return {"ok": removed, "status": "removed" if removed else "not_found"}
 
     async def _ws_chat(socket: WebSocket, *, path_label: str) -> None:

@@ -3011,6 +3011,27 @@ def test_gateway_cron_endpoints_roundtrip(tmp_path: Path) -> None:
         assert listed_empty.json()["jobs"] == []
 
 
+def test_gateway_cron_delete_uses_to_thread_and_preserves_payload(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    job_id = "job-missing"
+
+    with TestClient(app) as client:
+        with patch("clawlite.gateway.server.asyncio.to_thread", new=AsyncMock(return_value=False)) as to_thread_mock:
+            deleted = client.delete(f"/v1/cron/{job_id}")
+
+    assert deleted.status_code == 200
+    payload = deleted.json()
+    assert payload == {"ok": False, "status": "not_found"}
+    to_thread_mock.assert_awaited_once_with(app.state.runtime.cron.remove_job, job_id)
+
+
 def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_send() -> None:
     class _Engine:
         async def run(self, *, session_id: str, user_text: str):
