@@ -210,6 +210,51 @@ def test_memory_search_entity_match_breaks_temporal_ties(tmp_path: Path, monkeyp
     assert "2026-05-10" in found[0].text
 
 
+def test_memory_add_reinforces_existing_hash_in_same_scope(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+
+    first = store.add("Remember release window on 2026-05-10", source="session:a", memory_type="event")
+    second = store.add("remember   release window on 2026-05-10", source="session:b", memory_type="event")
+
+    rows = store.all()
+    assert len(rows) == 1
+    assert second.id == first.id
+    assert second.updated_at
+    assert int(second.metadata["reinforcement_count"]) == 2
+    assert str(second.metadata["last_reinforced_at"])
+
+    item_payload = json.loads((store.items_path / "context.json").read_text(encoding="utf-8"))
+    assert len(item_payload["items"]) == 1
+    assert item_payload["items"][0]["id"] == first.id
+    assert int(item_payload["items"][0]["metadata"]["reinforcement_count"]) == 2
+
+
+def test_memory_add_reinforcement_stays_local_to_each_user_scope(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+
+    alice_first = store.add("remember deployment checklist", source="session:a", user_id="alice")
+    alice_second = store.add("remember deployment checklist", source="session:b", user_id="alice")
+    bob = store.add("remember deployment checklist", source="session:c", user_id="bob")
+
+    assert alice_first.id == alice_second.id
+    assert alice_first.id != bob.id
+
+    alice_scope = store._scope_paths(user_id="alice", shared=False)
+    bob_scope = store._scope_paths(user_id="bob", shared=False)
+    alice_rows = store._read_history_records_from(alice_scope["history"])
+    bob_rows = store._read_history_records_from(bob_scope["history"])
+    assert len(alice_rows) == 1
+    assert len(bob_rows) == 1
+    assert int(alice_rows[0].metadata["reinforcement_count"]) == 2
+    assert int(bob_rows[0].metadata["reinforcement_count"]) == 1
+
+    global_rows = [row for row in store.all() if "deployment checklist" in row.text]
+    assert len(global_rows) == 2
+    by_id = {row.id: row for row in global_rows}
+    assert int(by_id[alice_first.id].metadata["reinforcement_count"]) == 2
+    assert int(by_id[bob.id].metadata["reinforcement_count"]) == 1
+
+
 def test_memory_consolidate(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     row = store.consolidate([
@@ -448,6 +493,51 @@ def test_memory_search_prefers_promoted_curated_fact(tmp_path: Path) -> None:
     assert found
     assert found[0].source.startswith("curated:")
     assert "utc-3" in found[0].text.lower()
+
+
+def test_memory_search_salience_prefers_reinforced_record_on_close_tie(tmp_path: Path, monkeypatch) -> None:
+    class _FakeBM25:
+        def __init__(self, _corpus: object) -> None:
+            pass
+
+        def get_scores(self, _query_tokens: object) -> list[float]:
+            return [0.0, 0.0]
+
+    monkeypatch.setattr("clawlite.core.memory.BM25Okapi", _FakeBM25)
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "id": "reinforced",
+            "text": "project alpha rollout notes",
+            "source": "session:a",
+            "created_at": now_iso,
+            "metadata": {
+                "content_hash": "aaa111",
+                "scope_key": "user:default",
+                "reinforcement_count": 5,
+                "last_reinforced_at": now_iso,
+            },
+        },
+        {
+            "id": "plain",
+            "text": "project alpha deployment notes",
+            "source": "session:b",
+            "created_at": now_iso,
+            "metadata": {
+                "content_hash": "bbb222",
+                "scope_key": "user:default",
+                "reinforcement_count": 1,
+                "last_reinforced_at": now_iso,
+            },
+        },
+    ]
+    store.history_path.write_text("\n".join(json.dumps(item) for item in rows) + "\n", encoding="utf-8")
+
+    found = store.search("project alpha", limit=2)
+    assert found
+    assert found[0].id == "reinforced"
 
 
 def test_memory_search_uses_recency_to_break_lexical_and_bm25_ties(tmp_path: Path, monkeypatch) -> None:

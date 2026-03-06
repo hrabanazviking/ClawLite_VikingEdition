@@ -212,6 +212,8 @@ class MemoryStore:
     _SEMANTIC_VECTOR_WEIGHT = 0.6
     _RANKING_CONFIDENCE_BOOST_MAX = 0.18
     _RANKING_REASONING_BOOST_MAX = 0.14
+    _SALIENCE_MAX_BOOST = 0.55
+    _SALIENCE_RECENCY_DECAY_DAYS = 30.0
     _ENTITY_MATCH_WEIGHTS: dict[str, float] = {
         "urls": 0.45,
         "emails": 0.35,
@@ -294,6 +296,134 @@ class MemoryStore:
                 continue
             out[clean_key] = cls._normalize_metadata_value(item, depth=depth)
         return out
+
+    @classmethod
+    def _normalize_source_sessions(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        clean_sessions: list[str] = []
+        for item in value:
+            session = cls._source_session_key(str(item or ""))
+            if session and session not in clean_sessions:
+                clean_sessions.append(session)
+        return clean_sessions[-12:]
+
+    @staticmethod
+    def _metadata_content_hash(metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get("content_hash", "") or "").strip()
+
+    @classmethod
+    def _metadata_reinforcement_count(cls, metadata: dict[str, Any] | None) -> int:
+        if not isinstance(metadata, dict):
+            return 1
+        try:
+            count = int(metadata.get("reinforcement_count", 1) or 1)
+        except Exception:
+            count = 1
+        return max(1, count)
+
+    @classmethod
+    def _metadata_last_reinforced_at(cls, metadata: dict[str, Any] | None, *, fallback: str = "") -> str:
+        if not isinstance(metadata, dict):
+            return str(fallback or "")
+        raw = str(metadata.get("last_reinforced_at", fallback) or fallback or "").strip()
+        if raw and cls._parse_iso_timestamp(raw).year > 1:
+            return raw
+        return str(fallback or "")
+
+    @staticmethod
+    def _memory_scope_key(*, user_id: str, shared: bool) -> str:
+        clean_user = MemoryStore._normalize_user_id(user_id)
+        if shared:
+            return f"shared:{clean_user}"
+        return f"user:{clean_user}"
+
+    @classmethod
+    def _record_scope_key(cls, row: MemoryRecord) -> str:
+        metadata = cls._normalize_memory_metadata(getattr(row, "metadata", {}))
+        scope_key = str(metadata.get("scope_key", "") or "").strip()
+        if scope_key:
+            return scope_key
+        return cls._memory_scope_key(user_id=str(getattr(row, "user_id", "default") or "default"), shared=False)
+
+    @classmethod
+    def _record_content_hash(cls, row: MemoryRecord) -> str:
+        metadata_hash = cls._metadata_content_hash(getattr(row, "metadata", {}))
+        if metadata_hash:
+            return metadata_hash
+        return cls._memory_content_hash(str(getattr(row, "text", "") or ""), cls._normalize_memory_type(getattr(row, "memory_type", "knowledge")))
+
+    @classmethod
+    def _seed_reinforcement_metadata(
+        cls,
+        metadata: dict[str, Any] | None,
+        *,
+        source: str,
+        scope_key: str,
+        reinforced_at: str,
+    ) -> dict[str, Any]:
+        prepared = cls._normalize_memory_metadata(metadata)
+        prepared["scope_key"] = str(scope_key or "").strip()
+        prepared["reinforcement_count"] = cls._metadata_reinforcement_count(prepared)
+        prepared["last_reinforced_at"] = str(reinforced_at or "")
+        source_session = cls._source_session_key(source)
+        if source_session:
+            existing_sessions = cls._normalize_source_sessions(prepared.get("source_sessions", []))
+            if source_session not in existing_sessions:
+                existing_sessions.append(source_session)
+            prepared["source_session"] = source_session
+            prepared["source_sessions"] = existing_sessions[-12:]
+        return prepared
+
+    @classmethod
+    def _merge_reinforced_metadata(
+        cls,
+        current: dict[str, Any] | None,
+        incoming: dict[str, Any] | None,
+        *,
+        source: str,
+        scope_key: str,
+        reinforced_at: str,
+    ) -> dict[str, Any]:
+        current_metadata = cls._normalize_memory_metadata(current)
+        incoming_metadata = cls._normalize_memory_metadata(incoming)
+        merged = cls._normalize_memory_metadata({**current_metadata, **incoming_metadata})
+        merged["scope_key"] = str(scope_key or "").strip()
+        merged["content_hash"] = cls._metadata_content_hash(incoming_metadata) or cls._metadata_content_hash(current_metadata)
+        merged["reinforcement_count"] = cls._metadata_reinforcement_count(current_metadata) + 1
+        merged["last_reinforced_at"] = str(reinforced_at or "")
+        source_session = cls._source_session_key(source)
+        if source_session:
+            sessions = cls._normalize_source_sessions(current_metadata.get("source_sessions", []))
+            sessions.extend(cls._normalize_source_sessions(incoming_metadata.get("source_sessions", [])))
+            if source_session not in sessions:
+                sessions.append(source_session)
+            merged["source_session"] = source_session
+            merged["source_sessions"] = cls._normalize_source_sessions(sessions)
+        return merged
+
+    @classmethod
+    def _salience_boost(cls, metadata: dict[str, Any] | None) -> float:
+        reinforcement_count = cls._metadata_reinforcement_count(metadata)
+        last_reinforced_at = cls._metadata_last_reinforced_at(metadata)
+        reinforcement_factor = math.log(reinforcement_count + 1)
+
+        if not last_reinforced_at:
+            recency_factor = 0.5
+        else:
+            stamp = cls._parse_iso_timestamp(last_reinforced_at)
+            if stamp.year <= 1:
+                recency_factor = 0.5
+            else:
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                days_ago = max(0.0, float((datetime.now(timezone.utc) - stamp).total_seconds()) / 86400.0)
+                recency_factor = math.exp(-0.693 * days_ago / cls._SALIENCE_RECENCY_DECAY_DAYS)
+
+        score = reinforcement_factor * recency_factor * 0.25
+        return max(0.0, min(cls._SALIENCE_MAX_BOOST, round(score, 6)))
 
     @classmethod
     def _bounded_confidence_score(cls, value: Any) -> float:
@@ -479,6 +609,8 @@ class MemoryStore:
             "history_repaired_files": 0,
             "consolidate_writes": 0,
             "consolidate_dedup_hits": 0,
+            "reinforcement_hits": 0,
+            "reinforcement_creates": 0,
             "session_recovery_attempts": 0,
             "session_recovery_hits": 0,
             "privacy_audit_writes": 0,
@@ -2991,6 +3123,161 @@ class MemoryStore:
         ]
         self._atomic_write_text_locked(category_path, "\n".join(body))
 
+    def _stored_history_payload(self, record: MemoryRecord) -> dict[str, Any]:
+        payload = asdict(record)
+        payload["text"] = self._encrypt_text_for_category(str(record.text or ""), record.category)
+        return payload
+
+    def _reinforce_record(
+        self,
+        existing: MemoryRecord,
+        incoming: MemoryRecord,
+        *,
+        source: str,
+        scope_key: str,
+        reinforced_at: str,
+    ) -> MemoryRecord:
+        incoming_text = str(incoming.text or "").strip()
+        existing_text = str(existing.text or "").strip()
+        if len(incoming_text) > len(existing_text):
+            text = incoming_text
+        else:
+            text = existing_text or incoming_text
+
+        metadata = self._merge_reinforced_metadata(
+            existing.metadata,
+            incoming.metadata,
+            source=source,
+            scope_key=scope_key,
+            reinforced_at=reinforced_at,
+        )
+        return MemoryRecord(
+            id=str(existing.id or incoming.id or uuid.uuid4().hex),
+            text=text,
+            source=str(existing.source or incoming.source or "user"),
+            created_at=str(existing.created_at or incoming.created_at or reinforced_at),
+            category=str(existing.category or incoming.category or "context"),
+            user_id=str(existing.user_id or incoming.user_id or "default"),
+            layer=self._normalize_layer(getattr(existing, "layer", MemoryLayer.ITEM.value)),
+            reasoning_layer=self._normalize_reasoning_layer(getattr(incoming, "reasoning_layer", existing.reasoning_layer)),
+            modality=str(incoming.modality or existing.modality or "text"),
+            updated_at=str(reinforced_at or incoming.updated_at or existing.updated_at or ""),
+            confidence=max(
+                self._normalize_confidence(getattr(existing, "confidence", 1.0), default=1.0),
+                self._normalize_confidence(getattr(incoming, "confidence", 1.0), default=1.0),
+            ),
+            decay_rate=float(getattr(existing, "decay_rate", 0.0) or 0.0),
+            emotional_tone=str(existing.emotional_tone or incoming.emotional_tone or "neutral"),
+            memory_type=self._normalize_memory_type(getattr(existing, "memory_type", incoming.memory_type)),
+            happened_at=str(existing.happened_at or incoming.happened_at or ""),
+            metadata=metadata,
+        )
+
+    def _append_or_reinforce_history_record(
+        self,
+        history_path: Path,
+        record: MemoryRecord,
+        *,
+        content_hash: str,
+        scope_key: str,
+        source: str,
+        reinforced_at: str,
+    ) -> tuple[MemoryRecord, bool]:
+        self._ensure_file(history_path, default="")
+        with self._locked_file(history_path, "r+", exclusive=True) as fh:
+            lines = fh.read().splitlines()
+            rewritten_lines: list[str] = []
+            reinforced_row: MemoryRecord | None = None
+
+            for line in lines:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    rewritten_lines.append(raw)
+                    continue
+                if not isinstance(payload, dict):
+                    rewritten_lines.append(raw)
+                    continue
+                candidate = self._record_from_payload(payload)
+                if candidate is None:
+                    rewritten_lines.append(raw)
+                    continue
+                candidate.text = self._decrypt_text_for_category(str(candidate.text or ""), candidate.category)
+                candidate_hash = self._record_content_hash(candidate)
+                if (
+                    reinforced_row is None
+                    and candidate_hash == content_hash
+                    and self._record_scope_key(candidate) == scope_key
+                ):
+                    reinforced_row = self._reinforce_record(
+                        candidate,
+                        record,
+                        source=source,
+                        scope_key=scope_key,
+                        reinforced_at=reinforced_at,
+                    )
+                    rewritten_lines.append(json.dumps(self._stored_history_payload(reinforced_row), ensure_ascii=False))
+                    continue
+                rewritten_lines.append(raw)
+
+            if reinforced_row is None:
+                fh.seek(0, os.SEEK_END)
+                fh.write(json.dumps(self._stored_history_payload(record), ensure_ascii=False) + "\n")
+                self._flush_and_fsync(fh)
+                return record, True
+
+            fh.seek(0)
+            fh.truncate()
+            if rewritten_lines:
+                fh.write("\n".join(rewritten_lines) + "\n")
+            self._flush_and_fsync(fh)
+            return reinforced_row, False
+
+    def _upsert_history_record_by_id(self, history_path: Path, record: MemoryRecord, *, append_if_missing: bool = False) -> bool:
+        self._ensure_file(history_path, default="")
+        stored_payload = self._stored_history_payload(record)
+        with self._locked_file(history_path, "r+", exclusive=True) as fh:
+            lines = fh.read().splitlines()
+            rewritten_lines: list[str] = []
+            found = False
+
+            for line in lines:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    rewritten_lines.append(raw)
+                    continue
+                if not isinstance(payload, dict):
+                    rewritten_lines.append(raw)
+                    continue
+                if str(payload.get("id", "")).strip() == record.id:
+                    rewritten_lines.append(json.dumps(stored_payload, ensure_ascii=False))
+                    found = True
+                    continue
+                rewritten_lines.append(raw)
+
+            if not found and append_if_missing:
+                fh.seek(0, os.SEEK_END)
+                fh.write(json.dumps(stored_payload, ensure_ascii=False) + "\n")
+                self._flush_and_fsync(fh)
+                return True
+
+            if not found:
+                return False
+
+            fh.seek(0)
+            fh.truncate()
+            if rewritten_lines:
+                fh.write("\n".join(rewritten_lines) + "\n")
+            self._flush_and_fsync(fh)
+            return True
+
     def _upsert_item_layer(self, record: MemoryRecord) -> None:
         category = str(record.category or "context")
         rows = self._load_category_items(category)
@@ -3105,24 +3392,8 @@ class MemoryStore:
         ]
         self._atomic_write_text_locked(category_path, "\n".join(body))
 
-    def _persist_layer_artifacts_to_scope(self, scope: dict[str, Path], record: MemoryRecord, *, raw_resource_text: str) -> None:
+    def _upsert_item_layer_in_scope(self, scope: dict[str, Path], record: MemoryRecord) -> None:
         category = str(record.category or "context")
-        resource_payload = {
-            "id": str(record.id or ""),
-            "text": self._encrypt_text_for_category(str(raw_resource_text or "").strip(), category),
-            "source": str(record.source or ""),
-            "category": category,
-            "created_at": str(record.created_at or ""),
-            "layer": MemoryLayer.RESOURCE.value,
-            "reasoning_layer": self._normalize_reasoning_layer(record.reasoning_layer),
-            "confidence": self._normalize_confidence(record.confidence, default=1.0),
-        }
-        resource_file = self._scope_resource_file_path_for_timestamp(scope, resource_payload["created_at"])
-        self._ensure_file(resource_file, default="")
-        with self._locked_file(resource_file, "a", exclusive=True) as fh:
-            fh.write(json.dumps(resource_payload, ensure_ascii=False) + "\n")
-            self._flush_and_fsync(fh)
-
         rows = self._load_scope_category_items(scope, category)
         row_payload = self._serialize_hit(record)
         stored_payload = dict(row_payload)
@@ -3141,6 +3412,25 @@ class MemoryStore:
             updated_rows.append(stored_payload)
         self._write_scope_category_items(scope, category, updated_rows)
         self._update_scope_category_summary_file(scope, category)
+
+    def _persist_layer_artifacts_to_scope(self, scope: dict[str, Path], record: MemoryRecord, *, raw_resource_text: str) -> None:
+        category = str(record.category or "context")
+        resource_payload = {
+            "id": str(record.id or ""),
+            "text": self._encrypt_text_for_category(str(raw_resource_text or "").strip(), category),
+            "source": str(record.source or ""),
+            "category": category,
+            "created_at": str(record.created_at or ""),
+            "layer": MemoryLayer.RESOURCE.value,
+            "reasoning_layer": self._normalize_reasoning_layer(record.reasoning_layer),
+            "confidence": self._normalize_confidence(record.confidence, default=1.0),
+        }
+        resource_file = self._scope_resource_file_path_for_timestamp(scope, resource_payload["created_at"])
+        self._ensure_file(resource_file, default="")
+        with self._locked_file(resource_file, "a", exclusive=True) as fh:
+            fh.write(json.dumps(resource_payload, ensure_ascii=False) + "\n")
+            self._flush_and_fsync(fh)
+        self._upsert_item_layer_in_scope(scope, record)
 
     def _prune_item_and_category_layers(self, record_ids: set[str]) -> int:
         if not record_ids:
@@ -3474,6 +3764,8 @@ class MemoryStore:
         memory_basis = str(raw_resource_text or clean)
         resolved_memory_type = self._normalize_memory_type(memory_type or self._infer_memory_type(memory_basis, source, category=category))
         resolved_happened_at = str(happened_at or self._infer_happened_at(memory_basis) or "")
+        reinforced_at = datetime.now(timezone.utc).isoformat()
+        scope_key = self._memory_scope_key(user_id=clean_user, shared=shared)
         resolved_metadata = self._prepare_memory_metadata(
             text=memory_basis,
             source=source,
@@ -3481,11 +3773,17 @@ class MemoryStore:
             memory_type=resolved_memory_type,
             happened_at=resolved_happened_at,
         )
+        resolved_metadata = self._seed_reinforcement_metadata(
+            resolved_metadata,
+            source=source,
+            scope_key=scope_key,
+            reinforced_at=reinforced_at,
+        )
         row = MemoryRecord(
             id=uuid.uuid4().hex,
             text=clean,
             source=source,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=reinforced_at,
             category=category,
             user_id=clean_user,
             layer=MemoryLayer.ITEM.value,
@@ -3497,38 +3795,72 @@ class MemoryStore:
             happened_at=resolved_happened_at,
             metadata=resolved_metadata,
         )
-        stored_payload = asdict(row)
-        stored_payload["text"] = self._encrypt_text_for_category(str(row.text or ""), row.category)
+        content_hash = self._metadata_content_hash(row.metadata) or self._memory_content_hash(memory_basis, resolved_memory_type)
+        raw_text = str(raw_resource_text or clean)
 
         if shared or clean_user != "default":
             scope = self._scope_paths(user_id=clean_user, shared=shared)
             self._ensure_scope_paths(scope)
-            with self._locked_file(scope["history"], "a", exclusive=True) as fh:
-                fh.write(json.dumps(stored_payload, ensure_ascii=False) + "\n")
-                self._flush_and_fsync(fh)
+            row, created_new = self._append_or_reinforce_history_record(
+                scope["history"],
+                row,
+                content_hash=content_hash,
+                scope_key=scope_key,
+                source=source,
+                reinforced_at=reinforced_at,
+            )
             try:
-                self._persist_layer_artifacts_to_scope(scope, row, raw_resource_text=str(raw_resource_text or clean))
+                if created_new:
+                    self._persist_layer_artifacts_to_scope(scope, row, raw_resource_text=raw_text)
+                else:
+                    self._upsert_item_layer_in_scope(scope, row)
             except Exception:
                 pass
 
-        with self._locked_file(self.history_path, "a", exclusive=True) as fh:
-            fh.write(json.dumps(stored_payload, ensure_ascii=False) + "\n")
-            self._flush_and_fsync(fh)
-        try:
-            self._persist_layer_artifacts(record=row, raw_resource_text=str(raw_resource_text or clean))
-        except Exception:
-            pass
-        embedding = self._generate_embedding(clean)
-        if embedding is not None:
+            mirrored_created = bool(created_new)
+            mirrored = self._upsert_history_record_by_id(self.history_path, row, append_if_missing=created_new)
+            if not mirrored and not created_new:
+                mirrored = self._upsert_history_record_by_id(self.history_path, row, append_if_missing=True)
+                mirrored_created = bool(mirrored)
             try:
-                self._append_embedding(
-                    record_id=row.id,
-                    embedding=embedding,
-                    created_at=row.created_at,
-                    source=row.source,
-                )
+                if mirrored_created:
+                    self._persist_layer_artifacts(record=row, raw_resource_text=raw_text)
+                else:
+                    self._upsert_item_layer(row)
             except Exception:
                 pass
+        else:
+            row, created_new = self._append_or_reinforce_history_record(
+                self.history_path,
+                row,
+                content_hash=content_hash,
+                scope_key=scope_key,
+                source=source,
+                reinforced_at=reinforced_at,
+            )
+            try:
+                if created_new:
+                    self._persist_layer_artifacts(record=row, raw_resource_text=raw_text)
+                else:
+                    self._upsert_item_layer(row)
+            except Exception:
+                pass
+
+        if created_new:
+            self._diagnostics["reinforcement_creates"] = int(self._diagnostics["reinforcement_creates"]) + 1
+            embedding = self._generate_embedding(clean)
+            if embedding is not None:
+                try:
+                    self._append_embedding(
+                        record_id=row.id,
+                        embedding=embedding,
+                        created_at=row.created_at,
+                        source=row.source,
+                    )
+                except Exception:
+                    pass
+        else:
+            self._diagnostics["reinforcement_hits"] = int(self._diagnostics["reinforcement_hits"]) + 1
         self._prune_history()
         return row
 
@@ -3993,10 +4325,17 @@ class MemoryStore:
             confidence_boost = self._bounded_confidence_score(records[idx].confidence) * self._RANKING_CONFIDENCE_BOOST_MAX
             reasoning_layer = self._normalize_reasoning_layer(getattr(records[idx], "reasoning_layer", "fact"))
             reasoning_boost = reasoning_boosts.get(reasoning_layer, 0.0)
+            relevance_signal = bool(
+                overlap > 0
+                or bm25_scores[idx] > 0.0
+                or entity_score > 0.0
+                or (semantic_active and semantic_scores[idx] > 0.05)
+            )
+            salience_boost = self._salience_boost(getattr(records[idx], "metadata", {})) if relevance_signal else 0.0
 
             ranking_score = bm25_scores[idx]
-            ranking_score += confidence_boost + reasoning_boost + entity_score
-            tie_breaker = temporal_score + (confidence_boost * 0.5) + reasoning_boost + entity_score
+            ranking_score += confidence_boost + reasoning_boost + entity_score + salience_boost
+            tie_breaker = temporal_score + (confidence_boost * 0.5) + reasoning_boost + entity_score + salience_boost
             if semantic_active:
                 ranking_score = (
                     self._SEMANTIC_BM25_WEIGHT * bm25_scores[idx]
@@ -4004,8 +4343,9 @@ class MemoryStore:
                     + confidence_boost
                     + reasoning_boost
                     + entity_score
+                    + salience_boost
                 )
-                tie_breaker = curated_boost + temporal_score + (confidence_boost * 0.5) + reasoning_boost + entity_score
+                tie_breaker = curated_boost + temporal_score + (confidence_boost * 0.5) + reasoning_boost + entity_score + salience_boost
                 scored.append((float(overlap) + entity_score, ranking_score, tie_breaker, idx))
             else:
                 scored.append((float(overlap) + curated_boost + entity_score, ranking_score, tie_breaker, idx))
