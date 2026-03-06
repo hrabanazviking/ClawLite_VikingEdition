@@ -48,6 +48,14 @@ from clawlite.tools.memory import (
 from clawlite.tools.registry import ToolRegistry
 from clawlite.tools.process import ProcessTool
 from clawlite.tools.skill import SkillTool
+from clawlite.tools.sessions import (
+    SessionStatusTool,
+    SessionsHistoryTool,
+    SessionsListTool,
+    SessionsSendTool,
+    SessionsSpawnTool,
+    SubagentsTool,
+)
 from clawlite.tools.spawn import SpawnTool
 from clawlite.tools.web import WebFetchTool, WebSearchTool
 from clawlite.utils.logging import bind_event, setup_logging
@@ -936,7 +944,16 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         result = await engine.run(session_id=session_id, user_text=task)
         return result.text
 
+    async def _session_runner(session_id: str, task: str):
+        return await engine.run(session_id=session_id, user_text=task)
+
     tools.register(SpawnTool(engine.subagents, _subagent_runner, memory=memory))
+    tools.register(SessionsListTool(sessions))
+    tools.register(SessionsHistoryTool(sessions))
+    tools.register(SessionsSendTool(_session_runner))
+    tools.register(SessionsSpawnTool(engine.subagents, _session_runner))
+    tools.register(SubagentsTool(engine.subagents))
+    tools.register(SessionStatusTool(sessions, engine.subagents))
 
     bus = MessageQueue()
     channels = ChannelManager(bus=bus, engine=engine)
