@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -14,10 +15,10 @@ def _tool() -> MCPTool:
     return MCPTool(
         MCPToolConfig(
             default_timeout_s=2,
-            policy=MCPTransportPolicyConfig(allowed_schemes=["https"], allowed_hosts=["mcp.local"]),
+            policy=MCPTransportPolicyConfig(allowed_schemes=["https"], allowed_hosts=["example.com"]),
             servers={
                 "local": MCPServerConfig(
-                    url="https://mcp.local/call",
+                    url="https://example.com/call",
                     headers={"Authorization": "Bearer x"},
                     timeout_s=0.2,
                 )
@@ -46,7 +47,7 @@ def test_mcp_tool_legacy_url_must_match_registry() -> None:
         tool = _tool()
         with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=fake_response)):
             out = await tool.run(
-                {"url": "https://mcp.local/call", "tool": "skill.test", "arguments": {}},
+                {"url": "https://example.com/call", "tool": "skill.test", "arguments": {}},
                 ToolContext(session_id="s"),
             )
             assert "ok" in out
@@ -84,8 +85,8 @@ def test_mcp_tool_transport_policy_blocks_disallowed_host() -> None:
     async def _scenario() -> None:
         tool = MCPTool(
             MCPToolConfig(
-                policy=MCPTransportPolicyConfig(allowed_schemes=["https"], allowed_hosts=["safe.local"]),
-                servers={"unsafe": MCPServerConfig(url="https://mcp.local/call", timeout_s=1)},
+                policy=MCPTransportPolicyConfig(allowed_schemes=["https"], allowed_hosts=["safe.example.com"]),
+                servers={"unsafe": MCPServerConfig(url="https://example.com/call", timeout_s=1)},
             )
         )
         try:
@@ -149,5 +150,60 @@ def test_mcp_tool_retries_transient_timeout_then_succeeds() -> None:
 
         assert "ok" in out
         assert post.await_count == 2
+
+    asyncio.run(_scenario())
+
+
+def test_mcp_tool_blocks_private_resolved_ip() -> None:
+    async def _scenario() -> None:
+        tool = MCPTool(
+            MCPToolConfig(
+                policy=MCPTransportPolicyConfig(allowed_schemes=["https"]),
+                servers={"local": MCPServerConfig(url="https://service.internal/call", timeout_s=1)},
+            )
+        )
+        with patch("clawlite.tools.mcp._resolve_ips_async", new=AsyncMock(return_value=[ipaddress.ip_address("127.0.0.1")])):
+            try:
+                await tool.run({"tool": "local::skill.test", "arguments": {}}, ToolContext(session_id="s"))
+                raise AssertionError("expected private IP block")
+            except ValueError as exc:
+                assert "denied resolved address" in str(exc)
+
+    asyncio.run(_scenario())
+
+
+def test_mcp_tool_retries_with_single_client_instance() -> None:
+    async def _scenario() -> None:
+        fake_response = AsyncMock()
+        fake_response.status_code = 200
+        fake_response.json = lambda: {"result": {"ok": True}}
+
+        state = {"instances": 0, "post_calls": 0}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs) -> None:
+                state["instances"] += 1
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, *args, **kwargs):
+                state["post_calls"] += 1
+                if state["post_calls"] == 1:
+                    raise httpx.ReadTimeout("transient timeout")
+                return fake_response
+
+        with patch("httpx.AsyncClient", new=FakeClient):
+            out = await _tool().run(
+                {"tool": "local::skill.test", "arguments": {}},
+                ToolContext(session_id="s"),
+            )
+
+        assert "ok" in out
+        assert state["instances"] == 1
+        assert state["post_calls"] == 2
 
     asyncio.run(_scenario())

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 import httpx
 from urllib.parse import urlparse
 
 from clawlite.config.schema import MCPServerConfig, MCPToolConfig, MCPTransportPolicyConfig
 
 from clawlite.tools.base import Tool, ToolContext
-from clawlite.utils.logging import bind_event, setup_logging
-
-setup_logging()
+from clawlite.utils.logging import bind_event
 
 
 class MCPTool(Tool):
@@ -54,7 +54,7 @@ class MCPTool(Tool):
         if not server.url:
             raise ValueError(f"mcp server has no url configured: {server_name}")
 
-        self._validate_transport(url=server.url, policy=self.policy)
+        await self._validate_transport(url=server.url, policy=self.policy)
         timeout_s = self._resolve_timeout(arguments=arguments, server=server)
 
         payload = {
@@ -64,52 +64,42 @@ class MCPTool(Tool):
             "params": {"name": resolved_tool, "arguments": payload_args},
         }
 
-        timeout_error: Exception | None = None
-        network_error: Exception | None = None
-        for attempt in range(1, self._TRANSIENT_RETRY_ATTEMPTS + 1):
-            try:
-                async with httpx.AsyncClient(timeout=timeout_s, headers=server.headers or None) as client:
+        async with httpx.AsyncClient(timeout=timeout_s, headers=server.headers or None) as client:
+            for attempt in range(1, self._TRANSIENT_RETRY_ATTEMPTS + 1):
+                try:
                     response = await asyncio.wait_for(client.post(server.url, json=payload), timeout=timeout_s)
-            except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-                timeout_error = exc
-                if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
-                    await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
-                    continue
-                log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
-                return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
-            except (httpx.ConnectError, httpx.ReadError, httpx.NetworkError, httpx.TransportError) as exc:
-                network_error = exc
-                if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
-                    await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
-                    continue
-                log.warning("mcp network error server={} tool={} error={}", server_name, resolved_tool, exc)
-                return f"mcp_error:network:{server_name}:{resolved_tool}"
-            status = int(getattr(response, "status_code", 0) or 0)
-            if status >= 400:
-                log.warning("mcp http status failure server={} tool={} status={}", server_name, resolved_tool, status)
-                return f"mcp_error:http_status:{server_name}:{resolved_tool}:{status}"
-            try:
-                data = response.json()
-            except Exception:
-                log.warning("mcp invalid json response server={} tool={}", server_name, resolved_tool)
-                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+                except (asyncio.TimeoutError, httpx.TimeoutException):
+                    if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
+                        await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
+                        continue
+                    log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
+                    return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
+                except (httpx.ConnectError, httpx.ReadError, httpx.NetworkError, httpx.TransportError) as exc:
+                    if attempt < self._TRANSIENT_RETRY_ATTEMPTS:
+                        await asyncio.sleep(self._TRANSIENT_RETRY_BACKOFF_S)
+                        continue
+                    log.warning("mcp network error server={} tool={} error={}", server_name, resolved_tool, exc)
+                    return f"mcp_error:network:{server_name}:{resolved_tool}"
+                status = int(getattr(response, "status_code", 0) or 0)
+                if status >= 400:
+                    log.warning("mcp http status failure server={} tool={} status={}", server_name, resolved_tool, status)
+                    return f"mcp_error:http_status:{server_name}:{resolved_tool}:{status}"
+                try:
+                    data = response.json()
+                except Exception:
+                    log.warning("mcp invalid json response server={} tool={}", server_name, resolved_tool)
+                    return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
 
-            log.info("mcp call server={} tool={} method=tools/call", server_name, resolved_tool)
+                log.info("mcp call server={} tool={} method=tools/call", server_name, resolved_tool)
 
-            if not isinstance(data, dict):
-                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
-            if data.get("error"):
-                return f"mcp_error:{data['error']}"
-            if "result" not in data:
-                return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
-            return str(data.get("result"))
+                if not isinstance(data, dict):
+                    return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+                if data.get("error"):
+                    return f"mcp_error:{data['error']}"
+                if "result" not in data:
+                    return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
+                return str(data.get("result"))
 
-        if timeout_error is not None:
-            log.warning("mcp timeout server={} tool={} timeout={}s", server_name, resolved_tool, timeout_s)
-            return f"mcp_error:timeout:{server_name}:{resolved_tool}:{timeout_s}s"
-        if network_error is not None:
-            log.warning("mcp network error server={} tool={} error={}", server_name, resolved_tool, network_error)
-            return f"mcp_error:network:{server_name}:{resolved_tool}"
         return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
 
     def _resolve_target(self, *, arguments: dict, tool: str) -> tuple[str, str]:
@@ -180,7 +170,7 @@ class MCPTool(Tool):
         return str(url or "").strip().rstrip("/")
 
     @staticmethod
-    def _validate_transport(*, url: str, policy: MCPTransportPolicyConfig) -> None:
+    async def _validate_transport(*, url: str, policy: MCPTransportPolicyConfig) -> None:
         parsed = urlparse(url)
         scheme = str(parsed.scheme or "").strip().lower()
         if not scheme:
@@ -192,13 +182,20 @@ class MCPTool(Tool):
         allowed_schemes = [str(item).strip().lower() for item in policy.allowed_schemes if str(item).strip()]
         allowed_hosts = [str(item).strip().lower() for item in policy.allowed_hosts if str(item).strip()]
         denied_hosts = [str(item).strip().lower() for item in policy.denied_hosts if str(item).strip()]
+        ip_literal = _ip_literal(host)
+        resolved_ips = [ip_literal] if ip_literal is not None else await _resolve_ips_async(host)
 
         if allowed_schemes and scheme not in allowed_schemes:
             raise ValueError(f"mcp transport policy rejected scheme '{scheme}'")
-        if _match_any(host=host, rules=denied_hosts):
+        if _match_any(host=host, ips=resolved_ips, rules=denied_hosts):
             raise ValueError(f"mcp transport policy denied host '{host}'")
-        if allowed_hosts and not _match_any(host=host, rules=allowed_hosts):
+        explicitly_allowed = _match_any(host=host, ips=resolved_ips, rules=allowed_hosts)
+        if allowed_hosts and not explicitly_allowed:
             raise ValueError(f"mcp transport policy blocked host '{host}'")
+        if not explicitly_allowed:
+            for ip in resolved_ips:
+                if _is_private_or_local(ip):
+                    raise ValueError(f"mcp transport policy denied resolved address '{ip.compressed}'")
 
 
 def _host_matches(rule: str, host: str) -> bool:
@@ -210,5 +207,55 @@ def _host_matches(rule: str, host: str) -> bool:
     return host == value
 
 
-def _match_any(*, host: str, rules: list[str]) -> bool:
-    return any(_host_matches(rule, host) for rule in rules)
+def _match_any(*, host: str, ips: list[ipaddress._BaseAddress], rules: list[str]) -> bool:
+    return any(_rule_matches(rule=rule, host=host, ips=ips) for rule in rules)
+
+
+def _rule_matches(*, rule: str, host: str, ips: list[ipaddress._BaseAddress]) -> bool:
+    normalized = rule.strip().lower()
+    if not normalized:
+        return False
+    if _host_matches(normalized, host):
+        return True
+    if "/" in normalized:
+        try:
+            network = ipaddress.ip_network(normalized, strict=False)
+        except ValueError:
+            network = None
+        if network is not None and any(ip in network for ip in ips):
+            return True
+    ip_value = _ip_literal(normalized)
+    if ip_value is not None and any(ip == ip_value for ip in ips):
+        return True
+    return False
+
+
+def _ip_literal(value: str) -> ipaddress._BaseAddress | None:
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _resolve_ips(host: str) -> list[ipaddress._BaseAddress]:
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"mcp transport policy failed to resolve host '{host}'") from exc
+    rows: list[ipaddress._BaseAddress] = []
+    for info in infos:
+        value = str(info[4][0])
+        ip = _ip_literal(value)
+        if ip is not None and ip not in rows:
+            rows.append(ip)
+    if not rows:
+        raise ValueError(f"mcp transport policy failed to resolve host '{host}'")
+    return rows
+
+
+async def _resolve_ips_async(host: str) -> list[ipaddress._BaseAddress]:
+    return await asyncio.to_thread(_resolve_ips, host)
+
+
+def _is_private_or_local(ip: ipaddress._BaseAddress) -> bool:
+    return ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved or ip.is_multicast or ip.is_unspecified
