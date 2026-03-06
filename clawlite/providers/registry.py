@@ -6,6 +6,7 @@ from typing import Any
 
 from clawlite.providers.base import LLMProvider
 from clawlite.providers.codex import CodexProvider
+from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.custom import CustomProvider
 from clawlite.providers.failover import FailoverCandidate, FailoverProvider
 from clawlite.providers.litellm import LiteLLMProvider
@@ -344,6 +345,7 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
     auth = dict(config.get("auth") or {})
     auth_providers = auth.get("providers")
     auth_provider_map = dict(auth_providers) if isinstance(auth_providers, dict) else {}
+    auth_file = load_codex_auth_file()
 
     codex_payload: dict[str, Any] = {}
     for key in ("openai-codex", "openai_codex", "codex", "openaiCodex"):
@@ -358,6 +360,7 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
         or os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
         or os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
         or os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
+        or str(auth_file.get("access_token", "") or "").strip()
     )
     account_id = (
         _cfg_value(codex_payload, "account_id", "accountId")
@@ -365,6 +368,7 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
         or _cfg_value(codex_payload, "organization", "organization")
         or os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip()
         or os.getenv("OPENAI_ORG_ID", "").strip()
+        or str(auth_file.get("account_id", "") or "").strip()
     )
     return token, account_id
 

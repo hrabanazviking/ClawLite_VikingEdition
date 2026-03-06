@@ -14,6 +14,7 @@ from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor
+from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.workspace.loader import TEMPLATE_FILES
 from clawlite.workspace.loader import WorkspaceLoader
@@ -191,6 +192,7 @@ def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
     cfg_token = str(codex.access_token or "").strip()
     cfg_account = str(codex.account_id or "").strip()
     cfg_source = str(codex.source or "").strip()
+    file_auth = load_codex_auth_file()
 
     env_token_candidates: tuple[tuple[str, str], ...] = (
         ("CLAWLITE_CODEX_ACCESS_TOKEN", os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()),
@@ -218,12 +220,17 @@ def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
             env_account = value
             break
 
-    token = cfg_token or env_token
-    account_id = cfg_account or env_account
+    file_token = str(file_auth.get("access_token", "") or "").strip()
+    file_account = str(file_auth.get("account_id", "") or "").strip()
+
+    token = cfg_token or env_token or file_token
+    account_id = cfg_account or env_account or file_account
     if cfg_token:
         source = cfg_source or "config"
     elif env_token_name:
         source = f"env:{env_token_name}"
+    elif file_token:
+        source = str(file_auth.get("source", "") or "")
     else:
         source = ""
 

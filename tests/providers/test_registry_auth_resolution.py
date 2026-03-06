@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from clawlite.providers.codex import CodexProvider
 from clawlite.providers.failover import FailoverProvider
@@ -117,6 +118,34 @@ def test_build_provider_openai_codex_accepts_auth_provider_alias_and_token_only(
     )
 
     assert isinstance(provider, CodexProvider)
+
+
+def test_build_provider_openai_codex_reads_auth_file_when_env_missing(tmp_path, monkeypatch) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "login",
+                "tokens": {
+                    "access_token": "codex-file-token",
+                    "account_id": "org-file",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(auth_path))
+
+    provider = build_provider({"model": "openai-codex/codex-5.3"})
+
+    assert isinstance(provider, CodexProvider)
+    assert provider.access_token == "codex-file-token"
+    assert provider.account_id == "org-file"
 
 
 def test_resolve_openai_ignores_incompatible_generic_key_prefix(monkeypatch) -> None:

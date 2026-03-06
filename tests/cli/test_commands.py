@@ -1220,7 +1220,8 @@ def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, c
     assert "clawlite.gateway.server" not in sys.modules
 
 
-def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys) -> None:
+def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(tmp_path / "missing-auth.json"))
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1508,6 +1509,48 @@ def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, cap
     )
     assert rc_use == 0
     assert "clawlite.gateway.server" not in sys.modules
+
+
+def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_missing(tmp_path: Path, capsys, monkeypatch) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "login",
+                "tokens": {
+                    "access_token": "codex-file-token-1234",
+                    "account_id": "org-file-1234",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(auth_path))
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    assert rc_status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is True
+    assert payload["source"] == f"file:{auth_path}"
+    assert payload["token_masked"]
+    assert payload["account_id_masked"]
 
 
 def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, capsys) -> None:
@@ -1800,6 +1843,7 @@ def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(t
     monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(tmp_path / "missing-auth.json"))
 
     config_path = tmp_path / "config.json"
     config_path.write_text(
