@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Coroutine, TypeVar
 
 
 @dataclass(slots=True)
@@ -34,6 +34,7 @@ def _utc_now() -> str:
 
 
 Runner = Callable[[str, str], Awaitable[str]]
+_T = TypeVar("_T")
 
 
 class SubagentManager:
@@ -65,7 +66,30 @@ class SubagentManager:
         self._queue: deque[str] = deque()
         self._pending_runners: dict[str, Runner] = {}
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._load_state()
+
+    def _bind_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+            return
+        if self._loop is not loop:
+            raise RuntimeError("SubagentManager cannot be used across multiple event loops")
+
+    def _run_sync(self, coro: Coroutine[object, object, _T], *, method_name: str) -> _T:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(f"{method_name} cannot be called from an active event loop; use the async variant")
+
+        target_loop = self._loop
+        if target_loop is not None and target_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, target_loop)
+            return future.result()
+        return asyncio.run(coro)
 
     def _to_payload(self, run: SubagentRun) -> dict[str, str | int | bool | dict[str, str | int | bool]]:
         return {
@@ -244,6 +268,7 @@ class SubagentManager:
             self._start_worker_locked(run, runner, reason="dequeued")
 
     async def resume(self, *, run_id: str, runner: Runner) -> SubagentRun:
+        self._bind_loop()
         clean_run_id = str(run_id or "").strip()
         if not clean_run_id:
             raise ValueError("run_id is required")
@@ -276,6 +301,7 @@ class SubagentManager:
             return run
 
     async def spawn(self, *, session_id: str, task: str, runner: Runner) -> SubagentRun:
+        self._bind_loop()
         clean_session_id = str(session_id or "").strip()
         clean_task = str(task or "").strip()
         if not clean_session_id:
@@ -345,40 +371,47 @@ class SubagentManager:
         rows.sort(key=lambda item: (item.finished_at or "", item.run_id))
         return rows[:max_items]
 
-    def mark_synthesized(self, run_ids: list[str], *, digest_id: str = "") -> int:
+    async def mark_synthesized_async(self, run_ids: list[str], *, digest_id: str = "") -> int:
+        self._bind_loop()
         now_iso = _utc_now()
         clean_digest = str(digest_id or "").strip()
         count = 0
         seen: set[str] = set()
-        for run_id in run_ids:
-            clean_run_id = str(run_id or "").strip()
-            if not clean_run_id or clean_run_id in seen:
-                continue
-            seen.add(clean_run_id)
-            run = self._runs.get(clean_run_id)
-            if run is None:
-                continue
-            run.metadata["synthesized"] = True
-            run.metadata["synthesized_at"] = now_iso
-            if clean_digest:
-                run.metadata["synthesized_digest_id"] = clean_digest
-            run.updated_at = now_iso
-            count += 1
+        async with self._lock:
+            for run_id in run_ids:
+                clean_run_id = str(run_id or "").strip()
+                if not clean_run_id or clean_run_id in seen:
+                    continue
+                seen.add(clean_run_id)
+                run = self._runs.get(clean_run_id)
+                if run is None:
+                    continue
+                run.metadata["synthesized"] = True
+                run.metadata["synthesized_at"] = now_iso
+                if clean_digest:
+                    run.metadata["synthesized_digest_id"] = clean_digest
+                run.updated_at = now_iso
+                count += 1
 
-        if count > 0:
-            self._save_state()
+            if count > 0:
+                self._save_state()
         return count
 
-    def cancel(self, run_id: str) -> bool:
-        clean_run_id = str(run_id or "").strip()
-        task = self._tasks.get(clean_run_id)
+    def mark_synthesized(self, run_ids: list[str], *, digest_id: str = "") -> int:
+        return self._run_sync(
+            self.mark_synthesized_async(run_ids, digest_id=digest_id),
+            method_name="mark_synthesized()",
+        )
+
+    def _cancel_locked(self, run_id: str) -> tuple[bool, bool]:
+        task = self._tasks.get(run_id)
         if task is not None and not task.done():
             task.cancel()
-            return True
+            return True, False
 
-        if clean_run_id in self._queue:
-            self._queue = deque(item for item in self._queue if item != clean_run_id)
-            run = self._runs.get(clean_run_id)
+        if run_id in self._queue:
+            self._queue = deque(item for item in self._queue if item != run_id)
+            run = self._runs.get(run_id)
             if run is not None:
                 now_iso = _utc_now()
                 run.status = "cancelled"
@@ -387,14 +420,45 @@ class SubagentManager:
                 run.metadata["resumable"] = True
                 run.metadata["last_status_reason"] = "cancelled_while_queued"
                 run.metadata["last_status_at"] = now_iso
-            self._pending_runners.pop(clean_run_id, None)
-            self._save_state()
-            return True
-        return False
+            self._pending_runners.pop(run_id, None)
+            return True, True
+
+        return False, False
+
+    async def cancel_async(self, run_id: str) -> bool:
+        self._bind_loop()
+        clean_run_id = str(run_id or "").strip()
+        async with self._lock:
+            cancelled, persist = self._cancel_locked(clean_run_id)
+            if persist:
+                self._save_state()
+            return cancelled
+
+    def cancel(self, run_id: str) -> bool:
+        return self._run_sync(self.cancel_async(run_id), method_name="cancel()")
+
+    async def cancel_session_async(self, session_id: str) -> int:
+        self._bind_loop()
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return 0
+
+        async with self._lock:
+            run_ids = [
+                run.run_id
+                for run in self._runs.values()
+                if run.session_id == clean_session_id and run.status in {"running", "queued"}
+            ]
+            total = 0
+            persist = False
+            for run_id in run_ids:
+                cancelled, needs_persist = self._cancel_locked(run_id)
+                if cancelled:
+                    total += 1
+                persist = persist or needs_persist
+            if persist:
+                self._save_state()
+            return total
 
     def cancel_session(self, session_id: str) -> int:
-        total = 0
-        for run in self.list_runs(session_id=session_id, active_only=True):
-            if self.cancel(run.run_id):
-                total += 1
-        return total
+        return self._run_sync(self.cancel_session_async(session_id), method_name="cancel_session()")

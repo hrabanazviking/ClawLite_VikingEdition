@@ -83,7 +83,7 @@ def test_subagent_manager_restores_resumable_state(tmp_path: Path) -> None:
         assert restored.status == "interrupted"
         assert restored.metadata.get("resumable") is True
 
-        assert mgr.cancel(run.run_id) is True
+        assert await mgr.cancel_async(run.run_id) is True
         await asyncio.sleep(0)
 
         async def _resume_runner(_session_id: str, task: str) -> str:
@@ -176,3 +176,61 @@ def test_mark_synthesized_persists_across_reload(tmp_path: Path) -> None:
     assert run.metadata.get("synthesized") is True
     assert str(run.metadata.get("synthesized_at", "")).strip()
     assert run.metadata.get("synthesized_digest_id") == "dig-01"
+
+
+def test_subagent_manager_concurrent_spawn_cancel_and_synthesize(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        gate = asyncio.Event()
+
+        async def _slow_runner(_session_id: str, task: str) -> str:
+            await gate.wait()
+            return f"done:{task}"
+
+        mgr = SubagentManager(
+            state_path=tmp_path / "state",
+            max_concurrent_runs=1,
+            max_queued_runs=64,
+            per_session_quota=128,
+        )
+
+        initial_runs = [
+            await mgr.spawn(session_id="race", task=f"task-{idx}", runner=_slow_runner)
+            for idx in range(12)
+        ]
+        queued_run_ids = [run.run_id for run in initial_runs if run.status == "queued"]
+
+        async def _spawn_more() -> None:
+            for idx in range(12, 24):
+                await mgr.spawn(session_id="race", task=f"task-{idx}", runner=_slow_runner)
+                await asyncio.sleep(0)
+
+        async def _cancel_some() -> None:
+            for run_id in queued_run_ids[::2]:
+                await mgr.cancel_async(run_id)
+                await asyncio.sleep(0)
+
+        async def _mark_synthesized_loop() -> None:
+            run_ids = [run.run_id for run in initial_runs]
+            for _ in range(8):
+                await mgr.mark_synthesized_async(run_ids, digest_id="digest-race")
+                await asyncio.sleep(0)
+
+        await asyncio.gather(_spawn_more(), _cancel_some(), _mark_synthesized_loop())
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        runs = mgr.list_runs(session_id="race")
+        run_ids = [run.run_id for run in runs]
+        assert len(run_ids) == len(set(run_ids))
+
+        queue_snapshot = list(mgr._queue)
+        assert len(queue_snapshot) == len(set(queue_snapshot))
+        assert all(run_id in mgr._runs for run_id in queue_snapshot)
+        assert all(mgr._runs[run_id].status == "queued" for run_id in queue_snapshot)
+
+        valid_statuses = {"queued", "running", "done", "error", "cancelled", "interrupted"}
+        assert all(run.status in valid_statuses for run in runs)
+        assert all(str(run.updated_at).strip() for run in runs)
+
+    asyncio.run(_scenario())

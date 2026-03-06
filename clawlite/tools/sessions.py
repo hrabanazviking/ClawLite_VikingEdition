@@ -385,7 +385,7 @@ class SubagentsTool(Tool):
             run_id = str(arguments.get("run_id") or arguments.get("runId") or "").strip()
             kill_all = _coerce_bool(arguments.get("all"), default=False)
             if kill_all:
-                cancelled = int(self.manager.cancel_session(session_id) or 0)
+                cancelled = int(await self.manager.cancel_session_async(session_id) or 0)
                 return _json(
                     {
                         "status": "ok",
@@ -404,7 +404,7 @@ class SubagentsTool(Tool):
                         "error": "run_id/runId is required when all=false",
                     }
                 )
-            cancelled = bool(self.manager.cancel(run_id))
+            cancelled = bool(await self.manager.cancel_async(run_id))
             return _json(
                 {
                     "status": "ok" if cancelled else "failed",
