@@ -1176,6 +1176,84 @@ def test_memory_ephemeral_ttl_cleanup_deletes_expired_rows(tmp_path: Path) -> No
     asyncio.run(_scenario())
 
 
+def test_memory_ephemeral_ttl_cleanup_prunes_user_and_shared_scopes(tmp_path: Path, monkeypatch) -> None:
+    def _rewrite_record_created_at(path: Path, record_id: str, created_at: str) -> None:
+        lines: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            payload = json.loads(raw)
+            if payload.get("id") == record_id:
+                payload["created_at"] = created_at
+            lines.append(json.dumps(payload, ensure_ascii=False))
+        path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+
+    async def _scenario() -> None:
+        monkeypatch.setattr(MemoryStore, "_generate_embedding", lambda self, text: [float(len(text)), 1.0])
+        store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
+        old_stamp = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+
+        user_row = store.add("old scoped user context", source="session:user", user_id="user-a")
+        shared_row = store.add("old shared team context", source="session:shared", shared=True)
+        fresh_row = store.add("fresh scoped user context", source="session:user", user_id="user-a")
+
+        user_scope = store._scope_paths(user_id="user-a", shared=False)
+        shared_scope = store._scope_paths(shared=True)
+
+        _rewrite_record_created_at(store.history_path, user_row.id, old_stamp)
+        _rewrite_record_created_at(store.history_path, shared_row.id, old_stamp)
+        _rewrite_record_created_at(user_scope["history"], user_row.id, old_stamp)
+        _rewrite_record_created_at(shared_scope["history"], shared_row.id, old_stamp)
+
+        store.privacy_path.write_text(
+            json.dumps(
+                {
+                    "never_memorize_patterns": [],
+                    "ephemeral_categories": ["context"],
+                    "ephemeral_ttl_days": 1,
+                    "encrypted_categories": [],
+                    "audit_log": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        store.set_shared_opt_in("user-a", True)
+
+        await store.memorize(text="trigger scoped cleanup", source="session:ttl", user_id="user-a")
+
+        global_ids = {row.id for row in store.all()}
+        user_scope_ids = {row.id for row in store._read_history_records_from(user_scope["history"])}
+        shared_scope_ids = {row.id for row in store._read_history_records_from(shared_scope["history"])}
+        assert user_row.id not in global_ids
+        assert shared_row.id not in global_ids
+        assert user_row.id not in user_scope_ids
+        assert shared_row.id not in shared_scope_ids
+        assert fresh_row.id in user_scope_ids
+
+        user_hits = await store.retrieve("old scoped user", user_id="user-a", limit=5)
+        shared_hits = await store.retrieve("old shared team", user_id="user-a", include_shared=True, limit=5)
+        assert all(str(item["id"]) != user_row.id for item in user_hits["hits"])
+        assert all(str(item["id"]) != shared_row.id for item in shared_hits["hits"])
+
+        user_item_payload = json.loads((user_scope["items"] / "context.json").read_text(encoding="utf-8"))
+        shared_item_payload = json.loads((shared_scope["items"] / "context.json").read_text(encoding="utf-8"))
+        user_item_ids = {str(item.get("id", "")) for item in user_item_payload.get("items", []) if isinstance(item, dict)}
+        shared_item_ids = {str(item.get("id", "")) for item in shared_item_payload.get("items", []) if isinstance(item, dict)}
+        assert user_row.id not in user_item_ids
+        assert shared_row.id not in shared_item_ids
+        assert fresh_row.id in user_item_ids
+
+        embedding_ids = {json.loads(line)["id"] for line in store.embeddings_path.read_text(encoding="utf-8").splitlines() if line.strip()}
+        assert user_row.id not in embedding_ids
+        assert shared_row.id not in embedding_ids
+        assert fresh_row.id in embedding_ids
+        assert store.diagnostics()["privacy_ttl_deleted"] >= 2
+
+    asyncio.run(_scenario())
+
+
 def test_memory_encrypted_category_roundtrip_preserves_plain_reads(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl", memory_auto_categorize=False)
     store.privacy_path.write_text(

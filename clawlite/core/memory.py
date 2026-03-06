@@ -1260,6 +1260,26 @@ class MemoryStore:
         self._ensure_file(scope["checkpoints"], default="{}\n")
         self._ensure_file(scope["curated"], default='{"version": 2, "facts": []}\n')
 
+    def _iter_existing_scopes(self) -> list[dict[str, Path]]:
+        scopes: list[dict[str, Path]] = []
+        seen_roots: set[Path] = set()
+
+        def _append(scope: dict[str, Path]) -> None:
+            root = Path(scope["root"])
+            if root in seen_roots or not root.exists():
+                return
+            seen_roots.add(root)
+            scopes.append(scope)
+
+        _append(self._scope_paths(user_id="default", shared=False))
+        if self.users_path.exists():
+            for child in sorted(self.users_path.iterdir()):
+                if not child.is_dir():
+                    continue
+                _append(self._scope_paths(user_id=child.name, shared=False))
+        _append(self._scope_paths(shared=True))
+        return scopes
+
     def _scope_resource_file_path_for_timestamp(self, scope: dict[str, Path], stamp: str) -> Path:
         parsed = self._parse_iso_timestamp(stamp)
         if parsed.year <= 1:
@@ -3032,6 +3052,141 @@ class MemoryStore:
                 continue
         return deleted
 
+    def _prune_history_records_for_ids(self, history_path: Path, record_ids: set[str]) -> int:
+        if not record_ids or not history_path.exists():
+            return 0
+        deleted = 0
+        with self._locked_file(history_path, "r+", exclusive=True) as fh:
+            lines = fh.read().splitlines()
+            kept_lines: list[str] = []
+            for line in lines:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    kept_lines.append(raw)
+                    continue
+                if not isinstance(payload, dict):
+                    kept_lines.append(raw)
+                    continue
+                row_id = str(payload.get("id", "")).strip()
+                if row_id and row_id in record_ids:
+                    deleted += 1
+                    continue
+                kept_lines.append(raw)
+
+            fh.seek(0)
+            fh.truncate()
+            if kept_lines:
+                fh.write("\n".join(kept_lines) + "\n")
+            self._flush_and_fsync(fh)
+        return deleted
+
+    def _prune_curated_facts_for_ids(self, curated_path: Path | None, record_ids: set[str]) -> int:
+        if not record_ids or curated_path is None or not curated_path.exists():
+            return 0
+        facts = self._read_curated_facts_from(curated_path)
+        kept_facts: list[dict[str, object]] = []
+        deleted = 0
+        for fact in facts:
+            row_id = str(fact.get("id", "")).strip()
+            if row_id and row_id in record_ids:
+                deleted += 1
+                continue
+            kept_facts.append(fact)
+        self._write_curated_facts_to(curated_path, kept_facts)
+        return deleted
+
+    def _prune_item_and_category_layers_in_scope(self, scope: dict[str, Path], record_ids: set[str]) -> int:
+        if not record_ids or not scope["items"].exists():
+            return 0
+        deleted = 0
+        for item_file in scope["items"].glob("*.json"):
+            try:
+                payload = json.loads(item_file.read_text(encoding="utf-8") or "{}")
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            category = str(payload.get("category", item_file.stem) or item_file.stem)
+            rows = payload.get("items", [])
+            if not isinstance(rows, list):
+                continue
+            kept: list[dict[str, Any]] = []
+            removed_here = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("id", "")).strip()
+                if row_id and row_id in record_ids:
+                    removed_here += 1
+                    continue
+                kept.append(row)
+            if removed_here <= 0:
+                continue
+            deleted += removed_here
+            updated_payload = {
+                "version": int(payload.get("version", 1) or 1),
+                "category": category,
+                "updated_at": self._utcnow_iso(),
+                "items": kept,
+            }
+            self._atomic_write_text_locked(item_file, json.dumps(updated_payload, ensure_ascii=False, indent=2) + "\n")
+            self._update_scope_category_summary_file(scope, category)
+        return deleted
+
+    def _prune_resource_layer_for_ids_in_scope(self, scope: dict[str, Path], record_ids: set[str]) -> int:
+        if not record_ids or not scope["resources"].exists():
+            return 0
+        deleted = 0
+        for resource_file in scope["resources"].glob("conv_*.jsonl"):
+            try:
+                with self._locked_file(resource_file, "r+", exclusive=True) as fh:
+                    lines = fh.read().splitlines()
+                    kept_lines: list[str] = []
+                    for line in lines:
+                        raw = line.strip()
+                        if not raw:
+                            continue
+                        try:
+                            payload = json.loads(raw)
+                        except Exception:
+                            kept_lines.append(raw)
+                            continue
+                        if not isinstance(payload, dict):
+                            kept_lines.append(raw)
+                            continue
+                        row_id = str(payload.get("id", "")).strip()
+                        if row_id and row_id in record_ids:
+                            deleted += 1
+                            continue
+                        kept_lines.append(raw)
+                    fh.seek(0)
+                    fh.truncate()
+                    if kept_lines:
+                        fh.write("\n".join(kept_lines) + "\n")
+                    self._flush_and_fsync(fh)
+            except Exception:
+                continue
+        return deleted
+
+    def _delete_records_by_ids_in_scope(self, scope: dict[str, Path], record_ids: set[str]) -> dict[str, int]:
+        history_deleted = self._prune_history_records_for_ids(scope["history"], record_ids)
+        curated_deleted = self._prune_curated_facts_for_ids(scope.get("curated"), record_ids)
+        if scope["root"] == self.memory_home:
+            layer_deleted = self._prune_item_and_category_layers(record_ids)
+            layer_deleted += self._prune_resource_layer_for_ids(record_ids)
+        else:
+            layer_deleted = self._prune_item_and_category_layers_in_scope(scope, record_ids)
+            layer_deleted += self._prune_resource_layer_for_ids_in_scope(scope, record_ids)
+        return {
+            "history_deleted": int(history_deleted),
+            "curated_deleted": int(curated_deleted),
+            "layer_deleted": int(layer_deleted),
+        }
+
     def _delete_records_by_ids(self, record_ids: set[str]) -> dict[str, int | list[str]]:
         if not record_ids:
             return {
@@ -3051,57 +3206,16 @@ class MemoryStore:
         layer_deleted = 0
 
         try:
-            with self._locked_file(self.history_path, "r+", exclusive=True) as fh:
-                lines = fh.read().splitlines()
-                kept_lines: list[str] = []
-                for line in lines:
-                    raw = line.strip()
-                    if not raw:
-                        continue
-                    try:
-                        payload = json.loads(raw)
-                    except json.JSONDecodeError:
-                        kept_lines.append(raw)
-                        continue
-                    if not isinstance(payload, dict):
-                        kept_lines.append(raw)
-                        continue
-                    row_id = str(payload.get("id", "")).strip()
-                    if row_id and row_id in record_ids:
-                        history_deleted += 1
-                        continue
-                    kept_lines.append(raw)
-
-                fh.seek(0)
-                fh.truncate()
-                if kept_lines:
-                    fh.write("\n".join(kept_lines) + "\n")
-                self._flush_and_fsync(fh)
+            for scope in self._iter_existing_scopes():
+                deleted = self._delete_records_by_ids_in_scope(scope, record_ids)
+                history_deleted += int(deleted.get("history_deleted", 0) or 0)
+                curated_deleted += int(deleted.get("curated_deleted", 0) or 0)
+                layer_deleted += int(deleted.get("layer_deleted", 0) or 0)
         except Exception as exc:
             self._diagnostics["last_error"] = str(exc)
-
-        if self.curated_path is not None:
-            try:
-                facts = self._read_curated_facts()
-                kept_facts: list[dict[str, object]] = []
-                for fact in facts:
-                    row_id = str(fact.get("id", "")).strip()
-                    if row_id and row_id in record_ids:
-                        curated_deleted += 1
-                        continue
-                    kept_facts.append(fact)
-                self._write_curated_facts(kept_facts)
-            except Exception as exc:
-                self._diagnostics["last_error"] = str(exc)
 
         try:
             embeddings_deleted = self._prune_embeddings_for_ids(record_ids)
-        except Exception as exc:
-            self._diagnostics["last_error"] = str(exc)
-
-        try:
-            layer_deleted = self._prune_item_and_category_layers(record_ids)
-            layer_deleted += self._prune_resource_layer_for_ids(record_ids)
         except Exception as exc:
             self._diagnostics["last_error"] = str(exc)
 
@@ -3139,23 +3253,29 @@ class MemoryStore:
         cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days)
         expired_ids: set[str] = set()
 
-        for row in self._read_history_records():
-            row_id = str(row.id or "").strip()
-            if not row_id:
-                continue
-            if str(row.category or "context").strip().lower() not in categories:
-                continue
-            if self._parse_iso_timestamp(str(row.created_at or "")) < cutoff:
-                expired_ids.add(row_id)
+        for scope in self._iter_existing_scopes():
+            history_path = scope["history"]
+            if history_path.exists():
+                for row in self._read_history_records_from(history_path):
+                    row_id = str(row.id or "").strip()
+                    if not row_id:
+                        continue
+                    if str(row.category or "context").strip().lower() not in categories:
+                        continue
+                    if self._parse_iso_timestamp(str(row.created_at or "")) < cutoff:
+                        expired_ids.add(row_id)
 
-        for row in self.curated():
-            row_id = str(row.id or "").strip()
-            if not row_id:
+            curated_path = scope.get("curated")
+            if curated_path is None or not curated_path.exists():
                 continue
-            if str(row.category or "context").strip().lower() not in categories:
-                continue
-            if self._parse_iso_timestamp(str(row.created_at or "")) < cutoff:
-                expired_ids.add(row_id)
+            for row in self._read_curated_facts_from(curated_path):
+                row_id = str(row.get("id", "")).strip()
+                if not row_id:
+                    continue
+                if str(row.get("category", "context") or "context").strip().lower() not in categories:
+                    continue
+                if self._parse_iso_timestamp(str(row.get("created_at", "") or "")) < cutoff:
+                    expired_ids.add(row_id)
 
         if not expired_ids:
             return 0
