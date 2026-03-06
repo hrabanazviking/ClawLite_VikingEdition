@@ -585,18 +585,28 @@ class MemoryForgetTool(Tool):
             query_ids = {str(item.id or "").strip() for item in query_matches if str(item.id or "").strip()}
             candidate_rows = list(query_matches)
         else:
-            targeted = _discover_non_query_candidates(
-                self.memory,
-                ref_prefix=ref_prefix,
-                source=source,
-                limit=limit,
-            )
-            if targeted is not None:
-                candidate_rows = targeted
+            list_recent_candidates_fn = getattr(self.memory, "list_recent_candidates", None)
+            if callable(list_recent_candidates_fn):
+                max_scan = max(200, min(2000, int(limit or 1) * 8))
+                candidate_rows = list_recent_candidates_fn(
+                    source=source,
+                    ref_prefix=ref_prefix,
+                    limit=limit,
+                    max_scan=max_scan,
+                )
             else:
-                history_rows = self.memory.all()
-                curated_rows = self.memory.curated()
-                candidate_rows = history_rows + curated_rows
+                targeted = _discover_non_query_candidates(
+                    self.memory,
+                    ref_prefix=ref_prefix,
+                    source=source,
+                    limit=limit,
+                )
+                if targeted is not None:
+                    candidate_rows = targeted
+                else:
+                    history_rows = self.memory.all()
+                    curated_rows = self.memory.curated()
+                    candidate_rows = history_rows + curated_rows
 
         candidates = []
         for row in candidate_rows:

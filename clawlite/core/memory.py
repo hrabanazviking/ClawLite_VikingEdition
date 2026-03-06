@@ -15,7 +15,7 @@ import unicodedata
 import uuid
 import urllib.error
 import urllib.request
-from collections import Counter
+from collections import Counter, deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -3221,6 +3221,82 @@ class MemoryStore:
             for item in rows
             if str(item.get("text", "")).strip()
         ]
+
+    def list_recent_candidates(
+        self,
+        *,
+        source: str = "",
+        ref_prefix: str = "",
+        limit: int = 10,
+        max_scan: int = 500,
+    ) -> list[MemoryRecord]:
+        bounded_limit = max(1, int(limit or 1))
+        bounded_scan = max(bounded_limit, min(max(1, int(max_scan or bounded_limit)), 5000))
+        clean_source = str(source or "").strip()
+        clean_prefix = self._normalize_prefix(ref_prefix)
+
+        out: list[MemoryRecord] = []
+        seen_ids: set[str] = set()
+
+        def _accept(row: MemoryRecord | None) -> bool:
+            if row is None:
+                return False
+            row_id = str(row.id or "").strip()
+            if not row_id or row_id in seen_ids:
+                return False
+            if clean_prefix and not self._normalize_prefix(row_id).startswith(clean_prefix):
+                return False
+            if clean_source and str(row.source or "") != clean_source:
+                return False
+            seen_ids.add(row_id)
+            out.append(row)
+            return len(out) >= bounded_limit
+
+        try:
+            backend_rows = self.backend.fetch_layer_records(layer=MemoryLayer.ITEM.value, limit=bounded_scan)
+        except Exception:
+            backend_rows = []
+        for row in backend_rows:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+            candidate = self._record_from_payload(payload)
+            if candidate is None:
+                continue
+            candidate.text = self._decrypt_text_for_category(str(candidate.text or ""), candidate.category)
+            if _accept(candidate):
+                return out
+
+        with self._locked_file(self.history_path, "r", exclusive=False) as fh:
+            recent_lines = deque(fh, maxlen=bounded_scan)
+        for line in reversed(list(recent_lines)):
+            raw = str(line or "").strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            candidate = self._record_from_payload(payload)
+            if candidate is None:
+                continue
+            candidate.text = self._decrypt_text_for_category(str(candidate.text or ""), candidate.category)
+            if _accept(candidate):
+                return out
+
+        for item in self._read_curated_facts():
+            candidate = self._record_from_payload(item)
+            if candidate is None:
+                continue
+            if _accept(candidate):
+                return out
+
+        out.sort(key=self._record_sort_key, reverse=True)
+        return out[:bounded_limit]
 
     async def memorize(
         self,

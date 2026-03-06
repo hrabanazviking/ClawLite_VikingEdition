@@ -7,7 +7,7 @@ from datetime import timezone
 
 import pytest
 
-from clawlite.core.memory import MemoryStore
+from clawlite.core.memory import MemoryRecord, MemoryStore
 from clawlite.tools.base import ToolContext
 from clawlite.tools.memory import (
     MemoryAnalyzeTool,
@@ -377,6 +377,72 @@ def test_memory_forget_source_dry_run_uses_backend_targeted_candidates_without_f
         assert payload["curated_deleted"] == 0
         assert payload["refs"] == ["mem:1111aaaa"]
         assert payload["selectors"] == {"ref": "", "query": "", "source": "seed:drop", "dry_run": True}
+
+    asyncio.run(_scenario())
+
+
+def test_memory_forget_non_query_prefers_bounded_memory_store_candidates() -> None:
+    class _BoundedMemory:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def list_recent_candidates(self, *, source: str = "", ref_prefix: str = "", limit: int = 10, max_scan: int = 500):
+            self.calls.append(
+                {
+                    "source": source,
+                    "ref_prefix": ref_prefix,
+                    "limit": limit,
+                    "max_scan": max_scan,
+                }
+            )
+            return [
+                MemoryRecord(
+                    id="abcd1234efgh5678",
+                    text="candidate",
+                    source="seed:drop",
+                    created_at="2026-03-05T12:00:00+00:00",
+                )
+            ]
+
+        def all(self):
+            raise AssertionError("all() should not run when list_recent_candidates() exists")
+
+        def curated(self):
+            raise AssertionError("curated() should not run when list_recent_candidates() exists")
+
+        @staticmethod
+        def _parse_iso_timestamp(raw: str):
+            clean = str(raw or "").strip()
+            if clean.endswith("Z"):
+                clean = clean[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(clean)
+            except Exception:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+
+    async def _scenario() -> None:
+        memory = _BoundedMemory()
+        tool = MemoryForgetTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(
+            await tool.run(
+                {"source": "seed:drop", "dry_run": True, "limit": 1},
+                ToolContext(session_id="s1"),
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["deleted_count"] == 0
+        assert payload["history_deleted"] == 0
+        assert payload["curated_deleted"] == 0
+        assert payload["refs"] == ["mem:abcd1234"]
+        assert payload["selectors"] == {"ref": "", "query": "", "source": "seed:drop", "dry_run": True}
+        assert len(memory.calls) == 1
+        assert memory.calls[0]["source"] == "seed:drop"
+        assert memory.calls[0]["ref_prefix"] == ""
+        assert memory.calls[0]["limit"] == 1
+        assert int(memory.calls[0]["max_scan"] or 0) >= 200
 
     asyncio.run(_scenario())
 

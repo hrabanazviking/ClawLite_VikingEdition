@@ -653,6 +653,59 @@ def test_memory_delete_by_prefixes_removes_from_history_and_curated(tmp_path: Pa
     assert "curdrop001" not in curated_ids
 
 
+def test_memory_list_recent_candidates_uses_backend_bounded_scan_without_history_full_read(tmp_path: Path, monkeypatch) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+
+    def _fake_fetch_layer_records(self, *, layer: str, category=None, limit: int = 200):
+        del self
+        del category
+        assert layer == "item"
+        assert limit == 33
+        return [
+            {
+                "payload": {
+                    "id": "abc12345feed6789",
+                    "text": "backend candidate",
+                    "source": "seed:drop",
+                    "created_at": "2026-03-06T00:00:00+00:00",
+                    "category": "context",
+                }
+            }
+        ]
+
+    def _blocked_locked_file(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("history lock/read should not run when backend scan already satisfies limit")
+
+    monkeypatch.setattr(type(store.backend), "fetch_layer_records", _fake_fetch_layer_records)
+    monkeypatch.setattr(store, "_locked_file", _blocked_locked_file)
+
+    rows = store.list_recent_candidates(source="seed:drop", ref_prefix="mem:abc12345", limit=1, max_scan=33)
+    assert len(rows) == 1
+    assert rows[0].id == "abc12345feed6789"
+    assert rows[0].source == "seed:drop"
+
+
+def test_memory_list_recent_candidates_falls_back_to_bounded_recent_history_scan(tmp_path: Path, monkeypatch) -> None:
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    old = store.add("old row", source="seed")
+    mid = store.add("mid row", source="seed")
+    new = store.add("new row", source="seed")
+
+    def _empty_fetch_layer_records(self, **kwargs):
+        del self, kwargs
+        return []
+
+    monkeypatch.setattr(type(store.backend), "fetch_layer_records", _empty_fetch_layer_records)
+
+    rows = store.list_recent_candidates(source="seed", limit=2, max_scan=2)
+    assert len(rows) == 2
+    ids = [row.id for row in rows]
+    assert new.id in ids
+    assert mid.id in ids
+    assert old.id not in ids
+
+
 def test_memory_delete_by_prefixes_prunes_embedding_rows_for_deleted_ids(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl", semantic_enabled=True)
     keep = store.add("keep history row", source="session:keep")
