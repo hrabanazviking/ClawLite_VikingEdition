@@ -100,8 +100,6 @@ class MCPTool(Tool):
                     return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
                 return str(data.get("result"))
 
-        return f"mcp_error:invalid_response:{server_name}:{resolved_tool}"
-
     def _resolve_target(self, *, arguments: dict, tool: str) -> tuple[str, str]:
         if not self.servers:
             raise ValueError("mcp server registry is empty")

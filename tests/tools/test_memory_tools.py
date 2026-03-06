@@ -15,6 +15,7 @@ from clawlite.tools.memory import (
     MemoryRecallTool,
     MemorySearchTool,
 )
+from clawlite.tools import memory as memory_tools
 
 
 def test_memory_learn_success(tmp_path) -> None:
@@ -276,6 +277,65 @@ def test_memory_forget_by_query_enforces_min_length(tmp_path) -> None:
             await tool.run({"query": "ab"}, ToolContext(session_id="s1"))
 
     asyncio.run(_scenario())
+
+
+def test_memory_forget_ref_only_non_dry_run_uses_targeted_delete_path() -> None:
+    class _FastPathMemory:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[str], int]] = []
+
+        def all(self):
+            raise AssertionError("all() should not run for ref-only non-dry path")
+
+        def curated(self):
+            raise AssertionError("curated() should not run for ref-only non-dry path")
+
+        def delete_by_prefixes(self, prefixes, *, limit=None):
+            self.calls.append((list(prefixes), int(limit or 0)))
+            return {
+                "deleted_ids": ["abcd1234efgh"],
+                "deleted_count": 1,
+                "history_deleted": 1,
+                "curated_deleted": 0,
+            }
+
+    async def _scenario() -> None:
+        memory = _FastPathMemory()
+        tool = MemoryForgetTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(
+            await tool.run(
+                {"ref": "mem:abcd1234", "limit": 2},
+                ToolContext(session_id="s1"),
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["deleted_count"] == 1
+        assert payload["history_deleted"] == 1
+        assert payload["curated_deleted"] == 0
+        assert payload["refs"] == ["mem:abcd1234"]
+        assert payload["selectors"] == {"ref": "mem:abcd1234", "query": "", "source": "", "dry_run": False}
+        assert memory.calls == [(["abcd1234"], 2)]
+
+    asyncio.run(_scenario())
+
+
+def test_accepts_parameter_uses_signature_cache(monkeypatch) -> None:
+    call_count = 0
+    original_signature = memory_tools.inspect.signature
+
+    def _counting_signature(func):
+        nonlocal call_count
+        call_count += 1
+        return original_signature(func)
+
+    monkeypatch.setattr(memory_tools.inspect, "signature", _counting_signature)
+
+    def _callable(*, user_id: str = "") -> None:
+        del user_id
+
+    assert memory_tools._accepts_parameter(_callable, "user_id") is True
+    assert memory_tools._accepts_parameter(_callable, "user_id") is True
+    assert call_count == 1
 
 
 def test_memory_analyze_base_stats_fields(tmp_path) -> None:

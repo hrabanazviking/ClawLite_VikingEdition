@@ -42,6 +42,12 @@ class FakeMemory:
         return self.verdict
 
 
+class ExplodingMemory:
+    def integration_policy(self, kind: str, *, session_id: str):
+        del kind, session_id
+        raise RuntimeError("policy backend unavailable")
+
+
 def _write_skill(root: Path, slug: str, frontmatter: str, body: str = "body") -> None:
     skill_dir = root / slug
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -333,5 +339,25 @@ def test_run_skill_blocks_execution_when_memory_policy_denies(tmp_path: Path) ->
         )
         assert out == "skill_blocked:echo-skill:memory_policy:maintenance"
         assert memory.calls == [("skill", "s9")]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_blocks_execution_when_memory_policy_errors(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "echo-skill",
+        "name: echo-skill\ndescription: echo\ncommand: echo",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, memory=ExplodingMemory())
+        out = await tool.run(
+            {"name": "echo-skill", "input": "hello"},
+            ToolContext(session_id="s10"),
+        )
+        assert out == "skill_blocked:echo-skill:memory_policy:policy_exception:runtimeerror"
 
     asyncio.run(_scenario())

@@ -18,9 +18,7 @@ import httpx
 from clawlite.core.skills import SkillsLoader
 from clawlite.tools.base import Tool, ToolContext
 from clawlite.tools.registry import ToolRegistry
-from clawlite.utils.logging import bind_event, setup_logging
-
-setup_logging()
+from clawlite.utils.logging import bind_event
 
 
 class SkillTool(Tool):
@@ -62,8 +60,8 @@ class SkillTool(Tool):
             verdict = policy_fn("skill", session_id=session_id)
             if inspect.isawaitable(verdict):
                 verdict = await verdict
-        except Exception:
-            return True, ""
+        except Exception as exc:
+            return False, f"policy_exception:{exc.__class__.__name__.lower()}"
 
         if isinstance(verdict, bool):
             return verdict, "" if verdict else "blocked"

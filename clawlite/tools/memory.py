@@ -82,14 +82,36 @@ def _dump_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+_SIGNATURE_PARAM_CACHE: dict[tuple[int, str], bool] = {}
+_SIGNATURE_PARAM_CACHE_MAX_SIZE = 4096
+
+
+def _callable_identity(func: Any) -> int:
+    target = getattr(func, "__func__", func)
+    return id(target)
+
+
 def _accepts_parameter(func: Any, parameter: str) -> bool:
+    normalized_parameter = str(parameter or "")
+    cache_key = (_callable_identity(func), normalized_parameter)
+    cached = _SIGNATURE_PARAM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
-        return False
-    if parameter in signature.parameters:
-        return True
-    return any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values())
+        result = False
+    else:
+        if normalized_parameter in signature.parameters:
+            result = True
+        else:
+            result = any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values())
+
+    if len(_SIGNATURE_PARAM_CACHE) >= _SIGNATURE_PARAM_CACHE_MAX_SIZE:
+        _SIGNATURE_PARAM_CACHE.clear()
+    _SIGNATURE_PARAM_CACHE[cache_key] = result
+    return result
 
 
 class MemoryRecallTool(Tool):
@@ -458,19 +480,48 @@ class MemoryForgetTool(Tool):
 
         limit = _clamp_int(arguments.get("limit"), default=10, minimum=1, maximum=100)
         dry_run = _coerce_bool(arguments.get("dry_run"), default=False)
+        ref_prefix = _normalize_ref_prefix(ref)
 
-        history_rows = self.memory.all()
-        curated_rows = self.memory.curated()
-        all_rows = history_rows + curated_rows
+        selectors = {
+            "ref": ref,
+            "query": query,
+            "source": source,
+            "dry_run": dry_run,
+        }
 
+        if ref_prefix and not query and not source and not dry_run:
+            deleted = self.memory.delete_by_prefixes([ref_prefix], limit=limit)
+            deleted_ids = [
+                str(item).strip()
+                for item in list(deleted.get("deleted_ids", []))
+                if str(item).strip()
+            ]
+            refs = [_memory_ref(row_id) for row_id in deleted_ids]
+            return _dump_json(
+                {
+                    "status": "ok" if int(deleted.get("deleted_count", 0)) > 0 else "not_found",
+                    "deleted_count": int(deleted.get("deleted_count", 0)),
+                    "history_deleted": int(deleted.get("history_deleted", 0)),
+                    "curated_deleted": int(deleted.get("curated_deleted", 0)),
+                    "limit": limit,
+                    "selectors": selectors,
+                    "refs": refs,
+                }
+            )
+
+        candidate_rows: list[MemoryRecord]
         query_ids: set[str] | None = None
         if query:
             query_matches = self.memory.search(query, limit=100)
             query_ids = {str(item.id or "").strip() for item in query_matches if str(item.id or "").strip()}
+            candidate_rows = list(query_matches)
+        else:
+            history_rows = self.memory.all()
+            curated_rows = self.memory.curated()
+            candidate_rows = history_rows + curated_rows
 
-        ref_prefix = _normalize_ref_prefix(ref)
         candidates = []
-        for row in all_rows:
+        for row in candidate_rows:
             row_id = str(row.id or "").strip()
             if not row_id:
                 continue
@@ -496,12 +547,6 @@ class MemoryForgetTool(Tool):
                 break
 
         refs = [_memory_ref(row_id) for row_id in selected_ids]
-        selectors = {
-            "ref": ref,
-            "query": query,
-            "source": source,
-            "dry_run": dry_run,
-        }
 
         if not selected_ids:
             return _dump_json(
