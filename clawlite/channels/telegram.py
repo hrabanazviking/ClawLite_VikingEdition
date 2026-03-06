@@ -150,6 +150,13 @@ def _is_formatting_error(exc: Exception) -> bool:
     return "can't parse entities" in text or "parse entities" in text
 
 
+def _is_thread_not_found_error(exc: Exception) -> bool:
+    status_code = _status_code_from_exc(exc)
+    if status_code not in {None, 400}:
+        return False
+    return "message thread not found" in _exception_text(exc)
+
+
 def _retry_delay_s(policy: TelegramRetryPolicy, attempt: int) -> float:
     normalized = policy.normalized()
     base = normalized.base_backoff_s * (2 ** max(0, int(attempt) - 1))
@@ -653,6 +660,18 @@ class TelegramChannel(BaseChannel):
         if message_thread_id is None:
             return chat_id
         return f"{chat_id}:{message_thread_id}"
+
+    @staticmethod
+    def _threadless_retry_allowed(*, chat_id: str) -> bool:
+        return not str(chat_id or "").strip().startswith("-")
+
+    def _normalize_api_message_thread_id(self, *, chat_id: str, message_thread_id: Any) -> int | None:
+        thread_id = self._coerce_thread_id(message_thread_id)
+        if thread_id is None:
+            return None
+        if str(chat_id or "").strip().startswith("-") and thread_id == 1:
+            return None
+        return thread_id
 
     @staticmethod
     def _typing_task_is_active(task: asyncio.Task[Any] | None) -> bool:
@@ -2077,7 +2096,7 @@ class TelegramChannel(BaseChannel):
         chat_id: str,
         text: str,
         reply_to_message_id: int | None,
-        message_thread_id: int | None,
+        thread_state: dict[str, int | None],
         reply_markup: Any | None,
         message_ids: list[int],
     ) -> int:
@@ -2105,6 +2124,10 @@ class TelegramChannel(BaseChannel):
                 self._sync_auth_breaker_signal_transition(breaker=self._send_auth_breaker, key_prefix="send")
                 if self._send_auth_breaker.is_open:
                     raise TelegramCircuitOpenError("telegram auth circuit is open")
+                active_thread_id = self._normalize_api_message_thread_id(
+                    chat_id=chat_id,
+                    message_thread_id=thread_state.get("message_thread_id"),
+                )
                 try:
                     payload: dict[str, Any] = {
                         "chat_id": chat_id,
@@ -2114,8 +2137,8 @@ class TelegramChannel(BaseChannel):
                     }
                     if reply_markup is not None:
                         payload["reply_markup"] = reply_markup
-                    if message_thread_id is not None:
-                        payload["message_thread_id"] = message_thread_id
+                    if active_thread_id is not None:
+                        payload["message_thread_id"] = active_thread_id
                     send_result = await asyncio.wait_for(
                         self.bot.send_message(**payload),
                         timeout=max(1.0, float(self.send_timeout_s)),
@@ -2124,8 +2147,9 @@ class TelegramChannel(BaseChannel):
                     self._on_send_auth_success()
                     break
                 except TypeError as exc:
-                    if message_thread_id is None or "message_thread_id" not in str(exc):
+                    if active_thread_id is None or "message_thread_id" not in str(exc):
                         raise
+                    thread_state["message_thread_id"] = None
                     send_result = await asyncio.wait_for(
                         self.bot.send_message(
                             chat_id=chat_id,
@@ -2144,6 +2168,19 @@ class TelegramChannel(BaseChannel):
                         payload_text = chunk
                         payload_parse_mode = None
                         formatting_fallback_used = True
+                        continue
+                    if (
+                        active_thread_id is not None
+                        and self._threadless_retry_allowed(chat_id=chat_id)
+                        and _is_thread_not_found_error(exc)
+                    ):
+                        logger.warning(
+                            "telegram outbound thread not found chat={} chunk={}/{}; retrying without message_thread_id",
+                            chat_id,
+                            idx,
+                            len(chunks),
+                        )
+                        thread_state["message_thread_id"] = None
                         continue
 
                     if _is_auth_failure(exc):
@@ -2179,7 +2216,7 @@ class TelegramChannel(BaseChannel):
         items: list[dict[str, Any]],
         caption_text: str | None,
         reply_to_message_id: int | None,
-        message_thread_id: int | None,
+        thread_state: dict[str, int | None],
         reply_markup: Any | None,
         message_ids: list[int],
     ) -> int:
@@ -2207,6 +2244,10 @@ class TelegramChannel(BaseChannel):
                 self._sync_auth_breaker_signal_transition(breaker=self._send_auth_breaker, key_prefix="send")
                 if self._send_auth_breaker.is_open:
                     raise TelegramCircuitOpenError("telegram auth circuit is open")
+                active_thread_id = self._normalize_api_message_thread_id(
+                    chat_id=chat_id,
+                    message_thread_id=thread_state.get("message_thread_id"),
+                )
                 try:
                     media_payload = await self._resolve_outbound_media_payload(item)
                     payload: dict[str, Any] = {
@@ -2217,8 +2258,8 @@ class TelegramChannel(BaseChannel):
                         payload["reply_to_message_id"] = reply_to_message_id
                     if idx == 1 and reply_markup is not None:
                         payload["reply_markup"] = reply_markup
-                    if message_thread_id is not None:
-                        payload["message_thread_id"] = message_thread_id
+                    if active_thread_id is not None:
+                        payload["message_thread_id"] = active_thread_id
                     if caption_payload is not None:
                         payload["caption"] = caption_payload
                         payload["parse_mode"] = caption_parse_mode
@@ -2230,8 +2271,9 @@ class TelegramChannel(BaseChannel):
                     self._on_send_auth_success()
                     break
                 except TypeError as exc:
-                    if message_thread_id is None or "message_thread_id" not in str(exc):
+                    if active_thread_id is None or "message_thread_id" not in str(exc):
                         raise
+                    thread_state["message_thread_id"] = None
                     media_payload = await self._resolve_outbound_media_payload(item)
                     payload = {
                         "chat_id": chat_id,
@@ -2256,6 +2298,20 @@ class TelegramChannel(BaseChannel):
                         caption_payload = raw_caption
                         caption_parse_mode = None
                         formatting_fallback_used = True
+                        continue
+                    if (
+                        active_thread_id is not None
+                        and self._threadless_retry_allowed(chat_id=chat_id)
+                        and _is_thread_not_found_error(exc)
+                    ):
+                        logger.warning(
+                            "telegram outbound media thread not found chat={} media={}/{} type={}; retrying without message_thread_id",
+                            chat_id,
+                            idx,
+                            len(items),
+                            item["type"],
+                        )
+                        thread_state["message_thread_id"] = None
                         continue
 
                     if _is_auth_failure(exc):
@@ -2482,7 +2538,11 @@ class TelegramChannel(BaseChannel):
 
         if action == "reply" and metadata_payload.get("reply_to_message_id") is None and action_message_id is not None:
             metadata_payload["reply_to_message_id"] = action_message_id
-        message_thread_id = self._coerce_thread_id(metadata_payload.get("message_thread_id", target_thread_id))
+        message_thread_id = self._normalize_api_message_thread_id(
+            chat_id=chat_id,
+            message_thread_id=metadata_payload.get("message_thread_id", target_thread_id),
+        )
+        thread_state: dict[str, int | None] = {"message_thread_id": message_thread_id}
         await self._stop_typing_keepalive(chat_id=chat_id, message_thread_id=message_thread_id)
         reply_to_message_id = metadata_payload.get("reply_to_message_id", metadata_payload.get("message_id"))
         try:
@@ -2500,7 +2560,7 @@ class TelegramChannel(BaseChannel):
                 items=media_items,
                 caption_text=caption_text,
                 reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
+                thread_state=thread_state,
                 reply_markup=None if follow_up_text else reply_markup,
                 message_ids=message_ids,
             )
@@ -2509,7 +2569,7 @@ class TelegramChannel(BaseChannel):
                     chat_id=chat_id,
                     text=follow_up_text,
                     reply_to_message_id=None,
-                    message_thread_id=message_thread_id,
+                    thread_state=thread_state,
                     reply_markup=reply_markup,
                     message_ids=message_ids,
                 )
@@ -2518,7 +2578,7 @@ class TelegramChannel(BaseChannel):
                 chat_id=chat_id,
                 text=text,
                 reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
+                thread_state=thread_state,
                 reply_markup=reply_markup,
                 message_ids=message_ids,
             )
@@ -2530,8 +2590,12 @@ class TelegramChannel(BaseChannel):
                 "message_ids": list(message_ids),
                 "last_message_id": message_ids[-1] if message_ids else 0,
             }
-            if message_thread_id is not None:
-                receipt["message_thread_id"] = message_thread_id
+            final_thread_id = self._normalize_api_message_thread_id(
+                chat_id=chat_id,
+                message_thread_id=thread_state.get("message_thread_id"),
+            )
+            if final_thread_id is not None:
+                receipt["message_thread_id"] = final_thread_id
             if media_items:
                 receipt["media_count"] = len(media_items)
                 receipt["media_types"] = [str(item["type"]) for item in media_items]

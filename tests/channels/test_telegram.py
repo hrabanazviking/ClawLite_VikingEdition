@@ -1755,6 +1755,70 @@ def test_telegram_send_supports_message_thread_id_from_target() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_send_retries_without_thread_when_dm_thread_is_not_found() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class ThreadNotFoundError(RuntimeError):
+            status_code = 400
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise ThreadNotFoundError("400: Bad Request: message thread not found")
+                return SimpleNamespace(message_id=101)
+
+        bot = FakeBot()
+        channel.bot = bot
+        metadata: dict[str, object] = {"message_thread_id": 9}
+
+        out = await channel.send(target="42", text="hello", metadata=metadata)
+
+        assert out == "telegram:sent:1"
+        assert len(bot.calls) == 2
+        assert bot.calls[0]["message_thread_id"] == 9
+        assert "message_thread_id" not in bot.calls[1]
+        receipt = metadata.get("_delivery_receipt")
+        assert isinstance(receipt, dict)
+        assert "message_thread_id" not in receipt
+        assert channel.signals()["send_retry_count"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_omits_general_topic_thread_id_for_group_target() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(message_id=201)
+
+        bot = FakeBot()
+        channel.bot = bot
+        metadata: dict[str, object] = {"message_thread_id": 1}
+
+        out = await channel.send(target="-100123", text="hello", metadata=metadata)
+
+        assert out == "telegram:sent:1"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["chat_id"] == "-100123"
+        assert "message_thread_id" not in bot.calls[0]
+        receipt = metadata.get("_delivery_receipt")
+        assert isinstance(receipt, dict)
+        assert "message_thread_id" not in receipt
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_populates_delivery_receipt_for_chunked_send() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(config={"token": "x:token"})
@@ -1906,6 +1970,44 @@ def test_telegram_send_retries_without_thread_kwarg_on_old_library() -> None:
         assert len(bot.calls) == 2
         assert "message_thread_id" in bot.calls[0]
         assert "message_thread_id" not in bot.calls[1]
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_media_retries_without_thread_when_dm_thread_is_not_found() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class ThreadNotFoundError(RuntimeError):
+            status_code = 400
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.photo_calls: list[dict] = []
+
+            async def send_photo(self, **kwargs):
+                self.photo_calls.append(kwargs)
+                if len(self.photo_calls) == 1:
+                    raise ThreadNotFoundError("400: Bad Request: message thread not found")
+                return SimpleNamespace(message_id=301)
+
+        bot = FakeBot()
+        channel.bot = bot
+        metadata: dict[str, object] = {
+            "message_thread_id": 7,
+            "media": [{"type": "photo", "file_id": "photo-1"}],
+        }
+
+        out = await channel.send(target="42", text="hello", metadata=metadata)
+
+        assert out == "telegram:sent:1"
+        assert len(bot.photo_calls) == 2
+        assert bot.photo_calls[0]["message_thread_id"] == 7
+        assert "message_thread_id" not in bot.photo_calls[1]
+        receipt = metadata.get("_delivery_receipt")
+        assert isinstance(receipt, dict)
+        assert "message_thread_id" not in receipt
+        assert channel.signals()["send_retry_count"] == 0
 
     asyncio.run(_scenario())
 
