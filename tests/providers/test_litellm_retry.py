@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from clawlite.providers.litellm import LiteLLMProvider
+from clawlite.providers.reliability import QUOTA_429_SIGNALS
 
 
 class _FakeResponse:
@@ -234,3 +235,50 @@ def test_litellm_provider_diagnostics_contract_and_secret_safety() -> None:
     assert "api_key" not in encoded
     assert "access_token" not in encoded
     assert "test_api_key_value" not in encoded
+
+
+def test_litellm_provider_reuses_single_async_client_across_retries() -> None:
+    async def _scenario() -> None:
+        provider = LiteLLMProvider(
+            base_url="https://api.example/v1",
+            api_key="k",
+            model="gpt-test",
+            retry_max_attempts=3,
+            retry_initial_backoff_s=0,
+            retry_max_backoff_s=0,
+            retry_jitter_s=0,
+        )
+
+        responses = [
+            _FakeResponse(502, {"error": {"message": "bad gateway"}}),
+            _FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+        ]
+
+        class _Client:
+            instances = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                _Client.instances += 1
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return responses.pop(0)
+
+        with patch("httpx.AsyncClient", _Client):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "ok"
+        assert _Client.instances == 1
+
+    asyncio.run(_scenario())
+
+
+def test_litellm_provider_uses_shared_quota_signal_source() -> None:
+    assert not hasattr(LiteLLMProvider, "_HARD_QUOTA_SIGNALS")
+    assert "insufficient_quota" in QUOTA_429_SIGNALS
+    assert LiteLLMProvider._is_hard_quota_429(detail="billing exhausted", resp=None) is True

@@ -5,6 +5,7 @@ import asyncio
 from clawlite.providers.codex import CodexProvider
 from clawlite.providers.failover import FailoverProvider
 from clawlite.providers.litellm import LiteLLMProvider
+from clawlite.providers import registry as registry_mod
 from clawlite.providers.registry import build_provider, resolve_litellm_provider
 
 
@@ -204,3 +205,13 @@ def test_build_provider_does_not_wrap_with_failover_when_same_model() -> None:
         }
     )
     assert isinstance(provider, LiteLLMProvider)
+
+
+def test_resolve_litellm_provider_raises_explicit_error_without_specs(monkeypatch) -> None:
+    monkeypatch.setattr(registry_mod, "SPECS", ())
+    try:
+        resolve_litellm_provider(model="openai/gpt-4.1-mini", api_key="", base_url="")
+    except RuntimeError as exc:
+        assert str(exc) == "provider_registry_error:missing_default_spec:openai"
+    else:
+        raise AssertionError("expected explicit provider registry error")

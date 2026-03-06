@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 
 
-_QUOTA_429_SIGNALS = (
+QUOTA_429_SIGNALS = (
     "insufficient_quota",
     "quota exceeded",
     "quota_exceeded",
@@ -34,7 +36,16 @@ def parse_retry_after_seconds(header_value: str | None) -> float | None:
     try:
         value = float(raw)
     except ValueError:
-        return None
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        delay = (parsed - datetime.now(timezone.utc)).total_seconds()
+        if delay < 0:
+            return 0.0
+        return delay
     if value < 0:
         return None
     return value
@@ -57,7 +68,7 @@ def is_quota_429_error(error_message: str) -> bool:
     lowered = str(error_message or "").lower()
     if not lowered:
         return False
-    return any(token in lowered for token in _QUOTA_429_SIGNALS)
+    return any(token in lowered for token in QUOTA_429_SIGNALS)
 
 
 def is_retryable_error(error_message: str) -> bool:

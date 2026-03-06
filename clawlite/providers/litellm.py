@@ -10,23 +10,10 @@ import httpx
 from json_repair import loads as json_repair_loads
 
 from clawlite.providers.base import LLMProvider, LLMResult, ToolCall
-from clawlite.providers.reliability import ReliabilitySettings, classify_provider_error, parse_retry_after_seconds
+from clawlite.providers.reliability import QUOTA_429_SIGNALS, ReliabilitySettings, classify_provider_error, parse_retry_after_seconds
 
 
 class LiteLLMProvider(LLMProvider):
-    _HARD_QUOTA_SIGNALS = (
-        "insufficient_quota",
-        "quota exceeded",
-        "quota_exceeded",
-        "exceeded your current quota",
-        "billing hard limit",
-        "billing_hard_limit",
-        "credit balance is too low",
-        "out of credits",
-        "payment required",
-        "billing exhausted",
-    )
-
     def __init__(
         self,
         *,
@@ -216,7 +203,7 @@ class LiteLLMProvider(LLMProvider):
         haystack = " ".join(pieces).lower()
         if not haystack:
             return False
-        return any(signal in haystack for signal in cls._HARD_QUOTA_SIGNALS)
+        return any(signal in haystack for signal in QUOTA_429_SIGNALS)
 
     @staticmethod
     def _parse_arguments(raw: Any) -> dict[str, Any]:
@@ -383,85 +370,85 @@ class LiteLLMProvider(LLMProvider):
         url = f"{self.base_url}/messages"
         attempts = self.reliability.retry_max_attempts
 
-        for attempt in range(1, attempts + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(1, attempts + 1):
+                try:
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
 
-                parts = data.get("content")
-                text_parts: list[str] = []
-                tool_calls: list[ToolCall] = []
-                if isinstance(parts, list):
-                    for idx, part in enumerate(parts):
-                        if not isinstance(part, dict):
-                            continue
-                        if part.get("type") == "text":
-                            text = str(part.get("text") or "").strip()
-                            if text:
-                                text_parts.append(text)
-                        if part.get("type") == "tool_use":
-                            name = str(part.get("name") or "").strip()
-                            if not name:
+                    parts = data.get("content")
+                    text_parts: list[str] = []
+                    tool_calls: list[ToolCall] = []
+                    if isinstance(parts, list):
+                        for idx, part in enumerate(parts):
+                            if not isinstance(part, dict):
                                 continue
-                            tool_calls.append(
-                                ToolCall(
-                                    id=str(part.get("id") or f"tool_{idx}"),
-                                    name=name,
-                                    arguments=part.get("input") if isinstance(part.get("input"), dict) else {},
+                            if part.get("type") == "text":
+                                text = str(part.get("text") or "").strip()
+                                if text:
+                                    text_parts.append(text)
+                            if part.get("type") == "tool_use":
+                                name = str(part.get("name") or "").strip()
+                                if not name:
+                                    continue
+                                tool_calls.append(
+                                    ToolCall(
+                                        id=str(part.get("id") or f"tool_{idx}"),
+                                        name=name,
+                                        arguments=part.get("input") if isinstance(part.get("input"), dict) else {},
+                                    )
                                 )
-                            )
 
-                self._record_success()
-                return LLMResult(
-                    text="\n".join(text_parts).strip(),
-                    model=self.model,
-                    tool_calls=tool_calls,
-                    metadata={"provider": "anthropic"},
-                )
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                detail = self._error_detail(exc.response)
-                self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
-                hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
-                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
-                should_retry = (
-                    status is not None
-                    and (status == 429 or 500 <= status <= 599)
-                    and not hard_quota
-                    and attempt < attempts
-                )
-                if should_retry:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
-                    continue
-                if detail:
-                    error = f"provider_http_error:{status}:{detail}"
+                    self._record_success()
+                    return LLMResult(
+                        text="\n".join(text_parts).strip(),
+                        model=self.model,
+                        tool_calls=tool_calls,
+                        metadata={"provider": "anthropic"},
+                    )
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    detail = self._error_detail(exc.response)
+                    self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                    hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
+                    retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
+                    should_retry = (
+                        status is not None
+                        and (status == 429 or 500 <= status <= 599)
+                        and not hard_quota
+                        and attempt < attempts
+                    )
+                    if should_retry:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
+                        continue
+                    if detail:
+                        error = f"provider_http_error:{status}:{detail}"
+                        self._record_failure(error=error, status_code=status)
+                        raise RuntimeError(error) from exc
+                    error = f"provider_http_error:{status}"
                     self._record_failure(error=error, status_code=status)
                     raise RuntimeError(error) from exc
-                error = f"provider_http_error:{status}"
-                self._record_failure(error=error, status_code=status)
-                raise RuntimeError(error) from exc
-            except httpx.TimeoutException as exc:
-                self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"provider_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
-            except httpx.RequestError as exc:
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"provider_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
+                except httpx.TimeoutException as exc:
+                    self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"provider_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
+                except httpx.RequestError as exc:
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"provider_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
 
         error = "provider_429_exhausted"
         self._record_failure(error=error, status_code=429)
@@ -529,59 +516,59 @@ class LiteLLMProvider(LLMProvider):
 
         attempts = self.reliability.retry_max_attempts
 
-        for attempt in range(1, attempts + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(1, attempts + 1):
+                try:
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
-                message = data.get("choices", [{}])[0].get("message", {})
-                text = self._extract_text(message.get("content", ""))
-                tool_calls = self._parse_tool_calls(message)
-                self._record_success()
-                return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "litellm"})
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                detail = self._error_detail(exc.response)
-                self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
-                hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
-                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
-                should_retry = (
-                    status is not None
-                    and (status == 429 or 500 <= status <= 599)
-                    and not hard_quota
-                    and attempt < attempts
-                )
-                if should_retry:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
-                    continue
-                if detail:
-                    error = f"provider_http_error:{status}:{detail}"
+                    message = data.get("choices", [{}])[0].get("message", {})
+                    text = self._extract_text(message.get("content", ""))
+                    tool_calls = self._parse_tool_calls(message)
+                    self._record_success()
+                    return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "litellm"})
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    detail = self._error_detail(exc.response)
+                    self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                    hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
+                    retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
+                    should_retry = (
+                        status is not None
+                        and (status == 429 or 500 <= status <= 599)
+                        and not hard_quota
+                        and attempt < attempts
+                    )
+                    if should_retry:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
+                        continue
+                    if detail:
+                        error = f"provider_http_error:{status}:{detail}"
+                        self._record_failure(error=error, status_code=status)
+                        raise RuntimeError(error) from exc
+                    error = f"provider_http_error:{status}"
                     self._record_failure(error=error, status_code=status)
                     raise RuntimeError(error) from exc
-                error = f"provider_http_error:{status}"
-                self._record_failure(error=error, status_code=status)
-                raise RuntimeError(error) from exc
-            except httpx.TimeoutException as exc:
-                self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"provider_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
-            except httpx.RequestError as exc:
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"provider_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
+                except httpx.TimeoutException as exc:
+                    self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"provider_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
+                except httpx.RequestError as exc:
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"provider_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
 
         error = "provider_429_exhausted"
         self._record_failure(error=error, status_code=429)

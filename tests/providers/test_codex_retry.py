@@ -202,3 +202,42 @@ def test_codex_provider_diagnostics_contract_and_secret_safety() -> None:
     encoded = json.dumps(diag).lower()
     assert "access_token" not in encoded
     assert "test_access_token_value" not in encoded
+
+
+def test_codex_provider_reuses_single_async_client_across_retries() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(
+            model="codex-5.3",
+            access_token="token",
+            retry_max_attempts=3,
+            retry_initial_backoff_s=0,
+            retry_max_backoff_s=0,
+            retry_jitter_s=0,
+        )
+        responses = [
+            _FakeResponse(503, {}),
+            _FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+        ]
+
+        class _Client:
+            instances = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                _Client.instances += 1
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, *args, **kwargs):
+                return responses.pop(0)
+
+        with patch("httpx.AsyncClient", _Client):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "ok"
+        assert _Client.instances == 1
+
+    asyncio.run(_scenario())

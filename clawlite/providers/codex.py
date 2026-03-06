@@ -206,48 +206,48 @@ class CodexProvider(LLMProvider):
         attempts = self.reliability.retry_max_attempts
         url = f"{self.base_url}/chat/completions"
 
-        for attempt in range(1, attempts + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(1, attempts + 1):
+                try:
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
-                message = data.get("choices", [{}])[0].get("message", {})
-                text = str(message.get("content", "")).strip()
-                tool_calls = self._parse_tool_calls(message)
-                self._record_success()
-                return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "codex"})
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
-                should_retry = status is not None and (status == 429 or 500 <= status <= 599) and attempt < attempts
-                retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
-                if should_retry:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
-                    continue
-                error = f"codex_http_error:{status}"
-                self._record_failure(error=error, status_code=status)
-                raise RuntimeError(error) from exc
-            except httpx.TimeoutException as exc:
-                self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"codex_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
-            except httpx.RequestError as exc:
-                self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
-                if attempt < attempts:
-                    self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
-                    await asyncio.sleep(self._retry_delay(attempt))
-                    continue
-                error = f"codex_network_error:{exc}"
-                self._record_failure(error=error)
-                raise RuntimeError(error) from exc
+                    message = data.get("choices", [{}])[0].get("message", {})
+                    text = str(message.get("content", "")).strip()
+                    tool_calls = self._parse_tool_calls(message)
+                    self._record_success()
+                    return LLMResult(text=text, model=self.model, tool_calls=tool_calls, metadata={"provider": "codex"})
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                    should_retry = status is not None and (status == 429 or 500 <= status <= 599) and attempt < attempts
+                    retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
+                    if should_retry:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
+                        continue
+                    error = f"codex_http_error:{status}"
+                    self._record_failure(error=error, status_code=status)
+                    raise RuntimeError(error) from exc
+                except httpx.TimeoutException as exc:
+                    self._diagnostics["timeouts"] = int(self._diagnostics["timeouts"]) + 1
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"codex_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
+                except httpx.RequestError as exc:
+                    self._diagnostics["network_errors"] = int(self._diagnostics["network_errors"]) + 1
+                    if attempt < attempts:
+                        self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    error = f"codex_network_error:{exc}"
+                    self._record_failure(error=error)
+                    raise RuntimeError(error) from exc
 
         error = "codex_429_exhausted"
         self._record_failure(error=error, status_code=429)

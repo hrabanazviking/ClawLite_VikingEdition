@@ -322,7 +322,8 @@ def resolve_litellm_provider(
 ) -> ProviderResolution:
     name = detect_provider_name(model, api_key=api_key, base_url=base_url, provider_name=provider_name)
     spec = _find_spec(name) or _find_spec("openai")
-    assert spec is not None
+    if spec is None:
+        raise RuntimeError("provider_registry_error:missing_default_spec:openai")
 
     resolved_api_key = _resolve_api_key(spec, api_key)
     resolved_base_url = _resolve_base_url(spec, base_url)
