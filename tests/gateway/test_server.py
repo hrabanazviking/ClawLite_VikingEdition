@@ -717,8 +717,78 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         body = root.text
         assert "<h1>ClawLite Gateway</h1>" in body
         assert "GET /v1/status, GET /api/status" in body
+        assert "GET /v1/tools/catalog, GET /api/tools/catalog" in body
         assert "POST /v1/chat, POST /api/message" in body
         assert "WS /v1/ws, WS /ws" in body
+
+
+def test_gateway_tools_catalog_http_endpoints_return_expected_shape(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        v1_payload = client.get("/v1/tools/catalog").json()
+        api_payload = client.get("/api/tools/catalog").json()
+
+    for payload in (v1_payload, api_payload):
+        assert isinstance(payload["contract_version"], str) and payload["contract_version"]
+        assert isinstance(payload["tool_count"], int) and payload["tool_count"] > 0
+        assert isinstance(payload["aliases"], dict)
+        assert isinstance(payload["groups"], list) and payload["groups"]
+        assert isinstance(payload["ws_methods"], list)
+        assert "tools.catalog" in payload["ws_methods"]
+
+        aliases = payload["aliases"]
+        assert aliases["bash"] == "exec"
+        assert aliases["apply-patch"] == "apply_patch"
+        assert aliases["read_file"] == "read"
+        assert aliases["write_file"] == "write"
+        assert aliases["edit_file"] == "edit"
+        assert aliases["memory_recall"] == "memory_search"
+
+        total_tools = 0
+        for group in payload["groups"]:
+            assert isinstance(group["id"], str) and group["id"]
+            assert isinstance(group["label"], str) and group["label"]
+            assert isinstance(group["tools"], list) and group["tools"]
+            tool_ids = [tool["id"] for tool in group["tools"]]
+            assert tool_ids == sorted(tool_ids)
+            for tool in group["tools"]:
+                assert isinstance(tool["id"], str) and tool["id"]
+                assert isinstance(tool["label"], str) and tool["label"]
+                assert isinstance(tool["description"], str)
+            total_tools += len(group["tools"])
+
+        assert total_tools == payload["tool_count"]
+
+    assert {k: v for k, v in api_payload.items() if k != "schema"} == {
+        k: v for k, v in v1_payload.items() if k != "schema"
+    }
+
+
+def test_gateway_tools_catalog_include_schema_matches_tool_count(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        snake_payload = client.get("/v1/tools/catalog?include_schema=true").json()
+        camel_payload = client.get("/api/tools/catalog?includeSchema=true").json()
+
+    for payload in (snake_payload, camel_payload):
+        assert isinstance(payload["schema"], list)
+        assert len(payload["schema"]) == payload["tool_count"]
+        schema_names = [str(row.get("name", "")) for row in payload["schema"]]
+        assert schema_names == sorted(schema_names)
 
 
 def test_gateway_chat_provider_error_returns_graceful_message(tmp_path: Path) -> None:
@@ -1143,6 +1213,16 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         assert unauthorized_token.json()["error"] == "gateway_auth_required"
         assert unauthorized_token.json()["code"] == "gateway_auth_required"
 
+        unauthorized_tools_catalog = client.get("/v1/tools/catalog")
+        assert unauthorized_tools_catalog.status_code == 401
+        assert unauthorized_tools_catalog.json()["error"] == "gateway_auth_required"
+        assert unauthorized_tools_catalog.json()["code"] == "gateway_auth_required"
+
+        unauthorized_tools_catalog_alias = client.get("/api/tools/catalog")
+        assert unauthorized_tools_catalog_alias.status_code == 401
+        assert unauthorized_tools_catalog_alias.json()["error"] == "gateway_auth_required"
+        assert unauthorized_tools_catalog_alias.json()["code"] == "gateway_auth_required"
+
         ok = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
         assert ok.status_code == 200
         payload = ok.json()
@@ -1165,6 +1245,12 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         assert token_payload["token_configured"] is True
         assert token_payload["token_masked"] == "********oken"
         assert token_payload["token_masked"] != "secret-token"
+
+        tools_catalog = client.get("/v1/tools/catalog", headers={"Authorization": "Bearer secret-token"})
+        assert tools_catalog.status_code == 200
+        tools_catalog_alias = client.get("/api/tools/catalog", headers={"Authorization": "Bearer secret-token"})
+        assert tools_catalog_alias.status_code == 200
+        assert tools_catalog_alias.json() == tools_catalog.json()
 
 
 def test_gateway_auth_auto_hardens_on_non_loopback_with_token(tmp_path: Path) -> None:
@@ -1460,6 +1546,15 @@ def test_gateway_ws_req_res_openclaw_compatibility_methods(tmp_path: Path) -> No
             assert status_payload["result"]["contract_version"] == "2026-03-04"
             assert "components" in status_payload["result"]
             assert "auth" in status_payload["result"]
+
+            socket.send_json({"type": "req", "id": "tc1", "method": "tools.catalog", "params": {}})
+            tools_catalog_payload = socket.receive_json()
+            assert tools_catalog_payload["type"] == "res"
+            assert tools_catalog_payload["id"] == "tc1"
+            assert tools_catalog_payload["ok"] is True
+            assert "groups" in tools_catalog_payload["result"]
+            assert tools_catalog_payload["result"]["aliases"]["bash"] == "exec"
+            assert "tools.catalog" in tools_catalog_payload["result"]["ws_methods"]
 
             socket.send_json(
                 {

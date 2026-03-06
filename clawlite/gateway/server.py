@@ -31,6 +31,7 @@ from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
 from clawlite.session.store import SessionStore
 from clawlite.runtime import AutonomyWakeCoordinator
+from clawlite.gateway.tool_catalog import build_tools_catalog_payload, parse_include_schema_flag
 from clawlite.tools.cron import CronTool
 from clawlite.tools.apply_patch import ApplyPatchTool
 from clawlite.tools.exec import ExecTool
@@ -473,6 +474,7 @@ ROOT_ENTRYPOINT_HTML = """<!doctype html>
     <ul>
       <li>GET /health</li>
       <li>GET /v1/status, GET /api/status</li>
+      <li>GET /v1/tools/catalog, GET /api/tools/catalog</li>
       <li>POST /v1/chat, POST /api/message</li>
       <li>GET /api/token</li>
       <li>WS /v1/ws, WS /ws</li>
@@ -2399,6 +2401,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def api_message(req: ChatRequest, request: Request) -> ChatResponse:
         return await _chat_handler(req, request)
 
+    async def _tools_catalog_handler(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        include_schema = parse_include_schema_flag(request.query_params)
+        return build_tools_catalog_payload(runtime.engine.tools.schema(), include_schema=include_schema)
+
+    @app.get("/v1/tools/catalog")
+    async def tools_catalog(request: Request) -> dict[str, Any]:
+        return await _tools_catalog_handler(request)
+
+    @app.get("/api/tools/catalog")
+    async def api_tools_catalog(request: Request) -> dict[str, Any]:
+        return await _tools_catalog_handler(request)
+
     @app.get("/api/token")
     async def api_token(request: Request) -> dict[str, Any]:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
@@ -2667,6 +2682,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                                     "id": request_id,
                                     "ok": True,
                                     "result": status_payload,
+                                }
+                            )
+                            continue
+                        if normalized_method == "tools.catalog":
+                            include_schema = parse_include_schema_flag(params)
+                            await _send_ws(
+                                {
+                                    "type": "res",
+                                    "id": request_id,
+                                    "ok": True,
+                                    "result": build_tools_catalog_payload(
+                                        runtime.engine.tools.schema(),
+                                        include_schema=include_schema,
+                                    ),
                                 }
                             )
                             continue
