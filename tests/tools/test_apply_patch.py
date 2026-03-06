@@ -97,6 +97,47 @@ def test_apply_patch_move_file_success(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_apply_patch_atomic_write_preserves_add_update_move_outputs(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        update_target = tmp_path / "update.txt"
+        update_target.write_text("one\ntwo\n", encoding="utf-8")
+        move_source = tmp_path / "move.txt"
+        move_source.write_text("left\n", encoding="utf-8")
+
+        tool = ApplyPatchTool(workspace_path=tmp_path, restrict_to_workspace=True)
+        patch = "\n".join(
+            [
+                "*** Begin Patch",
+                "*** Add File: added.txt",
+                "+added",
+                "*** Update File: update.txt",
+                "@@",
+                "-two",
+                "+three",
+                "*** Update File: move.txt",
+                "*** Move to: moved/renamed.txt",
+                "@@",
+                "-left",
+                "+right",
+                "*** End Patch",
+            ]
+        )
+
+        result = await tool.run({"input": patch}, ToolContext(session_id="s"))
+        assert result == (
+            "Success. Updated the following files:\n"
+            "A added.txt\n"
+            "M update.txt\n"
+            "M moved/renamed.txt"
+        )
+        assert (tmp_path / "added.txt").read_text(encoding="utf-8") == "added\n"
+        assert update_target.read_text(encoding="utf-8") == "one\nthree\n"
+        assert not move_source.exists()
+        assert (tmp_path / "moved" / "renamed.txt").read_text(encoding="utf-8") == "right\n"
+
+    asyncio.run(_scenario())
+
+
 def test_apply_patch_malformed_patch_rejected(tmp_path: Path) -> None:
     async def _scenario() -> None:
         tool = ApplyPatchTool(workspace_path=tmp_path, restrict_to_workspace=True)

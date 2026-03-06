@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from clawlite.tools.base import Tool, ToolContext
@@ -82,7 +84,7 @@ class ApplyPatchTool(Tool):
                 if target.exists():
                     raise ValueError(f"Invalid patch: add target already exists '{op.path}'")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(op.content, encoding="utf-8")
+                self._write_text_atomic(target, op.content)
                 added.append(self._relative(target))
                 continue
 
@@ -108,12 +110,12 @@ class ApplyPatchTool(Tool):
                 if move_target.exists() and move_target != target:
                     raise ValueError(f"Invalid patch: move target already exists '{op.move_to}'")
                 move_target.parent.mkdir(parents=True, exist_ok=True)
-                move_target.write_text(updated, encoding="utf-8")
+                self._write_text_atomic(move_target, updated)
                 if move_target != target:
                     target.unlink()
                 final_target = move_target
             else:
-                target.write_text(updated, encoding="utf-8")
+                self._write_text_atomic(target, updated)
 
             modified.append(self._relative(final_target))
 
@@ -137,6 +139,23 @@ class ApplyPatchTool(Tool):
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.workspace_path).as_posix()
+
+    @staticmethod
+    def _write_text_atomic(target: Path, content: str) -> None:
+        fd, temp_path = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+        temp_target = Path(temp_path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_target, target)
+        except Exception:
+            try:
+                temp_target.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     def _parse_patch(self, patch_text: str) -> list[PatchOp]:
         lines = patch_text.splitlines()
