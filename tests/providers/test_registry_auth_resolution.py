@@ -194,6 +194,32 @@ def test_build_provider_wraps_with_failover_when_fallback_model_is_configured() 
         }
     )
     assert isinstance(provider, FailoverProvider)
+    assert provider.diagnostics()["fallback_models"] == ["openai/gpt-4o-mini"]
+
+
+def test_build_provider_wraps_with_multi_hop_failover_when_fallback_models_are_configured() -> None:
+    provider = build_provider(
+        {
+            "model": "openai/gpt-4.1-mini",
+            "fallback_models": [
+                "openrouter/openai/gpt-4o-mini",
+                "groq/llama-3.3-70b-versatile",
+                "openai/gpt-4.1-mini",
+            ],
+            "providers": {
+                "litellm": {"api_key": "sk-test", "base_url": "https://api.openai.com/v1"},
+                "openrouter": {"api_key": "sk-or-test", "api_base": "https://openrouter.ai/api/v1"},
+                "groq": {"api_key": "gsk_test", "api_base": "https://api.groq.com/openai/v1"},
+            },
+        }
+    )
+    assert isinstance(provider, FailoverProvider)
+    diag = provider.diagnostics()
+    assert diag["candidate_count"] == 3
+    assert diag["fallback_models"] == [
+        "openrouter/openai/gpt-4o-mini",
+        "groq/llama-3.3-70b-versatile",
+    ]
 
 
 def test_build_provider_does_not_wrap_with_failover_when_same_model() -> None:

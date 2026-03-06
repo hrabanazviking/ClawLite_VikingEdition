@@ -7,7 +7,7 @@ from typing import Any
 from clawlite.providers.base import LLMProvider
 from clawlite.providers.codex import CodexProvider
 from clawlite.providers.custom import CustomProvider
-from clawlite.providers.failover import FailoverProvider
+from clawlite.providers.failover import FailoverCandidate, FailoverProvider
 from clawlite.providers.litellm import LiteLLMProvider
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -395,6 +395,31 @@ def _reliability_settings(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fallback_models(config: dict[str, Any]) -> list[str]:
+    primary_model = str(config.get("model", "") or "").strip()
+    rows: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        model_name = str(value or "").strip()
+        if not model_name or model_name == primary_model or model_name in seen:
+            return
+        seen.add(model_name)
+        rows.append(model_name)
+
+    _add(config.get("fallback_model", config.get("fallbackModel", "")))
+
+    raw_list = config.get("fallback_models", config.get("fallbackModels", config.get("fallbacks", [])))
+    if isinstance(raw_list, str):
+        for item in raw_list.split(","):
+            _add(item)
+    elif isinstance(raw_list, list):
+        for item in raw_list:
+            _add(item)
+
+    return rows
+
+
 def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
     model = str(config.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash").strip()
     model_lower = model.lower()
@@ -448,13 +473,18 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
 
 def build_provider(config: dict[str, Any]) -> LLMProvider:
     primary = _build_provider_single(config)
-    model = str(config.get("model", "") or "").strip()
-    fallback_model = str(config.get("fallback_model", config.get("fallbackModel", "")) or "").strip()
-    if not fallback_model or fallback_model == model:
+    fallback_models = _fallback_models(config)
+    if not fallback_models:
         return primary
 
-    fallback_config = dict(config)
-    fallback_config["model"] = fallback_model
-    fallback_config["fallback_model"] = ""
-    fallback = _build_provider_single(fallback_config)
-    return FailoverProvider(primary=primary, fallback=fallback, fallback_model=fallback_model)
+    candidates = [FailoverCandidate(provider=primary, model=primary.get_default_model())]
+    for fallback_model in fallback_models:
+        fallback_config = dict(config)
+        fallback_config["model"] = fallback_model
+        fallback_config["fallback_model"] = ""
+        fallback_config["fallback_models"] = []
+        fallback_config["fallbackModels"] = []
+        fallback_config["fallbacks"] = []
+        fallback = _build_provider_single(fallback_config)
+        candidates.append(FailoverCandidate(provider=fallback, model=fallback_model))
+    return FailoverProvider(candidates=candidates, fallback_model=fallback_models[0])

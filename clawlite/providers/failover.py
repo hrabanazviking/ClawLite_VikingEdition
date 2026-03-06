@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from clawlite.providers.base import LLMProvider, LLMResult
@@ -11,23 +12,44 @@ class FailoverCooldownError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class FailoverCandidate:
+    provider: LLMProvider
+    model: str
+    cooldown_until: float = 0.0
+
+
 class FailoverProvider(LLMProvider):
     def __init__(
         self,
         *,
-        primary: LLMProvider,
-        fallback: LLMProvider,
-        fallback_model: str,
+        primary: LLMProvider | None = None,
+        fallback: LLMProvider | None = None,
+        fallback_model: str = "",
+        candidates: list[FailoverCandidate] | None = None,
         cooldown_seconds: float = 30.0,
         now_fn: Any | None = None,
     ) -> None:
-        self.primary = primary
-        self.fallback = fallback
-        self.fallback_model = str(fallback_model).strip()
+        resolved_candidates = list(candidates or [])
+        if not resolved_candidates:
+            if primary is None:
+                raise ValueError("primary provider is required")
+            resolved_candidates.append(FailoverCandidate(provider=primary, model=primary.get_default_model()))
+            if fallback is not None:
+                label = str(fallback_model).strip() or fallback.get_default_model()
+                resolved_candidates.append(FailoverCandidate(provider=fallback, model=label))
+        elif primary is not None or fallback is not None:
+            raise ValueError("pass either primary/fallback or candidates, not both")
+
+        if not resolved_candidates:
+            raise ValueError("at least one provider candidate is required")
+
+        self._candidates = resolved_candidates
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
         self._now_fn = now_fn or time.monotonic
-        self._primary_cooldown_until = 0.0
-        self._fallback_cooldown_until = 0.0
+        self.fallback_model = str(fallback_model).strip() or (
+            self._candidates[1].model if len(self._candidates) > 1 else ""
+        )
         self._diagnostics: dict[str, Any] = {
             "fallback_attempts": 0,
             "fallback_success": 0,
@@ -42,85 +64,143 @@ class FailoverProvider(LLMProvider):
             "primary_skipped_due_cooldown": 0,
             "fallback_skipped_due_cooldown": 0,
             "both_in_cooldown_fail_fast": 0,
+            "auth_unavailable_activations": 0,
         }
+
+    @property
+    def primary(self) -> LLMProvider:
+        return self._candidates[0].provider
+
+    @property
+    def fallback(self) -> LLMProvider | None:
+        if len(self._candidates) <= 1:
+            return None
+        return self._candidates[1].provider
 
     def _now(self) -> float:
         return float(self._now_fn())
 
-    def _cooldown_remaining(self, *, target: str, now: float | None = None) -> float:
+    def _cooldown_remaining(self, *, index: int, now: float | None = None) -> float:
         cursor = self._now() if now is None else float(now)
-        if target == "primary":
-            until = self._primary_cooldown_until
-        else:
-            until = self._fallback_cooldown_until
-        return max(0.0, float(until) - cursor)
+        candidate = self._candidates[index]
+        return max(0.0, float(candidate.cooldown_until) - cursor)
 
-    def _activate_cooldown(self, *, target: str, now: float | None = None) -> None:
+    def _activate_cooldown(self, *, index: int, now: float | None = None) -> None:
         if self.cooldown_seconds <= 0:
             return
         cursor = self._now() if now is None else float(now)
-        until = cursor + self.cooldown_seconds
-        if target == "primary":
-            self._primary_cooldown_until = until
+        self._candidates[index].cooldown_until = cursor + self.cooldown_seconds
+        if index == 0:
             self._diagnostics["primary_cooldown_activations"] = int(self._diagnostics["primary_cooldown_activations"]) + 1
-            return
-        self._fallback_cooldown_until = until
-        self._diagnostics["fallback_cooldown_activations"] = int(self._diagnostics["fallback_cooldown_activations"]) + 1
+        else:
+            self._diagnostics["fallback_cooldown_activations"] = int(self._diagnostics["fallback_cooldown_activations"]) + 1
 
-    def _both_cooling_error(self, *, primary_remaining: float, fallback_remaining: float) -> FailoverCooldownError:
-        message = (
-            "provider_failover_cooldown:both_providers_cooling_down:"
-            f"primary_remaining_s={primary_remaining:.3f}:"
-            f"fallback_remaining_s={fallback_remaining:.3f}"
+    def _all_in_cooldown_error(self, *, remaining: list[tuple[int, float]]) -> FailoverCooldownError:
+        formatted = ",".join(
+            f"{self._candidates[index].model}:{seconds:.3f}"
+            for index, seconds in remaining
         )
+        message = f"provider_failover_cooldown:all_candidates_cooling_down:{formatted}"
         return FailoverCooldownError(message)
+
+    @staticmethod
+    def _sanitize(row: dict[str, Any]) -> dict[str, Any]:
+        blocked = {"api_key", "access_token", "token", "authorization", "auth", "credential", "credentials"}
+        sanitized: dict[str, Any] = {}
+        for key, value in row.items():
+            key_text = str(key).strip()
+            if any(marker in key_text.lower() for marker in blocked):
+                continue
+            sanitized[key_text] = value
+        return sanitized
 
     def diagnostics(self) -> dict[str, Any]:
         now = self._now()
-        primary_remaining = self._cooldown_remaining(target="primary", now=now)
-        fallback_remaining = self._cooldown_remaining(target="fallback", now=now)
         counters = dict(self._diagnostics)
+        primary_remaining = self._cooldown_remaining(index=0, now=now)
         counters["primary_cooldown_remaining_s"] = round(primary_remaining, 3)
-        counters["fallback_cooldown_remaining_s"] = round(fallback_remaining, 3)
         counters["primary_in_cooldown"] = primary_remaining > 0
-        counters["fallback_in_cooldown"] = fallback_remaining > 0
-        payload = {
+        if len(self._candidates) > 1:
+            first_fallback_remaining = self._cooldown_remaining(index=1, now=now)
+        else:
+            first_fallback_remaining = 0.0
+        counters["fallback_cooldown_remaining_s"] = round(first_fallback_remaining, 3)
+        counters["fallback_in_cooldown"] = first_fallback_remaining > 0
+
+        payload: dict[str, Any] = {
             "provider": "failover",
             "provider_name": "failover",
             "model": self.get_default_model(),
             "fallback_model": self.fallback_model,
+            "fallback_models": [candidate.model for candidate in self._candidates[1:]],
             "cooldown_seconds": self.cooldown_seconds,
+            "candidate_count": len(self._candidates),
             "counters": counters,
             **counters,
         }
 
-        def _sanitize(row: dict[str, Any]) -> dict[str, Any]:
-            blocked = {"api_key", "access_token", "token", "authorization", "auth", "credential", "credentials"}
-            sanitized: dict[str, Any] = {}
-            for key, value in row.items():
-                key_text = str(key).strip()
-                if any(marker in key_text.lower() for marker in blocked):
-                    continue
-                sanitized[key_text] = value
-            return sanitized
+        candidate_rows: list[dict[str, Any]] = []
+        for index, candidate in enumerate(self._candidates):
+            row: dict[str, Any] = {
+                "index": index,
+                "role": "primary" if index == 0 else "fallback",
+                "model": candidate.model,
+                "cooldown_remaining_s": round(self._cooldown_remaining(index=index, now=now), 3),
+                "in_cooldown": self._cooldown_remaining(index=index, now=now) > 0,
+            }
+            diag_fn = getattr(candidate.provider, "diagnostics", None)
+            if callable(diag_fn):
+                try:
+                    diag = diag_fn()
+                except Exception:
+                    diag = None
+                if isinstance(diag, dict):
+                    row["provider"] = self._sanitize(dict(diag))
+            candidate_rows.append(row)
+        payload["candidates"] = candidate_rows
 
-        primary_diag = getattr(self.primary, "diagnostics", None)
-        if callable(primary_diag):
-            try:
-                row = primary_diag()
-                if isinstance(row, dict):
-                    payload["primary"] = _sanitize(dict(row))
-            except Exception:
-                pass
-        fallback_diag = getattr(self.fallback, "diagnostics", None)
-        if callable(fallback_diag):
-            try:
-                row = fallback_diag()
-                if isinstance(row, dict):
-                    payload["fallback"] = _sanitize(dict(row))
-            except Exception:
-                pass
+        if candidate_rows:
+            primary_row = candidate_rows[0].get("provider")
+            if isinstance(primary_row, dict):
+                payload["primary"] = primary_row
+        if len(candidate_rows) > 1:
+            fallback_row = candidate_rows[1].get("provider")
+            if isinstance(fallback_row, dict):
+                payload["fallback"] = fallback_row
+
         return payload
+
+    @staticmethod
+    def _should_failover(error_class: str) -> bool:
+        return error_class in {
+            "auth",
+            "quota",
+            "rate_limit",
+            "http_transient",
+            "network",
+            "retry_exhausted",
+            "circuit_open",
+        }
+
+    async def _attempt_candidate(
+        self,
+        *,
+        index: int,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        reasoning_effort: str | None,
+    ) -> LLMResult:
+        if index > 0:
+            self._diagnostics["fallback_attempts"] = int(self._diagnostics["fallback_attempts"]) + 1
+        return await self._candidates[index].provider.complete(
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
 
     async def complete(
         self,
@@ -132,89 +212,69 @@ class FailoverProvider(LLMProvider):
         reasoning_effort: str | None = None,
     ) -> LLMResult:
         now = self._now()
-        primary_remaining = self._cooldown_remaining(target="primary", now=now)
-        fallback_remaining = self._cooldown_remaining(target="fallback", now=now)
-        if primary_remaining > 0:
-            self._diagnostics["primary_skipped_due_cooldown"] = int(self._diagnostics["primary_skipped_due_cooldown"]) + 1
-            if fallback_remaining > 0:
-                self._diagnostics["fallback_skipped_due_cooldown"] = int(self._diagnostics["fallback_skipped_due_cooldown"]) + 1
-                self._diagnostics["both_in_cooldown_fail_fast"] = int(self._diagnostics["both_in_cooldown_fail_fast"]) + 1
-                raise self._both_cooling_error(primary_remaining=primary_remaining, fallback_remaining=fallback_remaining)
-            return await self._attempt_fallback(
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-            )
+        ready_indices: list[int] = []
+        cooling_indices: list[tuple[int, float]] = []
+        for index in range(len(self._candidates)):
+            remaining = self._cooldown_remaining(index=index, now=now)
+            if remaining > 0:
+                if index == 0:
+                    self._diagnostics["primary_skipped_due_cooldown"] = int(self._diagnostics["primary_skipped_due_cooldown"]) + 1
+                else:
+                    self._diagnostics["fallback_skipped_due_cooldown"] = int(self._diagnostics["fallback_skipped_due_cooldown"]) + 1
+                cooling_indices.append((index, remaining))
+                continue
+            ready_indices.append(index)
 
-        try:
-            return await self.primary.complete(
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-            )
-        except Exception as exc:
-            primary_error = str(exc)
-            self._diagnostics["last_error"] = primary_error
-            primary_error_class = classify_provider_error(primary_error)
-            self._diagnostics["last_primary_error_class"] = primary_error_class
-            if not is_retryable_error(primary_error):
-                self._diagnostics["primary_non_retryable_failures"] = int(self._diagnostics["primary_non_retryable_failures"]) + 1
-                raise
-            self._diagnostics["primary_retryable_failures"] = int(self._diagnostics["primary_retryable_failures"]) + 1
-            self._activate_cooldown(target="primary")
-
-        fallback_remaining = self._cooldown_remaining(target="fallback")
-        if fallback_remaining > 0:
-            self._diagnostics["fallback_skipped_due_cooldown"] = int(self._diagnostics["fallback_skipped_due_cooldown"]) + 1
+        if not ready_indices:
             self._diagnostics["both_in_cooldown_fail_fast"] = int(self._diagnostics["both_in_cooldown_fail_fast"]) + 1
-            raise self._both_cooling_error(
-                primary_remaining=self._cooldown_remaining(target="primary"),
-                fallback_remaining=fallback_remaining,
-            )
-        return await self._attempt_fallback(
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-        )
+            raise self._all_in_cooldown_error(remaining=cooling_indices)
 
-    async def _attempt_fallback(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None,
-        max_tokens: int | None,
-        temperature: float | None,
-        reasoning_effort: str | None,
-    ) -> LLMResult:
-        self._diagnostics["fallback_attempts"] = int(self._diagnostics["fallback_attempts"]) + 1
-        try:
-            result = await self.fallback.complete(
-                messages=messages,
-                tools=tools,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-            )
-        except Exception as exc:
-            self._diagnostics["fallback_failures"] = int(self._diagnostics["fallback_failures"]) + 1
-            fallback_error = str(exc)
-            self._diagnostics["last_error"] = fallback_error
-            self._diagnostics["last_fallback_error_class"] = classify_provider_error(fallback_error)
-            if is_retryable_error(fallback_error):
-                self._activate_cooldown(target="fallback")
-            raise
+        last_exc: Exception | None = None
+        for index in ready_indices:
+            try:
+                result = await self._attempt_candidate(
+                    index=index,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                error_class = classify_provider_error(error_text)
+                self._diagnostics["last_error"] = error_text
+                if index == 0:
+                    self._diagnostics["last_primary_error_class"] = error_class
+                else:
+                    self._diagnostics["last_fallback_error_class"] = error_class
+                    self._diagnostics["fallback_failures"] = int(self._diagnostics["fallback_failures"]) + 1
 
-        self._diagnostics["fallback_success"] = int(self._diagnostics["fallback_success"]) + 1
-        result.metadata = dict(result.metadata)
-        result.metadata["fallback_used"] = True
-        result.metadata["fallback_model"] = self.fallback_model
-        return result
+                if not self._should_failover(error_class):
+                    if index == 0:
+                        self._diagnostics["primary_non_retryable_failures"] = int(self._diagnostics["primary_non_retryable_failures"]) + 1
+                    last_exc = exc
+                    break
+
+                if index == 0 and is_retryable_error(error_text):
+                    self._diagnostics["primary_retryable_failures"] = int(self._diagnostics["primary_retryable_failures"]) + 1
+                if error_class == "auth":
+                    self._diagnostics["auth_unavailable_activations"] = int(self._diagnostics["auth_unavailable_activations"]) + 1
+                self._activate_cooldown(index=index)
+                last_exc = exc
+                continue
+
+            if index > 0:
+                self._diagnostics["fallback_success"] = int(self._diagnostics["fallback_success"]) + 1
+                result.metadata = dict(result.metadata)
+                result.metadata["fallback_used"] = True
+                result.metadata["fallback_model"] = self._candidates[index].model
+                result.metadata["fallback_index"] = index
+            return result
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("provider_failover_exhausted:no_candidates_attempted")
 
     def get_default_model(self) -> str:
-        return self.primary.get_default_model()
+        return self._candidates[0].provider.get_default_model()

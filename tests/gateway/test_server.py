@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from loguru import logger
 from starlette.websockets import WebSocketDisconnect
 
+import clawlite.gateway.server as gateway_server
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.core.memory_monitor import MemorySuggestion
 from clawlite.gateway.server import (
@@ -317,7 +318,7 @@ def test_gateway_chat_endpoint_timeout_returns_provider_style_code(tmp_path: Pat
 
     app.state.runtime.engine.run = _slow_run
 
-    with patch("clawlite.gateway.server.GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
+    with patch.object(gateway_server, "GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
         with TestClient(app) as client:
             chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
 
@@ -414,7 +415,7 @@ def test_gateway_telegram_webhook_timeout_returns_408_contract(tmp_path: Path) -
                     coro.close()
                 raise asyncio.TimeoutError()
 
-            with patch("clawlite.gateway.server.asyncio.wait_for", new=_timeout_wait_for):
+            with patch.object(gateway_server.asyncio, "wait_for", new=_timeout_wait_for):
                 timeout_response = client.post(
                     "/api/webhooks/telegram",
                     json={"update_id": 2, "message": {"text": "hello"}},
@@ -1599,7 +1600,7 @@ def test_gateway_ws_message_timeout_returns_provider_style_error(tmp_path: Path)
 
     app.state.runtime.engine.run = _slow_run
 
-    with patch("clawlite.gateway.server.GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
+    with patch.object(gateway_server, "GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
         with TestClient(app) as client:
             with client.websocket_connect("/ws") as socket:
                 _assert_connect_challenge(socket)
@@ -3050,7 +3051,7 @@ def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_sen
     )
 
     async def _scenario() -> None:
-        with patch("clawlite.gateway.server.GATEWAY_CRON_ENGINE_TIMEOUT_S", new=0.01):
+        with patch.object(gateway_server, "GATEWAY_CRON_ENGINE_TIMEOUT_S", new=0.01):
             result = await _route_cron_job(runtime, job)
 
         assert result == "engine_run_timeout"

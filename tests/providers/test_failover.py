@@ -4,7 +4,7 @@ import asyncio
 import json
 
 from clawlite.providers.base import LLMResult
-from clawlite.providers.failover import FailoverCooldownError, FailoverProvider
+from clawlite.providers.failover import FailoverCandidate, FailoverCooldownError, FailoverProvider
 
 
 class _Provider:
@@ -86,18 +86,17 @@ def test_failover_provider_does_not_use_fallback_for_non_retryable_error() -> No
         fallback = _Provider(result="from fallback")
         provider = FailoverProvider(primary=primary, fallback=fallback, fallback_model="openai/gpt-4.1-mini")
 
-        try:
-            await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
-        except RuntimeError as exc:
-            assert str(exc).startswith("provider_auth_error")
-        else:
-            raise AssertionError("expected auth error")
+        out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
 
-        assert fallback.calls == 0
+        assert out.text == "from fallback"
+        assert out.metadata["fallback_used"] is True
+        assert fallback.calls == 1
         diag = provider.diagnostics()
         assert diag["last_primary_error_class"] == "auth"
+        assert diag["auth_unavailable_activations"] == 1
         assert diag["primary_retryable_failures"] == 0
-        assert diag["primary_non_retryable_failures"] == 1
+        assert diag["primary_non_retryable_failures"] == 0
+        assert diag["fallback_success"] == 1
 
     asyncio.run(_scenario())
 
@@ -199,7 +198,7 @@ def test_failover_provider_fallback_cooldown_avoids_repeated_attempts() -> None:
         try:
             await provider.complete(messages=[{"role": "user", "content": "second"}], tools=[])
         except FailoverCooldownError as exc:
-            assert "provider_failover_cooldown:both_providers_cooling_down" in str(exc)
+            assert "provider_failover_cooldown:all_candidates_cooling_down" in str(exc)
         else:
             raise AssertionError("expected cooldown fast-fail")
 
@@ -210,6 +209,37 @@ def test_failover_provider_fallback_cooldown_avoids_repeated_attempts() -> None:
         assert diag["fallback_skipped_due_cooldown"] == 1
         assert diag["both_in_cooldown_fail_fast"] == 1
         assert diag["fallback_attempts"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_failover_provider_uses_next_available_candidate_in_chain() -> None:
+    async def _scenario() -> None:
+        primary = _Provider(error="provider_http_error:429:rate limit")
+        fallback_a = _Provider(error="provider_http_error:503:temporary")
+        fallback_b = _Provider(result="from third candidate")
+        provider = FailoverProvider(
+            candidates=[
+                FailoverCandidate(provider=primary, model="openai/gpt-4.1"),
+                FailoverCandidate(provider=fallback_a, model="openrouter/openai/gpt-4o"),
+                FailoverCandidate(provider=fallback_b, model="groq/llama-3.3-70b"),
+            ]
+        )
+
+        out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "from third candidate"
+        assert out.metadata["fallback_used"] is True
+        assert out.metadata["fallback_model"] == "groq/llama-3.3-70b"
+        assert out.metadata["fallback_index"] == 2
+        diag = provider.diagnostics()
+        assert diag["candidate_count"] == 3
+        assert diag["fallback_attempts"] == 2
+        assert diag["fallback_failures"] == 1
+        assert diag["fallback_success"] == 1
+        assert diag["last_primary_error_class"] == "rate_limit"
+        assert diag["last_fallback_error_class"] == "http_transient"
+        assert len(diag["candidates"]) == 3
 
     asyncio.run(_scenario())
 
