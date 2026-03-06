@@ -5,6 +5,7 @@ import hashlib
 import contextvars
 import time
 from collections import deque
+from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any
 
@@ -43,6 +44,13 @@ class EngineProtocol:
     ): ...
 
     def request_stop(self, session_id: str) -> bool: ...
+
+
+@dataclass(slots=True)
+class _SessionDispatchSlot:
+    semaphore: asyncio.Semaphore
+    active_leases: int = 0
+    last_used_at: float = 0.0
 
 
 class ChannelManager:
@@ -86,7 +94,8 @@ class ChannelManager:
         self._delivery_idempotency_cache: dict[str, float] = {}
         self._delivery_idempotency_order: deque[tuple[str, float]] = deque()
         self._dispatch_slots = asyncio.Semaphore(self._dispatcher_max_concurrency)
-        self._session_slots: dict[str, asyncio.Semaphore] = {}
+        self._session_slots: dict[str, _SessionDispatchSlot] = {}
+        self._session_slots_max_entries = 2048
         self._dispatch_context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
             "channel_dispatch_context",
             default=None,
@@ -279,27 +288,56 @@ class ChannelManager:
         self._dispatch_slots = asyncio.Semaphore(self._dispatcher_max_concurrency)
         self._session_slots.clear()
 
-    def _session_semaphore(self, session_id: str) -> asyncio.Semaphore:
-        sem = self._session_slots.get(session_id)
-        if sem is None:
-            sem = asyncio.Semaphore(self._dispatcher_max_per_session)
-            self._session_slots[session_id] = sem
-        return sem
+    def _prune_session_slots(self) -> None:
+        limit = max(1, int(self._session_slots_max_entries))
+        if len(self._session_slots) <= limit:
+            return
+        removable: list[tuple[str, float]] = []
+        for sid, slot in self._session_slots.items():
+            if slot.active_leases != 0:
+                continue
+            removable.append((sid, float(slot.last_used_at)))
+        if not removable:
+            return
+        removable.sort(key=lambda item: item[1])
+        overflow = len(self._session_slots) - limit
+        for sid, _ in removable[:overflow]:
+            self._session_slots.pop(sid, None)
+
+    def _session_slot(self, session_id: str) -> _SessionDispatchSlot:
+        slot = self._session_slots.get(session_id)
+        if slot is None:
+            slot = _SessionDispatchSlot(
+                semaphore=asyncio.Semaphore(self._dispatcher_max_per_session),
+                active_leases=0,
+                last_used_at=time.monotonic(),
+            )
+            self._session_slots[session_id] = slot
+        return slot
 
     async def _acquire_dispatch_slot(self, session_id: str) -> None:
         await self._dispatch_slots.acquire()
-        session_sem = self._session_semaphore(session_id)
+        slot = self._session_slot(session_id)
+        slot.active_leases += 1
+        slot.last_used_at = time.monotonic()
         try:
-            await session_sem.acquire()
+            await slot.semaphore.acquire()
         except Exception:
+            slot.active_leases = max(0, slot.active_leases - 1)
+            slot.last_used_at = time.monotonic()
             self._dispatch_slots.release()
+            self._prune_session_slots()
             raise
 
     def _release_dispatch_slot(self, session_id: str) -> None:
         self._dispatch_slots.release()
-        session_sem = self._session_slots.get(session_id)
-        if session_sem is not None:
-            session_sem.release()
+        slot = self._session_slots.get(session_id)
+        if slot is None:
+            return
+        slot.semaphore.release()
+        slot.active_leases = max(0, slot.active_leases - 1)
+        slot.last_used_at = time.monotonic()
+        self._prune_session_slots()
 
     @staticmethod
     def _is_progress_event(event: OutboundEvent) -> bool:
@@ -704,6 +742,10 @@ class ChannelManager:
         self._dispatcher_max_per_session = max(
             1,
             int(channels_cfg.get("dispatcher_max_per_session", channels_cfg.get("dispatcherMaxPerSession", 1)) or 1),
+        )
+        self._session_slots_max_entries = max(
+            1,
+            int(channels_cfg.get("dispatcher_session_slots_max_entries", channels_cfg.get("dispatcherSessionSlotsMaxEntries", 2048)) or 2048),
         )
         self._send_max_attempts = max(1, int(channels_cfg.get("send_max_attempts", channels_cfg.get("sendMaxAttempts", 3)) or 3))
         self._send_retry_backoff_s = max(

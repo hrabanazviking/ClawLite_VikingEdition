@@ -20,7 +20,10 @@ def _response(*, status: int, url: str, payload: dict[str, Any] | None = None, t
 
 class _ClientFactory:
     def __init__(self, outcome: Any) -> None:
-        self.outcome = outcome
+        if isinstance(outcome, list):
+            self.outcomes = list(outcome)
+        else:
+            self.outcomes = [outcome]
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, *args, **kwargs):
@@ -37,9 +40,15 @@ class _ClientFactory:
 
             async def post(self, url: str, json: dict[str, Any] | None = None):
                 parent.calls.append({"url": url, "json": dict(json or {}), "headers": dict(headers or {}), "timeout": timeout})
-                if isinstance(parent.outcome, Exception):
-                    raise parent.outcome
-                return parent.outcome
+                if not parent.outcomes:
+                    raise AssertionError("unexpected post call")
+                outcome = parent.outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+            async def aclose(self) -> None:
+                return None
 
         return _Client()
 
@@ -63,11 +72,14 @@ def test_outbound_channels_raise_when_not_running(channel, target: str, text: st
 def test_discord_send_success_and_http_failure(monkeypatch) -> None:
     async def _scenario() -> None:
         ok_factory = _ClientFactory(
-            _response(
-                status=200,
-                url="https://discord.com/api/v10/channels/123/messages",
-                payload={"id": "m-1"},
-            )
+            [
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/channels/123/messages",
+                    payload={"id": "m-1"},
+                ),
+                _response(status=400, url="https://discord.com/api/v10/channels/123/messages", text="bad"),
+            ]
         )
         monkeypatch.setattr(httpx, "AsyncClient", ok_factory)
         channel = DiscordChannel(config={"token": "bot-token", "timeout_s": 3})
@@ -80,8 +92,6 @@ def test_discord_send_success_and_http_failure(monkeypatch) -> None:
         assert ok_factory.calls[0]["json"] == {"content": "ping"}
         assert ok_factory.calls[0]["headers"]["Authorization"] == "Bot bot-token"
 
-        fail_factory = _ClientFactory(_response(status=400, url="https://discord.com/api/v10/channels/123/messages", text="bad"))
-        monkeypatch.setattr(httpx, "AsyncClient", fail_factory)
         with pytest.raises(RuntimeError, match="discord_send_http_400"):
             await channel.send(target="123", text="ping")
 
@@ -93,11 +103,18 @@ def test_discord_send_success_and_http_failure(monkeypatch) -> None:
 def test_slack_send_success_and_api_failure(monkeypatch) -> None:
     async def _scenario() -> None:
         ok_factory = _ClientFactory(
-            _response(
-                status=200,
-                url="https://slack.com/api/chat.postMessage",
-                payload={"ok": True, "ts": "1700000000.001"},
-            )
+            [
+                _response(
+                    status=200,
+                    url="https://slack.com/api/chat.postMessage",
+                    payload={"ok": True, "ts": "1700000000.001"},
+                ),
+                _response(
+                    status=200,
+                    url="https://slack.com/api/chat.postMessage",
+                    payload={"ok": False, "error": "channel_not_found"},
+                ),
+            ]
         )
         monkeypatch.setattr(httpx, "AsyncClient", ok_factory)
         channel = SlackChannel(config={"bot_token": "xoxb-123"})
@@ -110,14 +127,6 @@ def test_slack_send_success_and_api_failure(monkeypatch) -> None:
         assert ok_factory.calls[0]["json"] == {"channel": "C123", "text": "hello"}
         assert ok_factory.calls[0]["headers"]["Authorization"] == "Bearer xoxb-123"
 
-        fail_factory = _ClientFactory(
-            _response(
-                status=200,
-                url="https://slack.com/api/chat.postMessage",
-                payload={"ok": False, "error": "channel_not_found"},
-            )
-        )
-        monkeypatch.setattr(httpx, "AsyncClient", fail_factory)
         with pytest.raises(RuntimeError, match="slack_send_api_error:channel_not_found"):
             await channel.send(target="C123", text="hello")
 

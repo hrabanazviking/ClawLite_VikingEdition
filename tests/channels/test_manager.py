@@ -770,3 +770,31 @@ def test_channel_manager_replay_dead_letters_updates_replay_counters() -> None:
         assert "telegram" not in diagnostics["per_channel"]
 
     asyncio.run(_scenario())
+
+
+def test_channel_manager_session_slots_are_bounded_and_cleanup_idle_entries() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start(
+            {
+                "channels": {
+                    "dispatcher_max_concurrency": 2,
+                    "dispatcher_max_per_session": 1,
+                    "dispatcher_session_slots_max_entries": 3,
+                    "fake": {"enabled": True},
+                }
+            }
+        )
+
+        for idx in range(8):
+            session_id = f"fake:slot-{idx}"
+            await mgr._acquire_dispatch_slot(session_id)
+            mgr._release_dispatch_slot(session_id)
+
+        assert len(mgr._session_slots) <= 3
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
