@@ -477,5 +477,5 @@ class MemoryMonitor:
         suggestions.extend(self._trigger_repeated_topics(records, now))
         suggestions.extend(self._trigger_recurring_birthdays(records, now))
         self._telemetry["generated"] += len(suggestions)
-        self._persist_pending(suggestions)
-        return self.pending()
+        await asyncio.to_thread(self._persist_pending, suggestions)
+        return await asyncio.to_thread(self.pending)

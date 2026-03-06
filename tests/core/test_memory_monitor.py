@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -224,3 +225,45 @@ def test_memory_monitor_mark_delivered_read_modify_write_is_lock_safe(tmp_path: 
     payload = json.loads(monitor.suggestions_path.read_text(encoding="utf-8"))
     assert len(payload) == 1
     assert payload[0]["status"] == "delivered"
+
+
+def test_memory_monitor_scan_offloads_persist_and_pending_to_threads(tmp_path: Path, monkeypatch) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        now = datetime.now(timezone.utc)
+        _seed_history(
+            store,
+            [
+                {
+                    "id": "evt-thread",
+                    "text": f"birthday da Ana em {(now + timedelta(days=2)).date().isoformat()}",
+                    "source": "session:telegram:ana_chat",
+                    "created_at": now.isoformat(),
+                }
+            ],
+        )
+        monitor = MemoryMonitor(store)
+
+        observed: dict[str, int] = {}
+        loop_thread = threading.get_ident()
+        original_persist = monitor._persist_pending
+        original_pending = monitor.pending
+
+        def _persist_probe(suggestions):
+            observed["persist"] = threading.get_ident()
+            return original_persist(suggestions)
+
+        def _pending_probe():
+            observed["pending"] = threading.get_ident()
+            return original_pending()
+
+        monkeypatch.setattr(monitor, "_persist_pending", _persist_probe)
+        monkeypatch.setattr(monitor, "pending", _pending_probe)
+
+        suggestions = await monitor.scan()
+
+        assert suggestions
+        assert observed["persist"] != loop_thread
+        assert observed["pending"] != loop_thread
+
+    asyncio.run(_scenario())
