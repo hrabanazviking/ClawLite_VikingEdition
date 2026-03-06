@@ -68,6 +68,9 @@ setup_logging()
 
 GATEWAY_CONTRACT_VERSION = "2026-03-04"
 TELEGRAM_WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
+GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S = 300.0
+GATEWAY_CRON_ENGINE_TIMEOUT_S = 90.0
+GATEWAY_HEARTBEAT_ENGINE_TIMEOUT_S = 120.0
 
 _TUNING_DEFAULT_ACTION_BY_SEVERITY: dict[str, str] = {
     "low": "notify_operator",
@@ -555,6 +558,22 @@ def _provider_telemetry_snapshot(provider: Any) -> dict[str, Any]:
     return telemetry
 
 
+async def _run_engine_with_timeout(
+    *,
+    engine: AgentEngine,
+    session_id: str,
+    user_text: str,
+    timeout_s: float,
+) -> Any:
+    try:
+        return await asyncio.wait_for(
+            engine.run(session_id=session_id, user_text=user_text),
+            timeout=max(0.001, float(timeout_s)),
+        )
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        raise RuntimeError("engine_run_timeout") from exc
+
+
 @dataclass(slots=True)
 class RuntimeContainer:
     config: AppConfig
@@ -981,7 +1000,22 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
 
 async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch start job_id={}", job.id)
-    result = await runtime.engine.run(session_id=job.session_id, user_text=job.payload.prompt)
+    try:
+        result = await _run_engine_with_timeout(
+            engine=runtime.engine,
+            session_id=job.session_id,
+            user_text=job.payload.prompt,
+            timeout_s=GATEWAY_CRON_ENGINE_TIMEOUT_S,
+        )
+    except RuntimeError as exc:
+        if str(exc) == "engine_run_timeout":
+            bind_event("cron.dispatch", session=job.session_id).warning(
+                "cron dispatch timed out job_id={} timeout_s={}",
+                job.id,
+                GATEWAY_CRON_ENGINE_TIMEOUT_S,
+            )
+            return "engine_run_timeout"
+        raise
     channel = job.payload.channel.strip() or job.session_id.split(":", 1)[0]
     target = job.payload.target.strip() or job.session_id.split(":", 1)[-1]
     if channel and target:
@@ -1180,7 +1214,12 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
         heartbeat_prompt = f"{heartbeat_prompt}\n\nHEARTBEAT.md content:\n{workspace_heartbeat}"
     session_id = "heartbeat:system"
     bind_event("heartbeat.tick", session="heartbeat:system").debug("heartbeat callback running")
-    result = await runtime.engine.run(session_id=session_id, user_text=heartbeat_prompt)
+    result = await _run_engine_with_timeout(
+        engine=runtime.engine,
+        session_id=session_id,
+        user_text=heartbeat_prompt,
+        timeout_s=GATEWAY_HEARTBEAT_ENGINE_TIMEOUT_S,
+    )
     bind_event("heartbeat.tick", session="heartbeat:system").debug("heartbeat callback completed")
     decision = HeartbeatDecision.from_result(result.text)
 
@@ -2036,6 +2075,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     def _provider_error_payload(exc: RuntimeError) -> tuple[int, str]:
         message = str(exc)
+        if message == "engine_run_timeout":
+            return (504, "engine_run_timeout")
         provider_http_code = None
         provider_http_detail = ""
         if message.startswith("provider_http_error:"):
@@ -2388,7 +2429,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="session_id and text are required")
         logger.debug("chat request received session={} chars={}", req.session_id, len(req.text))
         try:
-            out = await runtime.engine.run(session_id=req.session_id, user_text=req.text)
+            out = await _run_engine_with_timeout(
+                engine=runtime.engine,
+                session_id=req.session_id,
+                user_text=req.text,
+                timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+            )
         except RuntimeError as exc:
             status_code, detail = _provider_error_payload(exc)
             bind_event("gateway.chat", session=req.session_id).error("chat request failed status={} detail={}", status_code, detail)
@@ -2553,7 +2599,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     status_code=400,
                 )
             try:
-                out = await runtime.engine.run(session_id=session_id, user_text=text)
+                out = await _run_engine_with_timeout(
+                    engine=runtime.engine,
+                    session_id=session_id,
+                    user_text=text,
+                    timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+                )
             except RuntimeError as exc:
                 status_code, detail = _provider_error_payload(exc)
                 bind_event("gateway.ws", session=session_id, channel="ws").error(
@@ -2755,7 +2806,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         continue
 
                     try:
-                        out = await runtime.engine.run(session_id=session_id, user_text=text)
+                        out = await _run_engine_with_timeout(
+                            engine=runtime.engine,
+                            session_id=session_id,
+                            user_text=text,
+                            timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+                        )
                     except RuntimeError as exc:
                         status_code, detail = _provider_error_payload(exc)
                         bind_event("gateway.ws", session=session_id, channel="ws").error(
@@ -2790,7 +2846,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     await _send_ws({"error": "session_id and text are required"})
                     continue
                 try:
-                    out = await runtime.engine.run(session_id=session_id, user_text=text)
+                    out = await _run_engine_with_timeout(
+                        engine=runtime.engine,
+                        session_id=session_id,
+                        user_text=text,
+                        timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+                    )
                 except RuntimeError as exc:
                     status_code, detail = _provider_error_payload(exc)
                     bind_event("gateway.ws", session=session_id, channel="ws").error("websocket request failed status={} detail={}", status_code, detail)

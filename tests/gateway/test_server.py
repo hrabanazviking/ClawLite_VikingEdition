@@ -15,7 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.core.memory_monitor import MemorySuggestion
-from clawlite.gateway.server import _run_heartbeat, _run_proactive_monitor, build_runtime, create_app
+from clawlite.gateway.server import _route_cron_job, _run_heartbeat, _run_proactive_monitor, build_runtime, create_app
 from clawlite.providers.base import LLMResult
 from clawlite.scheduler.heartbeat import HeartbeatDecision
 from clawlite.utils import logging as logging_utils
@@ -204,6 +204,33 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         alias = client.post("/api/message", json={"session_id": "cli:1", "text": "ping"})
         assert alias.status_code == 200
         assert alias.json()["text"] == "pong"
+
+
+def test_gateway_chat_endpoint_timeout_returns_provider_style_code(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+
+    async def _slow_run(*, session_id: str, user_text: str):
+        del session_id, user_text
+        await asyncio.sleep(0.05)
+        return SimpleNamespace(text="late", model="fake/test")
+
+    app.state.runtime.engine.run = _slow_run
+
+    with patch("clawlite.gateway.server.GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
+        with TestClient(app) as client:
+            chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+
+    assert chat.status_code == 504
+    payload = chat.json()
+    assert payload["error"] == "engine_run_timeout"
+    assert payload["code"] == "engine_run_timeout"
 
 
 def test_gateway_telegram_webhook_endpoint_requires_secret_and_dispatches(tmp_path: Path) -> None:
@@ -1447,6 +1474,45 @@ def test_gateway_ws_envelope_message_result_and_request_id(tmp_path: Path) -> No
                 "model": "fake/test",
                 "request_id": "req-123",
             }
+
+
+def test_gateway_ws_message_timeout_returns_provider_style_error(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+
+    async def _slow_run(*, session_id: str, user_text: str):
+        del session_id, user_text
+        await asyncio.sleep(0.05)
+        return SimpleNamespace(text="late", model="fake/test")
+
+    app.state.runtime.engine.run = _slow_run
+
+    with patch("clawlite.gateway.server.GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S", new=0.01):
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws") as socket:
+                _assert_connect_challenge(socket)
+                socket.send_json(
+                    {
+                        "type": "message",
+                        "session_id": "cli:ws-timeout",
+                        "text": "ping",
+                        "request_id": "req-timeout",
+                    }
+                )
+                payload = socket.receive_json()
+
+    assert payload == {
+        "type": "error",
+        "error": "engine_run_timeout",
+        "status_code": 504,
+        "request_id": "req-timeout",
+    }
 
 
 def test_gateway_ws_envelope_error_path_returns_structured_error(tmp_path: Path) -> None:
@@ -2837,6 +2903,33 @@ def test_gateway_cron_endpoints_roundtrip(tmp_path: Path) -> None:
         listed_empty = client.get("/v1/cron/list", params={"session_id": "cli:cron"})
         assert listed_empty.status_code == 200
         assert listed_empty.json()["jobs"] == []
+
+
+def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_send() -> None:
+    class _Engine:
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id, user_text
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(text="late", model="fake/test")
+
+    runtime = SimpleNamespace(
+        engine=_Engine(),
+        channels=SimpleNamespace(send=AsyncMock(return_value="msg-1")),
+    )
+    job = SimpleNamespace(
+        id="job-1",
+        session_id="telegram:chat42",
+        payload=SimpleNamespace(prompt="run check", channel="telegram", target="chat42"),
+    )
+
+    async def _scenario() -> None:
+        with patch("clawlite.gateway.server.GATEWAY_CRON_ENGINE_TIMEOUT_S", new=0.01):
+            result = await _route_cron_job(runtime, job)
+
+        assert result == "engine_run_timeout"
+        runtime.channels.send.assert_not_awaited()
+
+    asyncio.run(_scenario())
 
 
 def test_gateway_heartbeat_trigger_contract_updates_state(tmp_path: Path) -> None:
