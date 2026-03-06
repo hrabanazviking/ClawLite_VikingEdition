@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover
 
 
 JobCallback = Callable[[CronJob], Awaitable[str | None]]
+DEFAULT_CALLBACK_TIMEOUT_SECONDS = 300.0
 
 
 class CronService:
@@ -38,6 +39,7 @@ class CronService:
         store_path: str | Path | None = None,
         default_timezone: str = "UTC",
         lease_seconds: int = 30,
+        callback_timeout_seconds: float = DEFAULT_CALLBACK_TIMEOUT_SECONDS,
     ) -> None:
         self.path = Path(store_path) if store_path else (Path.home() / ".clawlite" / "state" / "cron_jobs.json")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +50,7 @@ class CronService:
         self.default_timezone = self._normalize_timezone(default_timezone)
         self._instance_id = uuid.uuid4().hex
         self._lease_seconds = max(5, int(lease_seconds or 30))
+        self._callback_timeout_seconds = max(0.1, float(callback_timeout_seconds or DEFAULT_CALLBACK_TIMEOUT_SECONDS))
         self._diag: dict[str, int | str] = {
             "load_attempts": 0,
             "load_success": 0,
@@ -431,7 +434,7 @@ class CronService:
                 if self._on_job is not None:
                     logger.info("cron job executing id={} session={} name={}", claimed.id, claimed.session_id, claimed.name)
                     try:
-                        await self._on_job(claimed)
+                        await asyncio.wait_for(self._on_job(claimed), timeout=self._callback_timeout_seconds)
                         logger.info("cron job executed id={} session={}", claimed.id, claimed.session_id)
                         claimed.last_status = "success"
                         claimed.last_error = ""
@@ -439,6 +442,18 @@ class CronService:
                         self._diag["job_success_count"] = int(self._diag.get("job_success_count", 0) or 0) + 1
                     except asyncio.CancelledError:
                         raise
+                    except asyncio.TimeoutError:
+                        callback_failed = True
+                        claimed.last_status = "failed"
+                        claimed.last_error = f"callback_timeout after {self._callback_timeout_seconds}s"
+                        claimed.consecutive_failures = int(claimed.consecutive_failures or 0) + 1
+                        self._diag["job_failure_count"] = int(self._diag.get("job_failure_count", 0) or 0) + 1
+                        logger.error(
+                            "cron job timed out id={} session={} timeout={}s",
+                            claimed.id,
+                            claimed.session_id,
+                            self._callback_timeout_seconds,
+                        )
                     except Exception as exc:
                         callback_failed = True
                         claimed.last_status = "failed"
@@ -541,11 +556,20 @@ class CronService:
             raise RuntimeError("cron_job_callback_missing")
         job.run_count = int(job.run_count or 0) + 1
         try:
-            out = await callback(job)
+            out = await asyncio.wait_for(callback(job), timeout=self._callback_timeout_seconds)
             job.last_status = "success"
             job.last_error = ""
             job.consecutive_failures = 0
             self._diag["job_success_count"] = int(self._diag.get("job_success_count", 0) or 0) + 1
+        except asyncio.TimeoutError as exc:
+            timeout_error = f"callback_timeout after {self._callback_timeout_seconds}s"
+            job.last_status = "failed"
+            job.last_error = timeout_error
+            job.consecutive_failures = int(job.consecutive_failures or 0) + 1
+            self._clear_lease(job)
+            self._diag["job_failure_count"] = int(self._diag.get("job_failure_count", 0) or 0) + 1
+            await self._save_async()
+            raise TimeoutError(timeout_error) from exc
         except Exception as exc:
             job.last_status = "failed"
             job.last_error = str(exc)

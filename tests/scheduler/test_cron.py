@@ -198,6 +198,72 @@ def test_cron_loop_survives_callback_failure_and_tracks_job_health(tmp_path: Pat
     asyncio.run(_scenario())
 
 
+def test_cron_loop_times_out_slow_callback_and_keeps_processing(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json", callback_timeout_seconds=0.05)
+        fast_ran = asyncio.Event()
+
+        slow_job_id = await service.add_job(session_id="s1", expression="every 1", prompt="slow", name="slow")
+        await service.add_job(session_id="s1", expression="every 1", prompt="fast", name="fast")
+
+        async def _on_job(job):
+            if job.name == "slow":
+                await asyncio.sleep(0.2)
+                return "slow"
+            fast_ran.set()
+            return "fast"
+
+        await service.start(_on_job)
+        await asyncio.wait_for(fast_ran.wait(), timeout=4.0)
+
+        async def _wait_for_slow_timeout() -> None:
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while asyncio.get_running_loop().time() < deadline:
+                slow_job = service.get_job(slow_job_id)
+                if slow_job is not None and slow_job.last_status == "failed":
+                    return
+                await asyncio.sleep(0.02)
+            raise AssertionError("timed out waiting for slow job timeout")
+
+        await _wait_for_slow_timeout()
+        status = service.status()
+        slow_job = service.get_job(slow_job_id)
+
+        assert status["running"] is True
+        assert status["job_failure_count"] >= 1
+        assert status["job_success_count"] >= 1
+        assert slow_job is not None
+        assert slow_job.last_status == "failed"
+        assert "callback_timeout" in slow_job.last_error
+
+        await service.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_cron_manual_run_applies_callback_timeout(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json", callback_timeout_seconds=0.05)
+        job_id = await service.add_job(session_id="s1", expression="every 60", prompt="manual timeout")
+
+        async def _slow(_job):
+            await asyncio.sleep(0.2)
+            return "late"
+
+        with pytest.raises(TimeoutError, match="callback_timeout"):
+            await service.run_job(job_id, on_job=_slow, force=True)
+
+        job = service.get_job(job_id)
+        status = service.status()
+
+        assert job is not None
+        assert job.last_status == "failed"
+        assert "callback_timeout" in job.last_error
+        assert status["job_failure_count"] >= 1
+
+    asyncio.run(_scenario())
+
+
 def test_cron_schedule_failure_isolated_per_job(monkeypatch, tmp_path: Path) -> None:
     async def _scenario() -> None:
         service = CronService(tmp_path / "cron.json")
