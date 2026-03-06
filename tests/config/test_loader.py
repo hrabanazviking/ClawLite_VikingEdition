@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-from clawlite.config.loader import load_config
+from clawlite.config.loader import load_config, save_config
+from clawlite.config.schema import AppConfig
 
 
 def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
@@ -11,6 +13,43 @@ def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
     assert cfg.provider.model
     assert cfg.gateway.port == 8787
     assert cfg.channels.send_progress is False
+
+
+def test_save_config_writes_valid_json_and_is_readable(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    cfg = AppConfig()
+
+    saved = save_config(cfg, path)
+
+    assert saved == path
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["gateway"]["port"] == 8787
+
+    loaded = load_config(path)
+    assert loaded.gateway.port == 8787
+
+
+def test_save_config_uses_atomic_replace_in_same_directory(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "config.json"
+    calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def _tracking_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        src_path = Path(src)
+        dst_path = Path(dst)
+        calls.append((src_path, dst_path))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("clawlite.config.loader.os.replace", _tracking_replace)
+
+    save_config(AppConfig(), path)
+
+    assert len(calls) == 1
+    src, dst = calls[0]
+    assert dst == path
+    assert src.parent == path.parent
+    assert src != path
+    assert path.exists()
 
 
 def test_load_config_file_and_env_override(tmp_path: Path, monkeypatch) -> None:
