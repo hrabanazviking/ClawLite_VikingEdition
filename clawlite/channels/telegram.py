@@ -10,6 +10,7 @@ import json
 import math
 import random
 import re
+import secrets
 import time
 from collections import deque
 from email.utils import parsedate_to_datetime
@@ -536,7 +537,7 @@ class TelegramChannel(BaseChannel):
         self._dedupe_persist_task = loop.create_task(self._persist_update_dedupe_state())
 
     def _callback_sign_payload(self, callback_data: str) -> str:
-        nonce = base64.urlsafe_b64encode(hashlib.sha256(str(time.monotonic()).encode("utf-8")).digest()[:6]).decode("ascii").rstrip("=")
+        nonce = base64.urlsafe_b64encode(secrets.token_bytes(6)).decode("ascii").rstrip("=")
         data = str(callback_data or "")
         encoded_data = base64.urlsafe_b64encode(data.encode("utf-8")).decode("ascii").rstrip("=")
         digest = hmac.new(

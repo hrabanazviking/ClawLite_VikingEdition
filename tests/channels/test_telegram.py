@@ -937,6 +937,65 @@ def test_telegram_callback_query_blocked_by_allowlist_does_not_emit() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_callback_sign_payload_uses_random_nonce_per_signature() -> None:
+    channel = TelegramChannel(
+        config={
+            "token": "x:token",
+            "callback_signing_enabled": True,
+            "callback_signing_secret": "secret-1",
+        }
+    )
+
+    signed_a = channel._callback_sign_payload("approve:1")
+    signed_b = channel._callback_sign_payload("approve:1")
+
+    assert signed_a != signed_b
+    _, nonce_a, encoded_a, signature_a = signed_a.split(".", 3)
+    _, nonce_b, encoded_b, signature_b = signed_b.split(".", 3)
+    assert encoded_a == encoded_b
+    assert nonce_a != nonce_b
+    assert signature_a != signature_b
+
+
+def test_telegram_callback_verify_payload_accepts_valid_signed_data() -> None:
+    channel = TelegramChannel(
+        config={
+            "token": "x:token",
+            "callback_signing_enabled": True,
+            "callback_signing_secret": "secret-1",
+        }
+    )
+
+    signed = channel._callback_sign_payload("approve:1")
+
+    ok, decoded, was_signed = channel._callback_verify_payload(signed)
+
+    assert ok is True
+    assert decoded == "approve:1"
+    assert was_signed is True
+
+
+def test_telegram_callback_verify_payload_rejects_tampered_payload() -> None:
+    channel = TelegramChannel(
+        config={
+            "token": "x:token",
+            "callback_signing_enabled": True,
+            "callback_signing_secret": "secret-1",
+        }
+    )
+
+    signed = channel._callback_sign_payload("approve:1")
+    _, nonce, encoded_data, signature = signed.split(".", 3)
+    tampered_signature = signature[:-1] + ("A" if signature[-1] != "A" else "B")
+    tampered = f"s1.{nonce}.{encoded_data}.{tampered_signature}"
+
+    ok, decoded, was_signed = channel._callback_verify_payload(tampered)
+
+    assert ok is False
+    assert decoded == ""
+    assert was_signed is True
+
+
 def test_telegram_callback_signing_accepts_valid_signed_callback() -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict]] = []
