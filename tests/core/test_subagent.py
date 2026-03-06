@@ -22,6 +22,37 @@ def test_subagent_manager_spawn_and_list() -> None:
     asyncio.run(_scenario())
 
 
+def test_subagent_manager_spawn_persists_custom_metadata(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        mgr = SubagentManager(state_path=tmp_path / "state")
+        run = await mgr.spawn(
+            session_id="s1",
+            task="t1",
+            runner=_runner,
+            metadata={
+                "target_session_id": "s1:subagent",
+                "target_user_id": "u-1",
+                "share_scope": "family",
+            },
+        )
+        await asyncio.sleep(0)
+
+        listed = mgr.list_runs(session_id="s1")
+        assert listed
+        assert listed[0].run_id == run.run_id
+        assert listed[0].metadata["target_session_id"] == "s1:subagent"
+        assert listed[0].metadata["target_user_id"] == "u-1"
+        assert listed[0].metadata["share_scope"] == "family"
+
+        reloaded = SubagentManager(state_path=tmp_path / "state")
+        restored = reloaded.list_runs(session_id="s1")[0]
+        assert restored.metadata["target_session_id"] == "s1:subagent"
+        assert restored.metadata["target_user_id"] == "u-1"
+        assert restored.metadata["share_scope"] == "family"
+
+    asyncio.run(_scenario())
+
+
 def test_subagent_manager_queue_limits_and_session_quota(tmp_path: Path) -> None:
     async def _scenario() -> None:
         gate = asyncio.Event()

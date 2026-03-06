@@ -118,7 +118,7 @@ def _last_message_preview(sessions: SessionStore, session_id: str) -> dict[str, 
 
 
 def _run_to_payload(run: SubagentRun) -> dict[str, Any]:
-    return {
+    payload = {
         "run_id": run.run_id,
         "session_id": run.session_id,
         "task": run.task,
@@ -126,6 +126,14 @@ def _run_to_payload(run: SubagentRun) -> dict[str, Any]:
         "started_at": run.started_at,
         "finished_at": run.finished_at,
     }
+    metadata = dict(getattr(run, "metadata", {}) or {})
+    target_session_id = str(metadata.get("target_session_id", "") or "").strip()
+    if target_session_id:
+        payload["target_session_id"] = target_session_id
+    share_scope = str(metadata.get("share_scope", "") or "").strip()
+    if share_scope:
+        payload["share_scope"] = share_scope
+    return payload
 
 
 class SessionsListTool(Tool):
@@ -348,11 +356,20 @@ class SessionsSpawnTool(Tool):
                 result = await result
             return str(getattr(result, "text", result) or "")
 
+        spawn_metadata: dict[str, str | int | bool] = {
+            "target_session_id": target_session_id,
+        }
+        if share_scope:
+            spawn_metadata["share_scope"] = share_scope
+        if str(ctx.user_id or "").strip():
+            spawn_metadata["target_user_id"] = str(ctx.user_id).strip()
+
         try:
             run = await self.manager.spawn(
                 session_id=ctx.session_id,
                 task=task,
                 runner=_target_runner,
+                metadata=spawn_metadata,
             )
         except SubagentLimitError as exc:
             return _json(

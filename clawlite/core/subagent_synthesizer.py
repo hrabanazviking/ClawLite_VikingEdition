@@ -7,6 +7,7 @@ class SubagentSynthesizer:
     """Deterministic digest generator for completed subagent runs."""
 
     _MAX_RUNS = 8
+    _MAX_SESSION_CHARS = 48
     _MAX_TASK_CHARS = 72
     _MAX_EXCERPT_CHARS = 120
     _MAX_TOTAL_CHARS = 1400
@@ -27,6 +28,21 @@ class SubagentSynthesizer:
         run_id = str(getattr(run, "run_id", "") or "")
         return finished, run_id
 
+    def _excerpt_from_run(self, run: Any) -> str:
+        metadata = dict(getattr(run, "metadata", {}) or {})
+        result = self._compact(getattr(run, "result", ""), self._MAX_EXCERPT_CHARS)
+        error = self._compact(getattr(run, "error", ""), self._MAX_EXCERPT_CHARS)
+        episodic = self._compact(metadata.get("episodic_digest_summary", ""), self._MAX_EXCERPT_CHARS)
+        if error:
+            return error
+        if episodic and result:
+            return self._compact(f"{episodic} | result={result}", self._MAX_EXCERPT_CHARS)
+        if episodic:
+            return episodic
+        if result:
+            return result
+        return "(no output)"
+
     def summarize(self, runs: list[Any]) -> str:
         if not runs:
             return ""
@@ -40,11 +56,14 @@ class SubagentSynthesizer:
             short_id = run_id[:8]
             status = self._compact(getattr(run, "status", "unknown"), 24) or "unknown"
             task = self._compact(getattr(run, "task", ""), self._MAX_TASK_CHARS)
-            result = self._compact(getattr(run, "result", ""), self._MAX_EXCERPT_CHARS)
-            error = self._compact(getattr(run, "error", ""), self._MAX_EXCERPT_CHARS)
-            excerpt = error or result or "(no output)"
+            metadata = dict(getattr(run, "metadata", {}) or {})
+            target_session_id = self._compact(metadata.get("target_session_id", ""), self._MAX_SESSION_CHARS)
+            excerpt = self._excerpt_from_run(run)
 
-            line = f"- {short_id} [{status}] task={task or '-'} | excerpt={excerpt}"
+            line = f"- {short_id} [{status}] task={task or '-'}"
+            if target_session_id:
+                line = f"{line} | session={target_session_id}"
+            line = f"{line} | excerpt={excerpt}"
             if total_chars + len(line) > self._MAX_TOTAL_CHARS:
                 break
             lines.append(line)

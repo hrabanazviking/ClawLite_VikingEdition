@@ -1157,6 +1157,100 @@ class AgentEngine:
             return block
         return f"{clean_text}\n\n{block}"
 
+    @classmethod
+    def _subagent_memory_query(cls, run: Any) -> str:
+        task = " ".join(str(getattr(run, "task", "") or "").split()).strip()
+        result = " ".join(str(getattr(run, "result", "") or "").split()).strip()
+        error = " ".join(str(getattr(run, "error", "") or "").split()).strip()
+        parts: list[str] = []
+        for value in (task, result[:160], error[:160]):
+            if value and value not in parts:
+                parts.append(value)
+        combined = " ".join(parts).strip()
+        if not combined:
+            return ""
+        rewritten = cls._rewrite_memory_query(combined)
+        return rewritten or combined[:240]
+
+    async def _attach_subagent_memory_digests(
+        self,
+        *,
+        runs: list[Any],
+        run_log: Any,
+    ) -> list[Any]:
+        retrieve_fn = getattr(self.memory, "retrieve", None)
+        if not callable(retrieve_fn):
+            return runs
+
+        for run in runs:
+            metadata = getattr(run, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("episodic_digest_summary", "") or "").strip():
+                continue
+            target_session_id = str(metadata.get("target_session_id", "") or "").strip()
+            if not target_session_id:
+                continue
+            query = self._subagent_memory_query(run)
+            if not query:
+                continue
+
+            retrieve_kwargs: dict[str, Any] = {"limit": 3, "method": "rag"}
+            if self._accepts_parameter(retrieve_fn, "session_id"):
+                retrieve_kwargs["session_id"] = target_session_id
+            if self._accepts_parameter(retrieve_fn, "include_shared"):
+                retrieve_kwargs["include_shared"] = True
+            target_user_id = str(metadata.get("target_user_id", metadata.get("user_id", "")) or "").strip()
+            if target_user_id and self._accepts_parameter(retrieve_fn, "user_id"):
+                retrieve_kwargs["user_id"] = target_user_id
+
+            try:
+                payload = retrieve_fn(query, **retrieve_kwargs)
+                if inspect.isawaitable(payload):
+                    payload = await payload
+            except TypeError:
+                try:
+                    payload = retrieve_fn(query, limit=3, method="rag")
+                    if inspect.isawaitable(payload):
+                        payload = await payload
+                except Exception as exc:
+                    run_log.warning(
+                        "subagent memory digest failed session={} target={} error={}",
+                        getattr(run, "session_id", "") or "-",
+                        target_session_id,
+                        exc,
+                    )
+                    continue
+            except Exception as exc:
+                run_log.warning(
+                    "subagent memory digest failed session={} target={} error={}",
+                    getattr(run, "session_id", "") or "-",
+                    target_session_id,
+                    exc,
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+            episodic_digest = payload.get("episodic_digest")
+            if not isinstance(episodic_digest, dict):
+                continue
+            summary = " ".join(str(episodic_digest.get("summary", "") or "").split()).strip()
+            if not summary:
+                continue
+            metadata["episodic_digest_summary"] = summary
+            digest_session_id = str(episodic_digest.get("session_id", "") or "").strip()
+            if digest_session_id:
+                metadata["episodic_digest_session_id"] = digest_session_id
+            try:
+                digest_count = int(episodic_digest.get("count", 0) or 0)
+            except Exception:
+                digest_count = 0
+            if digest_count > 0:
+                metadata["episodic_digest_count"] = digest_count
+
+        return runs
+
     async def _inject_subagent_digest(
         self,
         *,
@@ -1182,6 +1276,11 @@ class AgentEngine:
 
         if not completed_runs:
             return final
+
+        completed_runs = await self._attach_subagent_memory_digests(
+            runs=completed_runs,
+            run_log=run_log,
+        )
 
         summarize_fn = getattr(self.synthesizer, "summarize", None)
         if not callable(summarize_fn):

@@ -175,7 +175,9 @@ def test_sessions_spawn_success_and_subagents_list_kill(tmp_path) -> None:
         assert listed["status"] == "ok"
         assert listed["action"] == "list"
         assert listed["count"] >= 1
-        assert any(row["run_id"] == run_id for row in listed["runs"])
+        matching = [row for row in listed["runs"] if row["run_id"] == run_id]
+        assert matching
+        assert matching[0]["target_session_id"] == "cli:owner:subagent"
 
         killed = json.loads(
             await subagents_tool.run(
@@ -213,7 +215,7 @@ def test_sessions_spawn_applies_explicit_working_memory_share_scope(tmp_path) ->
         spawned = json.loads(
             await spawn_tool.run(
                 {"task": "delegate task", "share_scope": "family"},
-                ToolContext(session_id="cli:owner"),
+                ToolContext(session_id="cli:owner", user_id="u-1"),
             )
         )
 
@@ -221,6 +223,11 @@ def test_sessions_spawn_applies_explicit_working_memory_share_scope(tmp_path) ->
         assert spawned["target_session_id"] == "cli:owner:subagent"
         assert spawned["share_scope"] == "family"
         assert memory.calls == [("cli:owner:subagent", "family")]
+        runs = manager.list_runs(session_id="cli:owner")
+        assert runs
+        assert runs[0].metadata["target_session_id"] == "cli:owner:subagent"
+        assert runs[0].metadata["target_user_id"] == "u-1"
+        assert runs[0].metadata["share_scope"] == "family"
 
     asyncio.run(_scenario())
 

@@ -275,6 +275,42 @@ class FakeMemoryWithProfileHint(FakeMemory):
         )
 
 
+class FakeMemoryWithSubagentRetrieve(FakeMemory):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.retrieve_calls: list[dict[str, Any]] = []
+
+    async def retrieve(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        method: str = "rag",
+        user_id: str = "",
+        session_id: str = "",
+        include_shared: bool = False,
+    ) -> dict[str, Any]:
+        self.retrieve_calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "method": method,
+                "user_id": user_id,
+                "session_id": session_id,
+                "include_shared": include_shared,
+            }
+        )
+        return {
+            "status": "ok",
+            "hits": [],
+            "episodic_digest": {
+                "session_id": session_id,
+                "count": 1,
+                "summary": f"current:{session_id} -> blocker triaged",
+            },
+        }
+
+
 class FakeSubagentManagerForDigest:
     def __init__(self) -> None:
         self.list_calls = 0
@@ -299,6 +335,27 @@ class FakeSubagentManagerForDigest:
         return len(run_ids)
 
 
+class FakeSubagentManagerForDigestWithTargetSession(FakeSubagentManagerForDigest):
+    def list_completed_unsynthesized(self, session_id: str, limit: int = 8) -> list[SubagentRun]:
+        self.list_calls += 1
+        del limit
+        return [
+            SubagentRun(
+                run_id="run-0987654321",
+                session_id=session_id,
+                task="collect blocker context",
+                status="done",
+                result="Triaged blocker details and next actions.",
+                finished_at="2026-03-05T12:05:00+00:00",
+                metadata={
+                    "target_session_id": f"{session_id}:subagent",
+                    "target_user_id": "u-1",
+                    "share_scope": "family",
+                },
+            )
+        ]
+
+
 class FakeSubagentSynthesizer:
     def __init__(self) -> None:
         self.calls = 0
@@ -307,6 +364,20 @@ class FakeSubagentSynthesizer:
         self.calls += 1
         del runs
         return "- run-1234 [done] task=collect context | excerpt=Collected all required details."
+
+
+class FakeSubagentSynthesizerWithMemoryContext:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.metadata_snapshots: list[dict[str, Any]] = []
+
+    def summarize(self, runs: list[Any]) -> str:
+        self.calls += 1
+        run = runs[0]
+        self.metadata_snapshots.append(dict(getattr(run, "metadata", {}) or {}))
+        target_session = str(getattr(run, "metadata", {}).get("target_session_id", "") or "")
+        episodic = str(getattr(run, "metadata", {}).get("episodic_digest_summary", "") or "")
+        return f"- {run.run_id[:8]} [{run.status}] session={target_session} | excerpt={episodic or run.result}"
 
 
 class FakePlannerMemory:
@@ -777,6 +848,36 @@ def test_engine_injects_subagent_digest_once_and_marks_synthesized() -> None:
         assert subagents.mark_calls[0]["run_ids"] == ["run-1234567890"]
         assert subagents.mark_calls[0]["digest_id"]
         assert synthesizer.calls == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_enriches_subagent_digest_with_target_session_memory() -> None:
+    async def _scenario() -> None:
+        subagents = FakeSubagentManagerForDigestWithTargetSession()
+        synthesizer = FakeSubagentSynthesizerWithMemoryContext()
+        memory = FakeMemoryWithSubagentRetrieve()
+        engine = AgentEngine(
+            provider=FakePromptCaptureProvider(),
+            tools=FakeTools(),
+            memory=memory,
+            subagents=subagents,
+            synthesizer=synthesizer,
+        )
+
+        out = await engine.run(session_id="cli:owner", user_text="hello")
+        assert out.text.count("[Subagent Digest]") == 1
+        assert "session=cli:owner:subagent" in out.text
+        assert "current:cli:owner:subagent -> blocker triaged" in out.text
+        assert memory.retrieve_calls
+        assert memory.retrieve_calls[0]["method"] == "rag"
+        assert memory.retrieve_calls[0]["limit"] == 3
+        assert memory.retrieve_calls[0]["user_id"] == "u-1"
+        assert memory.retrieve_calls[0]["session_id"] == "cli:owner:subagent"
+        assert memory.retrieve_calls[0]["include_shared"] is True
+        assert "collect" in str(memory.retrieve_calls[0]["query"])
+        assert synthesizer.calls == 1
+        assert synthesizer.metadata_snapshots[0]["episodic_digest_summary"] == "current:cli:owner:subagent -> blocker triaged"
 
     asyncio.run(_scenario())
 

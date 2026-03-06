@@ -149,6 +149,22 @@ class SubagentManager:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp_path.replace(self._state_file)
 
+    @staticmethod
+    def _normalize_run_metadata(
+        metadata: dict[str, str | int | bool] | None,
+    ) -> dict[str, str | int | bool]:
+        if not isinstance(metadata, dict):
+            return {}
+        out: dict[str, str | int | bool] = {}
+        for key, value in metadata.items():
+            if not isinstance(value, (str, int, bool)):
+                continue
+            clean_key = str(key or "").strip()
+            if not clean_key:
+                continue
+            out[clean_key] = value
+        return out
+
     def _load_state(self) -> None:
         if not self._state_file.exists():
             return
@@ -300,7 +316,14 @@ class SubagentManager:
             self._save_state()
             return run
 
-    async def spawn(self, *, session_id: str, task: str, runner: Runner) -> SubagentRun:
+    async def spawn(
+        self,
+        *,
+        session_id: str,
+        task: str,
+        runner: Runner,
+        metadata: dict[str, str | int | bool] | None = None,
+    ) -> SubagentRun:
         self._bind_loop()
         clean_session_id = str(session_id or "").strip()
         clean_task = str(task or "").strip()
@@ -308,6 +331,7 @@ class SubagentManager:
             raise ValueError("session_id is required")
         if not clean_task:
             raise ValueError("task is required")
+        normalized_metadata = self._normalize_run_metadata(metadata)
 
         async with self._lock:
             self._ensure_limits(clean_session_id)
@@ -322,6 +346,7 @@ class SubagentManager:
                 queued_at=now_iso,
                 updated_at=now_iso,
                 metadata={
+                    **normalized_metadata,
                     "run_version": 1,
                     "resume_attempts": 0,
                     "resume_token": uuid.uuid4().hex,
