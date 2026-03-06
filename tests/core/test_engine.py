@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+import gc
 from typing import Any
 
 import clawlite.core.engine as engine_module
@@ -283,6 +284,38 @@ class FakeProviderWithReasoningCapture:
     async def complete(self, *, messages, tools, reasoning_effort=None):
         self.last_reasoning_effort = reasoning_effort
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
+
+
+class FakeProviderWithSamplingAndReasoningCapture:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.kwargs_history: list[dict[str, Any]] = []
+
+    async def complete(
+        self,
+        *,
+        messages,
+        tools,
+        max_tokens=None,
+        temperature=None,
+        reasoning_effort=None,
+    ):
+        del messages, tools
+        self.calls += 1
+        self.kwargs_history.append(
+            {
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "reasoning_effort": reasoning_effort,
+            }
+        )
+        if self.calls == 1:
+            return ProviderResult(
+                text="needs tool",
+                tool_calls=[ToolCall(name="echo", arguments={"text": "hello"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="done", tool_calls=[], model="fake/model")
 
 
 class FakeLongToolProvider:
@@ -1340,3 +1373,118 @@ def test_engine_keeps_parallelism_for_different_sessions() -> None:
         assert provider.max_active_calls >= 2
 
     asyncio.run(_scenario())
+
+
+def test_engine_session_locks_are_memory_safe_after_sessions_finish() -> None:
+    async def _scenario() -> None:
+        provider = FakeProviderWithSamplingCapture()
+        engine = AgentEngine(provider=provider, tools=FakeTools())
+
+        for idx in range(40):
+            out = await engine.run(session_id=f"cli:lock:{idx}", user_text="hello")
+            assert out.text == "ok"
+
+        await asyncio.sleep(0)
+        gc.collect()
+        assert len(engine._session_locks) == 0
+
+    asyncio.run(_scenario())
+
+
+def test_engine_caches_provider_complete_signature_and_preserves_kwargs(monkeypatch) -> None:
+    async def _scenario() -> None:
+        provider = FakeProviderWithSamplingAndReasoningCapture()
+        complete_func = provider.complete.__func__
+        original_signature = engine_module.inspect.signature
+        counts = {"provider_complete": 0}
+
+        def _signature_spy(obj):
+            target = getattr(obj, "__func__", obj)
+            if target is complete_func:
+                counts["provider_complete"] += 1
+            return original_signature(obj)
+
+        monkeypatch.setattr(engine_module.inspect, "signature", _signature_spy)
+
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            max_tokens=321,
+            temperature=0.33,
+            reasoning_effort_default="medium",
+        )
+        out = await engine.run(session_id="cli:signature-cache", user_text="run")
+        assert out.text == "done"
+        assert provider.calls == 2
+        assert counts["provider_complete"] == 1
+        assert provider.kwargs_history == [
+            {"max_tokens": 321, "temperature": 0.33, "reasoning_effort": "medium"},
+            {"max_tokens": 321, "temperature": 0.33, "reasoning_effort": "medium"},
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_caches_memory_callable_signatures(monkeypatch) -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        memory = FakeMemoryWithContextKwargs(
+            [
+                MemoryRecord(
+                    id="ctxcache0001",
+                    text="User timezone is America/Sao_Paulo.",
+                    source="session:telegram:42",
+                    created_at="2026-03-04T12:00:00+00:00",
+                )
+            ]
+        )
+        search_func = memory.search.__func__
+        memorize_func = memory.memorize.__func__
+        original_signature = engine_module.inspect.signature
+        counts = {"search": 0, "memorize": 0}
+
+        def _signature_spy(obj):
+            target = getattr(obj, "__func__", obj)
+            if target is search_func:
+                counts["search"] += 1
+            if target is memorize_func:
+                counts["memorize"] += 1
+            return original_signature(obj)
+
+        monkeypatch.setattr(engine_module.inspect, "signature", _signature_spy)
+
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+        out_one = await engine.run(session_id="telegram:42", user_text="what is my timezone preference")
+        out_two = await engine.run(session_id="telegram:42", user_text="what is my timezone preference")
+        assert out_one.text == "ok"
+        assert out_two.text == "ok"
+        assert counts["search"] == 1
+        assert counts["memorize"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stop_requests_expire_by_ttl_and_cleanup() -> None:
+    provider = FakeProviderWithSamplingCapture()
+    engine = AgentEngine(provider=provider, tools=FakeTools())
+    now = {"value": 1000.0}
+
+    def _fake_monotonic() -> float:
+        return float(now["value"])
+
+    original_monotonic = engine_module.time.monotonic
+    engine_module.time.monotonic = _fake_monotonic
+    try:
+        assert engine.request_stop("cli:stale-stop") is True
+        assert "cli:stale-stop" in engine._stop_requests
+
+        now["value"] += engine._stop_request_ttl_seconds + 1.0
+        assert engine._stop_requested(session_id="cli:stale-stop", stop_event=None) is False
+        assert "cli:stale-stop" not in engine._stop_requests
+
+        assert engine.request_stop("cli:active-stop") is True
+        assert engine._stop_requested(session_id="cli:active-stop", stop_event=None) is True
+        engine.clear_stop("cli:active-stop")
+        assert engine._stop_requested(session_id="cli:active-stop", stop_event=None) is False
+    finally:
+        engine_module.time.monotonic = original_monotonic

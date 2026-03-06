@@ -6,6 +6,7 @@ import json
 import inspect
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -66,6 +67,12 @@ class _ToolExecutionRecord:
     signature: str
     tool_name: str
     outcome_hash: str
+
+
+@dataclass(slots=True)
+class _CallableParameterSpec:
+    names: frozenset[str]
+    accepts_kwargs: bool
 
 
 class AgentLoopError(Exception):
@@ -320,9 +327,13 @@ class AgentEngine:
             repeat_threshold=repeat_threshold,
             critical_threshold=critical_threshold,
         )
-        self._stop_requests: set[str] = set()
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._stop_requests: dict[str, float] = {}
+        self._stop_request_ttl_seconds = 1800.0
+        self._stop_request_cleanup_interval_seconds = 60.0
+        self._last_stop_request_cleanup = 0.0
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._session_locks_guard = asyncio.Lock()
+        self._callable_parameter_specs: dict[tuple[int, int], _CallableParameterSpec | None] = {}
         self._retrieval_route_counts: dict[str, int] = {
             self._MEMORY_ROUTE_NO_RETRIEVE: 0,
             self._MEMORY_ROUTE_RETRIEVE: 0,
@@ -467,10 +478,17 @@ class AgentEngine:
         tools: list[dict[str, Any]],
         reasoning_effort: str | None,
     ) -> ProviderResult:
-        complete_sig = inspect.signature(self.provider.complete)
-        accepts_max_tokens = "max_tokens" in complete_sig.parameters
-        accepts_temperature = "temperature" in complete_sig.parameters
-        accepts_reasoning_effort = "reasoning_effort" in complete_sig.parameters
+        complete_fn = self.provider.complete
+        complete_spec = self._callable_parameter_spec(complete_fn)
+        accepts_max_tokens = complete_spec is not None and (
+            "max_tokens" in complete_spec.names or complete_spec.accepts_kwargs
+        )
+        accepts_temperature = complete_spec is not None and (
+            "temperature" in complete_spec.names or complete_spec.accepts_kwargs
+        )
+        accepts_reasoning_effort = complete_spec is not None and (
+            "reasoning_effort" in complete_spec.names or complete_spec.accepts_kwargs
+        )
         kwargs: dict[str, Any] = {"messages": messages, "tools": tools}
         if accepts_max_tokens:
             kwargs["max_tokens"] = self.max_tokens
@@ -690,14 +708,33 @@ class AgentEngine:
         return "" if rewritten.lower() == original else rewritten
 
     @staticmethod
-    def _accepts_parameter(func: Any, parameter: str) -> bool:
+    def _callable_cache_key(func: Any) -> tuple[int, int]:
+        underlying = getattr(func, "__func__", func)
+        owner = getattr(func, "__self__", None)
+        return id(underlying), id(owner) if owner is not None else 0
+
+    def _callable_parameter_spec(self, func: Any) -> _CallableParameterSpec | None:
+        key = self._callable_cache_key(func)
+        cached = self._callable_parameter_specs.get(key)
+        if key in self._callable_parameter_specs:
+            return cached
         try:
             signature = inspect.signature(func)
         except (TypeError, ValueError):
+            self._callable_parameter_specs[key] = None
+            return None
+        spec = _CallableParameterSpec(
+            names=frozenset(signature.parameters.keys()),
+            accepts_kwargs=any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()),
+        )
+        self._callable_parameter_specs[key] = spec
+        return spec
+
+    def _accepts_parameter(self, func: Any, parameter: str) -> bool:
+        spec = self._callable_parameter_spec(func)
+        if spec is None:
             return False
-        if parameter in signature.parameters:
-            return True
-        return any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values())
+        return parameter in spec.names or spec.accepts_kwargs
 
     def _memory_search(
         self,
@@ -872,13 +909,30 @@ class AgentEngine:
         normalized = str(session_id or "").strip()
         if not normalized:
             return False
-        self._stop_requests.add(normalized)
+        now = time.monotonic()
+        self._cleanup_expired_stop_requests(now=now)
+        self._stop_requests[normalized] = now
         return True
 
     def clear_stop(self, session_id: str) -> None:
         normalized = str(session_id or "").strip()
         if normalized:
-            self._stop_requests.discard(normalized)
+            self._cleanup_expired_stop_requests(now=time.monotonic())
+            self._stop_requests.pop(normalized, None)
+
+    def _cleanup_expired_stop_requests(self, *, now: float | None = None, force: bool = False) -> None:
+        if not self._stop_requests:
+            return
+        timestamp = float(now if now is not None else time.monotonic())
+        if not force:
+            elapsed = timestamp - self._last_stop_request_cleanup
+            if elapsed < self._stop_request_cleanup_interval_seconds and len(self._stop_requests) < 128:
+                return
+        cutoff = timestamp - self._stop_request_ttl_seconds
+        stale = [sid for sid, created_at in self._stop_requests.items() if created_at <= cutoff]
+        for sid in stale:
+            self._stop_requests.pop(sid, None)
+        self._last_stop_request_cleanup = timestamp
 
     async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         async with self._session_locks_guard:
@@ -1102,11 +1156,11 @@ class AgentEngine:
 
         return f"{normalized_main}{digest_suffix}"
 
-    @staticmethod
-    def _stop_requested(*, session_id: str, stop_event: asyncio.Event | None, stop_requests: set[str]) -> bool:
+    def _stop_requested(self, *, session_id: str, stop_event: asyncio.Event | None) -> bool:
         if stop_event is not None and stop_event.is_set():
             return True
-        return session_id in stop_requests
+        self._cleanup_expired_stop_requests(now=time.monotonic())
+        return session_id in self._stop_requests
 
     async def _emit_progress(
         self,
@@ -1239,7 +1293,7 @@ class AgentEngine:
 
         while iteration < (budget.max_iterations or 1):
             iteration += 1
-            if self._stop_requested(session_id=session_id, stop_event=stop_event, stop_requests=self._stop_requests):
+            if self._stop_requested(session_id=session_id, stop_event=stop_event):
                 final = ProviderResult(text="Stopped current task.", tool_calls=[], model="engine/stop")
                 run_log.info("turn cancelled before llm iteration={}", iteration)
                 break
@@ -1305,7 +1359,7 @@ class AgentEngine:
                 )
 
                 for idx, tool_call in enumerate(step.tool_calls):
-                    if self._stop_requested(session_id=session_id, stop_event=stop_event, stop_requests=self._stop_requests):
+                    if self._stop_requested(session_id=session_id, stop_event=stop_event):
                         final = ProviderResult(text="Stopped current task.", tool_calls=[], model="engine/stop")
                         run_log.info("turn cancelled during tool execution iteration={} idx={}", iteration, idx)
                         break
