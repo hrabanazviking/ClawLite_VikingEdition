@@ -118,6 +118,26 @@ def test_web_fetch_mode_json_requires_json_mime() -> None:
     asyncio.run(_scenario())
 
 
+def test_web_fetch_blocks_dns_resolution_drift() -> None:
+    async def _scenario() -> None:
+        responses = [_FakeResponse("ok page", headers={"content-type": "text/plain"})]
+        resolution_side_effects = [
+            [(0, 0, 0, "", ("93.184.216.34", 0))],
+            [(0, 0, 0, "", ("1.1.1.1", 0))],
+        ]
+        with patch("clawlite.tools.web.socket.getaddrinfo", side_effect=resolution_side_effects), patch(
+            "httpx.AsyncClient",
+            side_effect=lambda **kwargs: _FakeClient(responses, **kwargs),
+        ):
+            out = await WebFetchTool().run({"url": "https://example.com"}, ToolContext(session_id="s"))
+            payload = json.loads(out)
+            assert payload["ok"] is False
+            assert payload["error"]["code"] == "blocked_url"
+            assert "resolution changed unexpectedly" in payload["error"]["message"]
+
+    asyncio.run(_scenario())
+
+
 def test_web_search_tool_returns_structured_payload() -> None:
     class _DDGS:
         def __init__(self, **_: Any) -> None:

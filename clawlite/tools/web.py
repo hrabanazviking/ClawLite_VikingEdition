@@ -118,7 +118,7 @@ class WebFetchTool(Tool):
         current = url
         headers = {"User-Agent": "ClawLiteWebTool/1.0"}
 
-        await self._validate_target(current)
+        _, pre_request_ips, hostname_based_target = await self._validate_target(current)
         async with _build_client(timeout=timeout, proxy=self.proxy) as client:
             while True:
                 response = await client.get(current, headers=headers)
@@ -130,16 +130,19 @@ class WebFetchTool(Tool):
                     if hops >= self.max_redirects:
                         raise ValueError(f"redirect limit exceeded ({self.max_redirects})")
                     current = urljoin(str(response.url), location)
-                    await self._validate_target(current)
+                    _, pre_request_ips, hostname_based_target = await self._validate_target(current)
                     hops += 1
                     continue
 
+                _, post_response_ips, _ = await self._validate_target(current)
+                if hostname_based_target and not _has_ip_overlap(pre_request_ips, post_response_ips):
+                    raise ValueError("resolution changed unexpectedly")
                 response.raise_for_status()
                 return response, hops
 
         raise ValueError("empty redirect location")
 
-    async def _validate_target(self, raw_url: str) -> None:
+    async def _validate_target(self, raw_url: str) -> tuple[str, list[ipaddress._BaseAddress], bool]:
         parsed = urlparse(raw_url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("only http/https URLs are supported")
@@ -148,6 +151,7 @@ class WebFetchTool(Tool):
             raise ValueError("missing host")
 
         ip_literal = _ip_literal(host)
+        hostname_based_target = ip_literal is None
         ips = [ip_literal] if ip_literal is not None else await _resolve_ips_async(host)
 
         if _matches_rules(host=host, ips=ips, rules=self.denylist):
@@ -159,6 +163,8 @@ class WebFetchTool(Tool):
             for ip in ips:
                 if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
                     raise ValueError("target resolves to private or local address")
+
+        return host, ips, hostname_based_target
 
 
 class WebSearchTool(Tool):
@@ -286,6 +292,14 @@ def _matches_rules(*, host: str, ips: list[ipaddress._BaseAddress], rules: list[
         if host == rule:
             return True
     return False
+
+
+def _has_ip_overlap(
+    pre_request_ips: list[ipaddress._BaseAddress],
+    post_response_ips: list[ipaddress._BaseAddress],
+) -> bool:
+    pre_values = set(pre_request_ips)
+    return any(ip in pre_values for ip in post_response_ips)
 
 
 def _mime_type(raw: str) -> str:
