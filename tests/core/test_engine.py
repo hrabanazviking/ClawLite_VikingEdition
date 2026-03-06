@@ -435,19 +435,45 @@ class FakePlannerMemory:
         recovered: list[str] | None = None,
         working_rows: list[dict[str, Any]] | None = None,
         recover_error: Exception | None = None,
+        search_limit: int | None = None,
     ) -> None:
         self.routes = routes or {}
         self.recovered = recovered or []
         self.working_rows = working_rows or []
         self.recover_error = recover_error
+        self.search_limit = search_limit
         self.search_calls: list[str] = []
+        self.search_call_details: list[dict[str, Any]] = []
         self.working_calls: list[dict[str, Any]] = []
         self.recovery_calls: list[tuple[str, int]] = []
 
-    def search(self, query: str, *, limit: int = 5) -> list[MemoryRecord]:
-        del limit
+    def integration_policy(self, actor: str, *, session_id: str = "") -> dict[str, Any]:
+        del actor, session_id
+        payload = {"allow_memory_write": True}
+        if self.search_limit is not None:
+            payload["recommended_search_limit"] = int(self.search_limit)
+        return payload
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        user_id: str = "",
+        session_id: str = "",
+        include_shared: bool = False,
+    ) -> list[MemoryRecord]:
         self.search_calls.append(query)
-        return self.routes.get(query, [])
+        self.search_call_details.append(
+            {
+                "query": query,
+                "limit": limit,
+                "user_id": user_id,
+                "session_id": session_id,
+                "include_shared": include_shared,
+            }
+        )
+        return self.routes.get(query, [])[:limit]
 
     def consolidate(self, messages, *, source: str = "session"):
         del messages, source
@@ -1354,7 +1380,30 @@ def test_engine_memory_planner_next_query_rewrites_after_insufficient_first_hit(
 
         out = await engine.run(session_id="cli:next-query", user_text=original_query)
         assert out.text == "ok"
-        assert memory.search_calls == [original_query, rewritten_query]
+        assert memory.search_calls == [original_query, rewritten_query, rewritten_query]
+        assert memory.search_call_details == [
+            {
+                "query": original_query,
+                "limit": 6,
+                "user_id": "next-query",
+                "session_id": "cli:next-query",
+                "include_shared": True,
+            },
+            {
+                "query": rewritten_query,
+                "limit": 6,
+                "user_id": "next-query",
+                "session_id": "cli:next-query",
+                "include_shared": True,
+            },
+            {
+                "query": rewritten_query,
+                "limit": 12,
+                "user_id": "next-query",
+                "session_id": "cli:next-query",
+                "include_shared": True,
+            },
+        ]
 
     asyncio.run(_scenario())
 
@@ -1611,6 +1660,113 @@ def test_engine_retrieval_metrics_latency_buckets_accounting(monkeypatch) -> Non
         "50_200ms": 1,
         "gte_200ms": 1,
     }
+
+
+def test_engine_planner_merges_parent_subagent_digest_when_primary_memory_is_weak() -> None:
+    provider = FakePromptCaptureProvider()
+    query = "blocker timeline owner actions"
+    memory = FakePlannerMemory(
+        routes={
+            query: [
+                MemoryRecord(
+                    id="plain-1",
+                    text="blocker pending",
+                    source="session:cli:owner",
+                    created_at="2026-03-05T12:00:00+00:00",
+                ),
+                MemoryRecord(
+                    id="digest-1",
+                    text="blocker timeline owner next actions confirmed by delegated worker",
+                    source="subagent-digest:cli:owner",
+                    created_at="2026-03-05T12:05:00+00:00",
+                    metadata={
+                        "subagent_digest": True,
+                        "subagent_parent_session_id": "cli:owner",
+                    },
+                ),
+            ]
+        },
+        search_limit=1,
+    )
+    engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+    run_log = bind_event("tests.engine.subagent-digest-planner")
+
+    snippets = engine._plan_memory_snippets(
+        session_id="cli:owner",
+        user_id="u-1",
+        user_text=query,
+        run_log=run_log,
+    )
+
+    assert len(snippets) == 2
+    assert "[src:subagent-digest:cli:owner]" in snippets[0]
+    assert "[src:session:cli:owner]" in snippets[1]
+    assert memory.search_call_details == [
+        {
+            "query": query,
+            "limit": 1,
+            "user_id": "u-1",
+            "session_id": "cli:owner",
+            "include_shared": True,
+        },
+        {
+            "query": query,
+            "limit": 3,
+            "user_id": "u-1",
+            "session_id": "cli:owner",
+            "include_shared": True,
+        },
+    ]
+
+
+def test_engine_planner_filters_foreign_subagent_digests_by_parent_session() -> None:
+    provider = FakePromptCaptureProvider()
+    query = "blocker timeline owner actions"
+    memory = FakePlannerMemory(
+        routes={
+            query: [
+                MemoryRecord(
+                    id="plain-1",
+                    text="blocker pending",
+                    source="session:cli:owner",
+                    created_at="2026-03-05T12:00:00+00:00",
+                ),
+                MemoryRecord(
+                    id="foreign-digest",
+                    text="blocker timeline owner actions from another parent",
+                    source="subagent-digest:cli:other",
+                    created_at="2026-03-05T12:04:00+00:00",
+                    metadata={
+                        "subagent_digest": True,
+                        "subagent_parent_session_id": "cli:other",
+                    },
+                ),
+                MemoryRecord(
+                    id="local-digest",
+                    text="blocker timeline owner next actions confirmed by delegated worker",
+                    source="subagent-digest:cli:owner",
+                    created_at="2026-03-05T12:05:00+00:00",
+                    metadata={
+                        "subagent_digest": True,
+                        "subagent_parent_session_id": "cli:owner",
+                    },
+                ),
+            ]
+        },
+        search_limit=1,
+    )
+    engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+    run_log = bind_event("tests.engine.subagent-digest-scope")
+
+    snippets = engine._plan_memory_snippets(
+        session_id="cli:owner",
+        user_id="u-1",
+        user_text=query,
+        run_log=run_log,
+    )
+
+    assert any("[src:subagent-digest:cli:owner]" in item for item in snippets)
+    assert all("[src:subagent-digest:cli:other]" not in item for item in snippets)
 
 
 def test_engine_respects_stop_event_before_provider_call() -> None:

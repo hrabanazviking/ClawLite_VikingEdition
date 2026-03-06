@@ -777,6 +777,83 @@ class AgentEngine:
         return "" if rewritten.lower() == original else rewritten
 
     @staticmethod
+    def _memory_row_id(row: MemoryRecord) -> str:
+        return str(getattr(row, "id", "") or "").strip()
+
+    @staticmethod
+    def _subagent_digest_probe_limit(search_limit: int) -> int:
+        clean_limit = max(1, int(search_limit or 1))
+        return max(2, min(12, max(clean_limit * 2, clean_limit + 2)))
+
+    @staticmethod
+    def _row_metadata(row: MemoryRecord) -> dict[str, Any]:
+        metadata = getattr(row, "metadata", {})
+        return metadata if isinstance(metadata, dict) else {}
+
+    @classmethod
+    def _is_subagent_digest_record(cls, row: MemoryRecord, *, session_id: str) -> bool:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return False
+        source = str(getattr(row, "source", "") or "").strip()
+        if source == f"subagent-digest:{clean_session_id}":
+            return True
+        metadata = cls._row_metadata(row)
+        if not bool(metadata.get("subagent_digest", False)):
+            return False
+        return str(metadata.get("subagent_parent_session_id", "") or "").strip() == clean_session_id
+
+    @classmethod
+    def _filter_subagent_digest_rows(
+        cls,
+        rows: list[MemoryRecord],
+        *,
+        session_id: str,
+        limit: int,
+    ) -> list[MemoryRecord]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return []
+        bounded_limit = max(1, int(limit or 1))
+        out: list[MemoryRecord] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not cls._is_subagent_digest_record(row, session_id=clean_session_id):
+                continue
+            row_id = cls._memory_row_id(row)
+            if row_id and row_id in seen:
+                continue
+            if row_id:
+                seen.add(row_id)
+            out.append(row)
+            if len(out) >= bounded_limit:
+                break
+        return out
+
+    @classmethod
+    def _merge_memory_rows(
+        cls,
+        primary: list[MemoryRecord],
+        secondary: list[MemoryRecord],
+        *,
+        limit: int,
+    ) -> list[MemoryRecord]:
+        bounded_limit = max(1, int(limit or 1))
+        out: list[MemoryRecord] = []
+        seen: set[str] = set()
+        for group in (primary, secondary):
+            for row in group:
+                row_id = cls._memory_row_id(row)
+                if row_id and row_id in seen:
+                    continue
+                if row_id:
+                    seen.add(row_id)
+                out.append(row)
+                if len(out) >= bounded_limit:
+                    return out
+        return out
+
+    @staticmethod
     def _callable_cache_key(func: Any) -> tuple[int, int]:
         underlying = getattr(func, "__func__", func)
         owner = getattr(func, "__self__", None)
@@ -947,6 +1024,36 @@ class AgentEngine:
                         hits += 1
                         selected_rows = second_rows
 
+            subagent_digest_rows: list[MemoryRecord] = []
+            if (
+                session_id
+                and selected_rows
+                and not self._memory_result_sufficient(selected_query, selected_rows)
+                and not any(self._is_subagent_digest_record(row, session_id=session_id) for row in selected_rows)
+            ):
+                started = time.perf_counter()
+                digest_probe_rows = self._memory_search(
+                    query=selected_query,
+                    limit=self._subagent_digest_probe_limit(search_limit),
+                    user_id=user_id,
+                    session_id=session_id,
+                    include_shared=True,
+                )
+                attempts += 1
+                self._record_retrieval_latency((time.perf_counter() - started) * 1000.0)
+                subagent_digest_rows = self._filter_subagent_digest_rows(
+                    digest_probe_rows,
+                    session_id=session_id,
+                    limit=search_limit,
+                )
+                if subagent_digest_rows:
+                    hits += 1
+                    selected_rows = self._merge_memory_rows(
+                        subagent_digest_rows,
+                        selected_rows,
+                        limit=self._subagent_digest_probe_limit(search_limit),
+                    )
+
             recovery_snippets: list[str] = []
             if not selected_rows:
                 working_set_fn = getattr(self.memory, "get_working_set", None)
@@ -997,10 +1104,11 @@ class AgentEngine:
                         )
 
             run_log.debug(
-                "memory planner route={} query={} rows={} recovery_rows={}",
+                "memory planner route={} query={} rows={} subagent_digest_rows={} recovery_rows={}",
                 route,
                 selected_query or "-",
                 len(selected_rows),
+                len(subagent_digest_rows),
                 len(recovery_snippets),
             )
             self._record_retrieval_metrics(
