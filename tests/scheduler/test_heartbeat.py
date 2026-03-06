@@ -227,3 +227,86 @@ def test_save_state_atomic_replace_fail_soft(tmp_path: Path, monkeypatch) -> Non
     assert payload["external"] == "original"
     leftovers = list(state_file.parent.glob(f".{state_file.name}.*.tmp"))
     assert leftovers == []
+
+
+def test_execute_tick_state_mutation_waits_for_tick_lock(tmp_path: Path) -> None:
+    async def _scenario(state_file: Path) -> None:
+        hb = HeartbeatService(state_path=state_file)
+        initial_ticks = int(hb._state.get("ticks", 0) or 0)
+
+        await hb._tick_lock.acquire()
+
+        async def _tick() -> HeartbeatDecision:
+            return HeartbeatDecision(action="skip", reason="heartbeat_ok")
+
+        task = asyncio.create_task(hb._execute_tick(_tick, trigger="now"))
+        await asyncio.sleep(0.02)
+
+        assert int(hb._state.get("ticks", 0) or 0) == initial_ticks
+        assert hb._state.get("last_trigger", "") != "now"
+
+        hb._tick_lock.release()
+        decision = await task
+
+        assert decision.reason == "heartbeat_ok"
+        assert int(hb._state.get("ticks", 0) or 0) == initial_ticks + 1
+
+    asyncio.run(_scenario(tmp_path / "heartbeat-state.json"))
+
+
+def test_execute_tick_uses_async_state_save_wrapper(tmp_path: Path, monkeypatch) -> None:
+    async def _scenario(state_file: Path) -> None:
+        hb = HeartbeatService(state_path=state_file)
+        calls: list[str] = []
+
+        async def _save_state_async() -> None:
+            calls.append("async")
+
+        def _save_state_sync() -> None:
+            calls.append("sync")
+            raise AssertionError("_save_state should not be called directly from _execute_tick")
+
+        monkeypatch.setattr(hb, "_save_state_async", _save_state_async)
+        monkeypatch.setattr(hb, "_save_state", _save_state_sync)
+
+        async def _tick() -> HeartbeatDecision:
+            return HeartbeatDecision(action="skip", reason="heartbeat_ok")
+
+        decision = await hb._execute_tick(_tick, trigger="now")
+
+        assert decision.reason == "heartbeat_ok"
+        assert calls == ["async"]
+
+    asyncio.run(_scenario(tmp_path / "heartbeat-state.json"))
+
+
+def test_heartbeat_loop_supervisor_recovers_from_outer_exceptions() -> None:
+    async def _scenario() -> None:
+        hb = HeartbeatService(interval_seconds=9999)
+        beats: list[int] = []
+
+        async def _tick() -> HeartbeatDecision:
+            beats.append(1)
+            return HeartbeatDecision(action="skip", reason="heartbeat_ok")
+
+        original_next_trigger_source = hb._next_trigger_source
+        calls = 0
+
+        async def _flaky_next_trigger_source() -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("loop source failure")
+            return await original_next_trigger_source()
+
+        hb._next_trigger_source = _flaky_next_trigger_source  # type: ignore[method-assign]
+        hb.interval_seconds = 0.01
+
+        await hb.start(_tick)
+        await asyncio.sleep(0.25)
+        await hb.stop()
+
+        assert calls >= 1
+        assert len(beats) >= 2
+
+    asyncio.run(_scenario())

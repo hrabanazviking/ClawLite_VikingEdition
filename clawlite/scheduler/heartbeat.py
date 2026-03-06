@@ -214,6 +214,9 @@ class HeartbeatService:
                 except OSError:
                     pass
 
+    async def _save_state_async(self) -> None:
+        await asyncio.to_thread(self._save_state)
+
     @property
     def last_decision(self) -> HeartbeatDecision:
         row = self._state.get("last_decision")
@@ -222,12 +225,12 @@ class HeartbeatService:
         return HeartbeatDecision(action="skip", reason="state_unavailable")
 
     async def _execute_tick(self, on_tick: TickHandler, *, trigger: str) -> HeartbeatDecision:
-        now_iso = self._utc_now_iso()
-        self._state["last_tick_iso"] = now_iso
-        self._state["last_trigger"] = trigger
-        self._state["ticks"] = int(self._state.get("ticks", 0) or 0) + 1
         decision = HeartbeatDecision(action="skip", reason="unknown")
         async with self._tick_lock:
+            now_iso = self._utc_now_iso()
+            self._state["last_tick_iso"] = now_iso
+            self._state["last_trigger"] = trigger
+            self._state["ticks"] = int(self._state.get("ticks", 0) or 0) + 1
             try:
                 bind_event("heartbeat.tick").debug("heartbeat tick trigger={}", trigger)
                 result = await on_tick()
@@ -240,31 +243,31 @@ class HeartbeatService:
                 decision = HeartbeatDecision(action="skip", reason="tick_error")
                 bind_event("heartbeat.tick").error("heartbeat error={}", exc)
 
-        self._state["last_decision"] = {
-            "action": decision.action,
-            "reason": decision.reason,
-            "text": decision.text,
-        }
-        self._state["last_check_iso"] = now_iso
-        self._state["last_action"] = decision.action
-        self._state["last_reason"] = decision.reason
-        if decision.reason == "heartbeat_ok":
-            self._state["last_ok_iso"] = now_iso
-        if decision.action == "run":
-            self._state["run_count"] = int(self._state.get("run_count", 0) or 0) + 1
-            self._state["last_run_iso"] = now_iso
-            self._state["last_actionable_iso"] = now_iso
-            excerpt = self._bound_excerpt(decision.text)
-            if excerpt:
-                self._state["last_actionable_excerpt"] = excerpt
+            self._state["last_decision"] = {
+                "action": decision.action,
+                "reason": decision.reason,
+                "text": decision.text,
+            }
+            self._state["last_check_iso"] = now_iso
+            self._state["last_action"] = decision.action
+            self._state["last_reason"] = decision.reason
+            if decision.reason == "heartbeat_ok":
+                self._state["last_ok_iso"] = now_iso
+            if decision.action == "run":
+                self._state["run_count"] = int(self._state.get("run_count", 0) or 0) + 1
+                self._state["last_run_iso"] = now_iso
+                self._state["last_actionable_iso"] = now_iso
+                excerpt = self._bound_excerpt(decision.text)
+                if excerpt:
+                    self._state["last_actionable_excerpt"] = excerpt
+                else:
+                    self._state.pop("last_actionable_excerpt", None)
+                bind_event("heartbeat.tick").info("heartbeat run reason={}", decision.reason)
             else:
-                self._state.pop("last_actionable_excerpt", None)
-            bind_event("heartbeat.tick").info("heartbeat run reason={}", decision.reason)
-        else:
-            self._state["skip_count"] = int(self._state.get("skip_count", 0) or 0) + 1
-            self._state["last_skip_iso"] = now_iso
-            bind_event("heartbeat.tick").debug("heartbeat skip reason={}", decision.reason)
-        self._save_state()
+                self._state["skip_count"] = int(self._state.get("skip_count", 0) or 0) + 1
+                self._state["last_skip_iso"] = now_iso
+                bind_event("heartbeat.tick").debug("heartbeat skip reason={}", decision.reason)
+            await self._save_state_async()
         return decision
 
     async def _next_trigger_source(self) -> str:
@@ -289,16 +292,24 @@ class HeartbeatService:
 
         async def _loop() -> None:
             first_tick = True
+            supervisor_backoff_seconds = 0.1
             while self._running:
-                trigger = "startup" if first_tick else await self._next_trigger_source()
-                first_tick = False
-                if not self._running:
-                    break
-                decision = await self._execute_tick(on_tick, trigger=trigger)
-                if trigger == "now" and self._trigger_waiters:
-                    waiter = self._trigger_waiters.pop(0)
-                    if not waiter.done():
-                        waiter.set_result(decision)
+                try:
+                    trigger = "startup" if first_tick else await self._next_trigger_source()
+                    first_tick = False
+                    if not self._running:
+                        break
+                    decision = await self._execute_tick(on_tick, trigger=trigger)
+                    if trigger == "now" and self._trigger_waiters:
+                        waiter = self._trigger_waiters.pop(0)
+                        if not waiter.done():
+                            waiter.set_result(decision)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    bind_event("heartbeat.loop").error("heartbeat supervisor error={}", exc)
+                    if self._running:
+                        await asyncio.sleep(supervisor_backoff_seconds)
 
         self._task = asyncio.create_task(_loop())
 
