@@ -165,9 +165,9 @@ class SkillTool(Tool):
                 user_id=ctx.user_id,
             )
         except RuntimeError as exc:
-            expected = f"tool_blocked_by_safety_policy:exec:{ctx.channel}"
-            if str(exc) == expected:
-                return f"skill_blocked:{spec_name}:{expected}"
+            error = str(exc)
+            if error.startswith("tool_blocked_by_safety_policy:exec:"):
+                return f"skill_blocked:{spec_name}:{error}"
             raise
 
     async def _run_command_with_local_fallback(self, *, spec_name: str, argv: list[str], timeout: float) -> str:

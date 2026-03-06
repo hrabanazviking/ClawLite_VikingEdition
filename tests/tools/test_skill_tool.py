@@ -232,6 +232,33 @@ def test_run_skill_returns_skill_blocked_when_registry_blocks_exec(tmp_path: Pat
     asyncio.run(_scenario())
 
 
+def test_run_skill_returns_skill_blocked_when_registry_blocks_exec_unknown_channel(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "echo-skill",
+        "name: echo-skill\ndescription: echo\ncommand: echo",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["exec"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "echo-skill", "args": ["hello"]},
+            ToolContext(session_id="skill", channel="", user_id="42"),
+        )
+        assert out == "skill_blocked:echo-skill:tool_blocked_by_safety_policy:exec:unknown"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_command_uses_exec_tool_in_cli_context(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
