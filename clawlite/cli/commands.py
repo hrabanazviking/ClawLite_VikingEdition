@@ -28,6 +28,8 @@ from clawlite.cli.ops import memory_version_snapshot
 from clawlite.cli.ops import memory_doctor_snapshot
 from clawlite.cli.ops import onboarding_validation
 from clawlite.cli.ops import heartbeat_trigger
+from clawlite.cli.ops import pairing_approve
+from clawlite.cli.ops import pairing_list
 from clawlite.cli.ops import provider_clear_auth
 from clawlite.cli.ops import provider_live_probe
 from clawlite.cli.ops import provider_validation
@@ -290,6 +292,24 @@ def cmd_heartbeat_trigger(args: argparse.Namespace) -> int:
         gateway_url=str(args.gateway_url or ""),
         token=str(args.token or ""),
         timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_pairing_list(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = pairing_list(cfg, channel=str(args.channel or ""))
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_pairing_approve(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = pairing_approve(
+        cfg,
+        channel=str(args.channel or ""),
+        code=str(args.code or ""),
     )
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
@@ -868,6 +888,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_heartbeat_trigger.add_argument("--token", default="", help="Bearer token for control endpoint")
     p_heartbeat_trigger.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     p_heartbeat_trigger.set_defaults(handler=cmd_heartbeat_trigger)
+
+    p_pairing = sub.add_parser("pairing", help="Manage pending pairing requests")
+    pairing_sub = p_pairing.add_subparsers(dest="pairing_command", required=True)
+
+    p_pairing_list = pairing_sub.add_parser("list", help="List pending pairing requests for a channel")
+    p_pairing_list.add_argument("channel")
+    p_pairing_list.set_defaults(handler=cmd_pairing_list)
+
+    p_pairing_approve = pairing_sub.add_parser("approve", help="Approve a pairing code for a channel")
+    p_pairing_approve.add_argument("channel")
+    p_pairing_approve.add_argument("code")
+    p_pairing_approve.set_defaults(handler=cmd_pairing_approve)
 
     p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
     p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")

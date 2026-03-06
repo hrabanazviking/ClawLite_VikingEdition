@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from clawlite.cli.commands import main
+from clawlite.channels.telegram_pairing import TelegramPairingStore
 from clawlite.workspace.loader import TEMPLATE_FILES
 
 
@@ -152,6 +153,53 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     assert rc_ver == 0
     ver_out = capsys.readouterr().out.strip()
     assert ver_out
+
+
+def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    pairing_state_path = tmp_path / "telegram-pairing.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "channels": {
+                    "telegram": {
+                        "enabled": True,
+                        "token": "123:abc",
+                        "pairing_state_path": str(pairing_state_path),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = TelegramPairingStore(token="123:abc", state_path=str(pairing_state_path))
+    request, created = store.issue_request(chat_id="55", user_id="321", username="guest", first_name="Guest")
+    assert created is True
+    code = str(request["code"])
+
+    rc_list = main(["--config", str(config_path), "pairing", "list", "telegram"])
+    assert rc_list == 0
+    payload_list = json.loads(capsys.readouterr().out)
+    assert payload_list["ok"] is True
+    assert payload_list["channel"] == "telegram"
+    assert payload_list["count"] == 1
+    assert payload_list["pending"][0]["code"] == code
+    assert payload_list["pending"][0]["user_id"] == "321"
+
+    rc_approve = main(["--config", str(config_path), "pairing", "approve", "telegram", code])
+    assert rc_approve == 0
+    payload_approve = json.loads(capsys.readouterr().out)
+    assert payload_approve["ok"] is True
+    assert payload_approve["channel"] == "telegram"
+    assert payload_approve["code"] == code
+    assert payload_approve["request"]["user_id"] == "321"
+    assert "321" in payload_approve["approved_entries"]
+    assert "guest" in payload_approve["approved_entries"]
+    assert "@guest" in payload_approve["approved_entries"]
 
 
 def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:

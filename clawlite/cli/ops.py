@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from clawlite.channels.telegram_pairing import TelegramPairingStore
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
@@ -188,6 +189,57 @@ def heartbeat_trigger(
         detail = str(body or "heartbeat_trigger_failed")
     payload["error"] = str(detail)
     return payload
+
+
+def _telegram_pairing_store(config: AppConfig) -> TelegramPairingStore | None:
+    telegram = getattr(config.channels, "telegram", None)
+    if telegram is None:
+        return None
+    token = str(getattr(telegram, "token", "") or "").strip()
+    if not token:
+        return None
+    return TelegramPairingStore(
+        token=token,
+        state_path=str(getattr(telegram, "pairing_state_path", "") or ""),
+    )
+
+
+def pairing_list(config: AppConfig, *, channel: str) -> dict[str, Any]:
+    channel_name = str(channel or "").strip().lower()
+    if channel_name != "telegram":
+        return {"ok": False, "channel": channel_name, "error": f"unsupported_channel:{channel_name or channel}"}
+    store = _telegram_pairing_store(config)
+    if store is None:
+        return {"ok": False, "channel": channel_name, "error": "telegram_token_missing"}
+    pending = store.list_pending()
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "count": len(pending),
+        "pending": pending,
+    }
+
+
+def pairing_approve(config: AppConfig, *, channel: str, code: str) -> dict[str, Any]:
+    channel_name = str(channel or "").strip().lower()
+    normalized_code = str(code or "").strip().upper()
+    if channel_name != "telegram":
+        return {"ok": False, "channel": channel_name, "error": f"unsupported_channel:{channel_name or channel}"}
+    if not normalized_code:
+        return {"ok": False, "channel": channel_name, "error": "pairing_code_required"}
+    store = _telegram_pairing_store(config)
+    if store is None:
+        return {"ok": False, "channel": channel_name, "error": "telegram_token_missing"}
+    approved = store.approve(normalized_code)
+    if approved is None:
+        return {"ok": False, "channel": channel_name, "code": normalized_code, "error": "pairing_code_not_found"}
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "code": normalized_code,
+        "approved_entries": list(approved.get("approved_entries", [])),
+        "request": dict(approved.get("request", {})),
+    }
 
 
 def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:

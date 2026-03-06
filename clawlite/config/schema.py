@@ -581,6 +581,8 @@ class TelegramChannelConfig(BaseChannelConfig):
     group_allow_from: list[str] = field(default_factory=list)
     topic_allow_from: list[str] = field(default_factory=list)
     group_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pairing_state_path: str = ""
+    pairing_notice_cooldown_s: float = 30.0
     callback_signing_enabled: bool = False
     callback_signing_secret: str = ""
     callback_require_signed: bool = False
@@ -654,6 +656,10 @@ class TelegramChannelConfig(BaseChannelConfig):
             group_allow_from=cls._allow_from({"allow_from": data.get("group_allow_from", data.get("groupAllowFrom", []))}),
             topic_allow_from=cls._allow_from({"allow_from": data.get("topic_allow_from", data.get("topicAllowFrom", []))}),
             group_overrides=group_overrides,
+            pairing_state_path=str(data.get("pairing_state_path", data.get("pairingStatePath", "")) or "").strip(),
+            pairing_notice_cooldown_s=float(
+                data.get("pairing_notice_cooldown_s", data.get("pairingNoticeCooldownS", 30.0)) or 30.0
+            ),
             callback_signing_enabled=bool(
                 data.get("callback_signing_enabled", data.get("callbackSigningEnabled", False))
             ),

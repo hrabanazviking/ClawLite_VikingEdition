@@ -23,6 +23,7 @@ from typing import Any
 from loguru import logger
 
 from clawlite.channels.base import BaseChannel, cancel_task
+from clawlite.channels.telegram_pairing import TelegramPairingStore
 from clawlite.config.schema import TelegramChannelConfig
 
 MAX_MESSAGE_LEN = 4000
@@ -383,6 +384,14 @@ class TelegramChannel(BaseChannel):
         self.dedupe_state_path = self._normalize_state_path(
             str(getattr(telegram_config, "dedupe_state_path", "") or "")
         )
+        self.pairing_notice_cooldown_s = max(
+            0.0,
+            float(getattr(telegram_config, "pairing_notice_cooldown_s", 30.0) or 30.0),
+        )
+        self._pairing_store = TelegramPairingStore(
+            token=self.token,
+            state_path=str(getattr(telegram_config, "pairing_state_path", "") or ""),
+        )
         self.callback_signing_enabled = bool(getattr(telegram_config, "callback_signing_enabled", False))
         self.callback_signing_secret = str(getattr(telegram_config, "callback_signing_secret", "") or "")
         self.callback_require_signed = bool(getattr(telegram_config, "callback_require_signed", False))
@@ -438,6 +447,10 @@ class TelegramChannel(BaseChannel):
             "message_reaction_emitted_count": 0,
             "policy_blocked_count": 0,
             "policy_allowed_count": 0,
+            "pairing_required_count": 0,
+            "pairing_notice_sent_count": 0,
+            "pairing_request_created_count": 0,
+            "pairing_request_reused_count": 0,
             "action_edit_count": 0,
             "action_delete_count": 0,
             "action_react_count": 0,
@@ -458,6 +471,7 @@ class TelegramChannel(BaseChannel):
         self._own_sent_message_order: deque[tuple[str, int]] = deque()
         self._message_signatures: dict[tuple[str, int], str] = {}
         self._signature_limit = 4096
+        self._pairing_notice_sent_at: dict[str, float] = {}
         self._send_auth_breaker_seen_open = False
         self._typing_auth_breaker_seen_open = False
         self._load_update_dedupe_state()
@@ -1088,7 +1102,7 @@ class TelegramChannel(BaseChannel):
     @staticmethod
     def _normalize_access_policy(value: Any) -> str:
         policy = str(value or "open").strip().lower()
-        if policy not in {"open", "allowlist", "disabled"}:
+        if policy not in {"open", "allowlist", "disabled", "pairing"}:
             return "open"
         return policy
 
@@ -1112,7 +1126,27 @@ class TelegramChannel(BaseChannel):
                 out.append(value)
         return out
 
-    def _is_authorized_context(
+    def _pairing_allow_from_values(self) -> list[str]:
+        try:
+            return list(self._pairing_store.approved_entries())
+        except Exception as exc:
+            logger.warning("telegram pairing allowlist read failed error={}", exc)
+            return []
+
+    @staticmethod
+    def _sender_matches_allow_from(
+        *,
+        user_id: str,
+        username: str,
+        allowed_entries: list[str],
+    ) -> bool:
+        allowed = {item.strip() for item in allowed_entries if str(item or "").strip()}
+        if not allowed:
+            return False
+        candidates = TelegramChannel._sender_candidates(user_id=user_id, username=username)
+        return any(candidate in allowed for candidate in candidates)
+
+    def _authorization_decision(
         self,
         *,
         chat_type: str,
@@ -1120,10 +1154,7 @@ class TelegramChannel(BaseChannel):
         message_thread_id: int | None,
         user_id: str,
         username: str,
-    ) -> bool:
-        if not self._is_allowed_sender(user_id, username):
-            return False
-
+    ) -> str:
         normalized_chat_type = str(chat_type or "").strip().lower()
         normalized_chat_id = str(chat_id or "").strip()
         normalized_thread_id = self._coerce_thread_id(message_thread_id)
@@ -1164,18 +1195,59 @@ class TelegramChannel(BaseChannel):
                                 active_allow_from = self._normalize_allow_from_values(topic_allow_from_raw)
 
         active_policy = self._normalize_access_policy(active_policy)
-        if active_policy == "disabled":
-            return False
-        if active_policy == "open":
-            return True
+        pairing_allow_from: list[str] = []
+        if normalized_chat_type == "private" and active_policy == "pairing":
+            pairing_allow_from = self._pairing_allow_from_values()
 
-        if not active_allow_from:
-            return False
-        allowed = {item.strip() for item in active_allow_from if item.strip()}
-        if not allowed:
-            return False
-        candidates = self._sender_candidates(user_id=user_id, username=username)
-        return any(candidate in allowed for candidate in candidates)
+        if self.allow_from:
+            global_allow_from = list(self.allow_from)
+            if pairing_allow_from:
+                global_allow_from.extend(pairing_allow_from)
+            if not self._sender_matches_allow_from(
+                user_id=user_id,
+                username=username,
+                allowed_entries=global_allow_from,
+            ):
+                return "block"
+
+        if active_policy == "disabled":
+            return "block"
+        if active_policy == "open":
+            return "allow"
+
+        effective_allow_from = list(active_allow_from)
+        if pairing_allow_from:
+            effective_allow_from.extend(pairing_allow_from)
+        if self._sender_matches_allow_from(
+            user_id=user_id,
+            username=username,
+            allowed_entries=effective_allow_from,
+        ):
+            return "allow"
+
+        if active_policy == "pairing" and normalized_chat_type == "private":
+            return "pairing"
+        return "block"
+
+    def _is_authorized_context(
+        self,
+        *,
+        chat_type: str,
+        chat_id: str,
+        message_thread_id: int | None,
+        user_id: str,
+        username: str,
+    ) -> bool:
+        return (
+            self._authorization_decision(
+                chat_type=chat_type,
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                user_id=user_id,
+                username=username,
+            )
+            == "allow"
+        )
 
     def _authorize_inbound_context(
         self,
@@ -1186,18 +1258,78 @@ class TelegramChannel(BaseChannel):
         user_id: str,
         username: str,
     ) -> bool:
-        allowed = self._is_authorized_context(
+        decision = self._authorization_decision(
             chat_type=chat_type,
             chat_id=chat_id,
             message_thread_id=message_thread_id,
             user_id=user_id,
             username=username,
         )
-        if allowed:
+        if decision == "allow":
             self._signals["policy_allowed_count"] += 1
         else:
             self._signals["policy_blocked_count"] += 1
-        return allowed
+            if decision == "pairing":
+                self._signals["pairing_required_count"] += 1
+        return decision == "allow"
+
+    def _should_send_pairing_notice(self, *, chat_id: str, user_id: str) -> bool:
+        cooldown_s = max(0.0, float(self.pairing_notice_cooldown_s))
+        if cooldown_s <= 0:
+            return True
+        key = f"{chat_id}:{user_id}"
+        last_sent_at = float(self._pairing_notice_sent_at.get(key, 0.0) or 0.0)
+        now = time.monotonic()
+        if now - last_sent_at < cooldown_s:
+            return False
+        self._pairing_notice_sent_at[key] = now
+        return True
+
+    async def _handle_pairing_required(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        username: str,
+        first_name: str,
+    ) -> None:
+        try:
+            request, created = self._pairing_store.issue_request(
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+            )
+        except Exception as exc:
+            logger.warning("telegram pairing request failed chat={} user={} error={}", chat_id, user_id, exc)
+            return
+
+        if created:
+            self._signals["pairing_request_created_count"] += 1
+        else:
+            self._signals["pairing_request_reused_count"] += 1
+
+        if not created and not self._should_send_pairing_notice(chat_id=chat_id, user_id=user_id):
+            return
+
+        code = str(request.get("code", "") or "").strip().upper()
+        sender_label = f"@{username}" if username else user_id
+        pairing_text = "\n".join(
+            [
+                "ClawLite: access not configured.",
+                "",
+                f"Sender: {sender_label}",
+                f"Pairing code: {code}",
+                "",
+                "Ask the bot owner to approve with:",
+                f"`clawlite pairing approve telegram {code}`",
+            ]
+        )
+        try:
+            await self.send(target=chat_id, text=pairing_text)
+            self._signals["pairing_notice_sent_count"] += 1
+        except Exception as exc:
+            logger.warning("telegram pairing notice send failed chat={} user={} error={}", chat_id, user_id, exc)
 
     def _offset_path(self) -> Path:
         key = hashlib.sha256(self.token.encode("utf-8")).hexdigest()[:16]
@@ -1540,13 +1672,25 @@ class TelegramChannel(BaseChannel):
         chat_type = str(getattr(chat, "type", "") or "")
         user_id = str(getattr(user, "id", "") or chat_id)
         username = str(getattr(user, "username", "") or "").strip()
-        if not self._authorize_inbound_context(
+        auth_decision = self._authorization_decision(
             chat_type=chat_type,
             chat_id=chat_id,
             message_thread_id=message_thread_id,
             user_id=user_id,
             username=username,
-        ):
+        )
+        if auth_decision == "allow":
+            self._signals["policy_allowed_count"] += 1
+        else:
+            self._signals["policy_blocked_count"] += 1
+            if auth_decision == "pairing":
+                self._signals["pairing_required_count"] += 1
+                await self._handle_pairing_required(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    first_name=str(getattr(user, "first_name", "") or "").strip(),
+                )
             logger.debug("telegram inbound blocked user={} chat={}", user_id, chat_id)
             return True
 

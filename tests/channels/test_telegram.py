@@ -122,6 +122,144 @@ def test_telegram_dm_allowlist_policy_allows_listed_user_and_blocks_others() -> 
     asyncio.run(_scenario())
 
 
+def test_telegram_dm_policy_pairing_blocks_private_message_and_sends_pairing_notice(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dm_policy": "pairing",
+                "pairing_state_path": str(tmp_path / "telegram-pairing.json"),
+            },
+            on_message=_on_message,
+        )
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.sent.append(kwargs)
+                return SimpleNamespace(message_id=len(self.sent))
+
+        bot = FakeBot()
+        channel.bot = bot
+        user = SimpleNamespace(id=321, username="guest", first_name="Guest", language_code="en")
+        message = SimpleNamespace(
+            text="hello",
+            caption=None,
+            chat_id=55,
+            from_user=user,
+            message_id=10,
+            chat=SimpleNamespace(type="private"),
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        update = SimpleNamespace(update_id=120, message=message, edited_message=None, effective_message=message)
+
+        processed = await channel._handle_update(update)
+
+        assert processed is True
+        assert emitted == []
+        assert len(bot.sent) == 1
+        sent_text = str(bot.sent[0]["text"])
+        assert "Pairing code:" in sent_text
+        assert "clawlite pairing approve telegram" in sent_text
+        signals = channel.signals()
+        assert signals["policy_blocked_count"] == 1
+        assert signals["policy_allowed_count"] == 0
+        assert signals["pairing_required_count"] == 1
+        assert signals["pairing_request_created_count"] == 1
+        assert signals["pairing_notice_sent_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_dm_policy_pairing_allows_after_approval(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dm_policy": "pairing",
+                "pairing_state_path": str(tmp_path / "telegram-pairing.json"),
+            },
+            on_message=_on_message,
+        )
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.sent.append(kwargs)
+                return SimpleNamespace(message_id=len(self.sent))
+
+        bot = FakeBot()
+        channel.bot = bot
+        user = SimpleNamespace(id=321, username="guest", first_name="Guest", language_code="en")
+        chat = SimpleNamespace(type="private")
+
+        first_message = SimpleNamespace(
+            text="hello",
+            caption=None,
+            chat_id=55,
+            from_user=user,
+            message_id=10,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        first_update = SimpleNamespace(update_id=121, message=first_message, edited_message=None, effective_message=first_message)
+
+        await channel._handle_update(first_update)
+
+        pending = channel._pairing_store.list_pending()
+        assert len(pending) == 1
+        code = str(pending[0]["code"])
+        approved = channel._pairing_store.approve(code)
+        assert approved is not None
+
+        second_message = SimpleNamespace(
+            text="hello again",
+            caption=None,
+            chat_id=55,
+            from_user=user,
+            message_id=11,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        second_update = SimpleNamespace(update_id=122, message=second_message, edited_message=None, effective_message=second_message)
+
+        processed = await channel._handle_update(second_update)
+
+        assert processed is True
+        assert len(emitted) == 1
+        session_id, user_id, text, metadata = emitted[0]
+        assert session_id == "telegram:55"
+        assert user_id == "321"
+        assert text == "hello again"
+        assert metadata["channel"] == "telegram"
+        signals = channel.signals()
+        assert signals["policy_blocked_count"] == 1
+        assert signals["policy_allowed_count"] == 1
+        assert signals["pairing_required_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_group_policy_disabled_blocks_group_message() -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict]] = []
