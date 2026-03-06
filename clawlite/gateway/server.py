@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hmac
 import json
 import time
 import uuid
@@ -667,15 +668,18 @@ class GatewayAuthGuard:
             return False
         return True
 
+    def _token_matches(self, supplied_token: str) -> bool:
+        return bool(self.token) and hmac.compare_digest(supplied_token, self.token)
+
     def check_http(self, *, request: Request, scope: str, diagnostics_auth: bool) -> None:
         client_host = request.client.host if request.client is not None else None
         should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         header_value = str(request.headers.get(self.header_name, "") or "")
         query_value = str(request.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
-        if should_require and (not self.token or supplied_token != self.token):
+        if should_require and not self._token_matches(supplied_token):
             raise HTTPException(status_code=401, detail="gateway_auth_required")
-        if self.mode == "optional" and supplied_token and self.token and supplied_token != self.token:
+        if self.mode == "optional" and supplied_token and self.token and not self._token_matches(supplied_token):
             raise HTTPException(status_code=401, detail="gateway_auth_invalid")
 
     async def check_ws(self, *, socket: WebSocket, scope: str, diagnostics_auth: bool) -> bool:
@@ -684,10 +688,10 @@ class GatewayAuthGuard:
         header_value = str(socket.headers.get(self.header_name, "") or "")
         query_value = str(socket.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
-        if should_require and (not self.token or supplied_token != self.token):
+        if should_require and not self._token_matches(supplied_token):
             await socket.close(code=4401, reason="gateway_auth_required")
             return False
-        if self.mode == "optional" and supplied_token and self.token and supplied_token != self.token:
+        if self.mode == "optional" and supplied_token and self.token and not self._token_matches(supplied_token):
             await socket.close(code=4401, reason="gateway_auth_invalid")
             return False
         return True
@@ -2439,7 +2443,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         expected_secret = str(getattr(channel, "webhook_secret", "") or "").strip()
         if expected_secret:
             supplied_secret = str(request.headers.get("X-Telegram-Bot-Api-Secret-Token", "") or "")
-            if not supplied_secret or supplied_secret != expected_secret:
+            if not supplied_secret or not hmac.compare_digest(supplied_secret, expected_secret):
                 raise HTTPException(status_code=401, detail="telegram_webhook_secret_invalid")
 
         try:
