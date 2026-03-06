@@ -8,8 +8,6 @@ from typing import Any, Awaitable, Callable
 
 from clawlite.utils.logging import bind_event, setup_logging
 
-setup_logging()
-
 
 @dataclass(slots=True)
 class SupervisorIncident:
@@ -35,6 +33,7 @@ class RuntimeSupervisor:
         now_monotonic: NowMonotonic | None = None,
         now_utc: NowUTC | None = None,
     ) -> None:
+        setup_logging()
         self.interval_s = max(1.0, float(interval_s))
         self.cooldown_s = max(0.0, float(cooldown_s))
         self._incident_checks = incident_checks

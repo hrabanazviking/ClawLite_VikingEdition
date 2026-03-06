@@ -9,8 +9,6 @@ from typing import Any, Awaitable, Callable
 
 from clawlite.utils.logging import bind_event, setup_logging
 
-setup_logging()
-
 SnapshotCallback = Callable[[], Awaitable[dict[str, Any]] | dict[str, Any]]
 RunCallback = Callable[[dict[str, Any]], Awaitable[Any]]
 NowMonotonic = Callable[[], float]
@@ -220,6 +218,7 @@ class AutonomyService:
         run_callback: RunCallback | None = None,
         now_monotonic: NowMonotonic | None = None,
     ) -> None:
+        setup_logging()
         self.enabled = bool(enabled)
         self.interval_s = max(1.0, float(interval_s))
         self.cooldown_s = max(0.0, float(cooldown_s))

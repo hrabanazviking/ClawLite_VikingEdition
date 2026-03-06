@@ -28,8 +28,6 @@ from clawlite.channels.telegram import TelegramChannel
 from clawlite.channels.whatsapp import WhatsAppChannel
 from clawlite.utils.logging import bind_event, setup_logging
 
-setup_logging()
-
 
 class EngineProtocol:
     async def run(
@@ -59,6 +57,7 @@ class ChannelManager:
     _ENGINE_ERROR_FALLBACK_TEXT = "I hit an internal error while processing your request."
 
     def __init__(self, *, bus: MessageQueue, engine: EngineProtocol) -> None:
+        setup_logging()
         self.bus = bus
         self.engine = engine
         self._registry: dict[str, type[BaseChannel]] = {

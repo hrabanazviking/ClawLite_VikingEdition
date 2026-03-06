@@ -16,8 +16,6 @@ from loguru import logger
 from clawlite.scheduler.types import CronJob, CronPayload, CronSchedule
 from clawlite.utils.logging import bind_event, setup_logging
 
-setup_logging()
-
 try:
     import fcntl
 except Exception:  # pragma: no cover
@@ -34,6 +32,9 @@ DEFAULT_CALLBACK_TIMEOUT_SECONDS = 300.0
 
 
 class CronService:
+    _LOOP_SLEEP_MIN_SECONDS = 0.05
+    _LOOP_SLEEP_MAX_SECONDS = 5.0
+
     def __init__(
         self,
         store_path: str | Path | None = None,
@@ -41,6 +42,7 @@ class CronService:
         lease_seconds: int = 30,
         callback_timeout_seconds: float = DEFAULT_CALLBACK_TIMEOUT_SECONDS,
     ) -> None:
+        setup_logging()
         self.path = Path(store_path) if store_path else (Path.home() / ".clawlite" / "state" / "cron_jobs.json")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(f"{self.path.name}.lock")
@@ -412,6 +414,25 @@ class CronService:
             committed = True
         return committed
 
+    def _compute_loop_sleep_seconds(self, now: datetime) -> float:
+        nearest_delta: float | None = None
+        for job in self._jobs.values():
+            if not job.enabled or not job.next_run_iso:
+                continue
+            try:
+                next_run = self._normalize_datetime(job.next_run_iso)
+            except ValueError:
+                continue
+            delta_s = (next_run - now).total_seconds()
+            if nearest_delta is None or delta_s < nearest_delta:
+                nearest_delta = delta_s
+
+        if nearest_delta is None:
+            return self._LOOP_SLEEP_MAX_SECONDS
+
+        bounded = max(self._LOOP_SLEEP_MIN_SECONDS, min(self._LOOP_SLEEP_MAX_SECONDS, nearest_delta))
+        return float(bounded)
+
     async def _loop(self) -> None:
         while True:
             now = self._now()
@@ -485,7 +506,8 @@ class CronService:
                     continue
             if changed:
                 await asyncio.to_thread(self._save)
-            await asyncio.sleep(1)
+            sleep_seconds = self._compute_loop_sleep_seconds(self._now())
+            await asyncio.sleep(sleep_seconds)
 
     def list_jobs(self, *, session_id: str | None = None) -> list[dict[str, Any]]:
         rows = list(self._jobs.values())

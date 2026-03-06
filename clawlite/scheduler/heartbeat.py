@@ -70,8 +70,6 @@ class HeartbeatDecision:
 
 TickHandler = Callable[[], Awaitable[HeartbeatDecision | dict[str, Any] | str | None]]
 
-setup_logging()
-
 
 class HeartbeatService:
     def __init__(
@@ -82,6 +80,7 @@ class HeartbeatService:
         ack_max_chars: int = DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
         actionable_excerpt_max_chars: int = DEFAULT_ACTIONABLE_EXCERPT_MAX_CHARS,
     ) -> None:
+        setup_logging()
         self.interval_seconds = max(5, int(interval_seconds))
         self.ack_max_chars = max(0, int(ack_max_chars))
         self.actionable_excerpt_max_chars = max(0, int(actionable_excerpt_max_chars))
