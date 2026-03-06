@@ -121,3 +121,46 @@ def test_autonomy_failed_run_updates_failure_counters_and_error() -> None:
         assert "autonomy_boom" in status["last_error"]
 
     asyncio.run(_scenario())
+
+
+def test_autonomy_start_restarts_when_previous_task_crashed() -> None:
+    async def _scenario() -> None:
+        service = AutonomyService(enabled=True, interval_s=60)
+
+        async def _crash() -> None:
+            raise RuntimeError("autonomy_worker_crash")
+
+        crashed_task = asyncio.create_task(_crash())
+        try:
+            await crashed_task
+        except RuntimeError:
+            pass
+
+        service._task = crashed_task
+        service._running = True
+
+        await service.start()
+        replacement_task = service._task
+
+        assert replacement_task is not None
+        assert replacement_task is not crashed_task
+        assert not replacement_task.done()
+
+        await service.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_start_is_idempotent_with_healthy_running_task() -> None:
+    async def _scenario() -> None:
+        service = AutonomyService(enabled=True, interval_s=60)
+        await service.start()
+        first_task = service._task
+
+        await service.start()
+
+        assert service._task is first_task
+
+        await service.stop()
+
+    asyncio.run(_scenario())

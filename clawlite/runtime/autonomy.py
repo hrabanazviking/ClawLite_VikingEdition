@@ -103,8 +103,11 @@ class AutonomyWakeCoordinator:
         async with self._lock:
             self._on_wake = on_wake
             if self._task is not None:
-                self._running = True
-                return
+                if self._task.done() or self._task.cancelled():
+                    self._task = None
+                else:
+                    self._running = True
+                    return
             self._running = True
             self._task = asyncio.create_task(self._worker_loop())
 
@@ -361,7 +364,10 @@ class AutonomyService:
 
     async def start(self) -> None:
         if self._task is not None:
-            return
+            if self._task.done() or self._task.cancelled():
+                self._task = None
+            else:
+                return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         bind_event("autonomy.lifecycle").info(

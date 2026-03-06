@@ -128,3 +128,46 @@ def test_supervisor_run_once_handles_check_exceptions() -> None:
         assert "tick_boom" in status["last_error"]
 
     asyncio.run(_scenario())
+
+
+def test_supervisor_start_restarts_when_previous_task_crashed() -> None:
+    async def _scenario() -> None:
+        supervisor = RuntimeSupervisor(interval_s=60, cooldown_s=30)
+
+        async def _crash() -> None:
+            raise RuntimeError("supervisor_worker_crash")
+
+        crashed_task = asyncio.create_task(_crash())
+        try:
+            await crashed_task
+        except RuntimeError:
+            pass
+
+        supervisor._task = crashed_task
+        supervisor._running = True
+
+        await supervisor.start()
+        replacement_task = supervisor._task
+
+        assert replacement_task is not None
+        assert replacement_task is not crashed_task
+        assert not replacement_task.done()
+
+        await supervisor.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_supervisor_start_is_idempotent_with_healthy_running_task() -> None:
+    async def _scenario() -> None:
+        supervisor = RuntimeSupervisor(interval_s=60, cooldown_s=30)
+        await supervisor.start()
+        first_task = supervisor._task
+
+        await supervisor.start()
+
+        assert supervisor._task is first_task
+
+        await supervisor.stop()
+
+    asyncio.run(_scenario())

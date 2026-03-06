@@ -145,7 +145,10 @@ class RuntimeSupervisor:
 
     async def start(self) -> None:
         if self._task is not None:
-            return
+            if self._task.done() or self._task.cancelled():
+                self._task = None
+            else:
+                return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
         bind_event("supervisor.lifecycle").info("supervisor started interval_s={} cooldown_s={}", self.interval_s, self.cooldown_s)
