@@ -82,6 +82,75 @@ def _dump_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _record_from_backend_payload(payload: dict[str, Any]) -> MemoryRecord | None:
+    if not isinstance(payload, dict):
+        return None
+    row_id = str(payload.get("id", "") or "").strip()
+    if not row_id:
+        return None
+    text = str(payload.get("text", "") or "").strip()
+    if not text:
+        return None
+    confidence_raw = payload.get("confidence", 1.0)
+    try:
+        confidence = float(confidence_raw)
+    except (TypeError, ValueError):
+        confidence = 1.0
+    return MemoryRecord(
+        id=row_id,
+        text=text,
+        source=str(payload.get("source", "") or ""),
+        created_at=str(payload.get("created_at", "") or ""),
+        category=str(payload.get("category", "context") or "context"),
+        reasoning_layer=str(payload.get("reasoning_layer", "fact") or "fact"),
+        confidence=confidence,
+    )
+
+
+def _discover_non_query_candidates(
+    memory: Any,
+    *,
+    ref_prefix: str,
+    source: str,
+    limit: int,
+) -> list[MemoryRecord] | None:
+    backend = getattr(memory, "backend", None)
+    fetch_layer_records = getattr(backend, "fetch_layer_records", None)
+    if not callable(fetch_layer_records):
+        return None
+
+    bounded_scan = max(200, min(2000, int(limit or 1) * 8))
+    try:
+        rows = fetch_layer_records(layer="item", limit=bounded_scan)
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+
+    out: list[MemoryRecord] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        parsed = _record_from_backend_payload(payload)
+        if parsed is None:
+            continue
+        row_id = str(parsed.id or "").strip().lower()
+        if ref_prefix and not row_id.startswith(ref_prefix):
+            continue
+        if source and str(parsed.source or "") != source:
+            continue
+        out.append(parsed)
+        if len(out) >= limit:
+            break
+
+    if len(out) >= limit:
+        return out
+    return None
+
+
 _SIGNATURE_PARAM_CACHE: dict[tuple[int, str], bool] = {}
 _SIGNATURE_PARAM_CACHE_MAX_SIZE = 4096
 
@@ -516,9 +585,18 @@ class MemoryForgetTool(Tool):
             query_ids = {str(item.id or "").strip() for item in query_matches if str(item.id or "").strip()}
             candidate_rows = list(query_matches)
         else:
-            history_rows = self.memory.all()
-            curated_rows = self.memory.curated()
-            candidate_rows = history_rows + curated_rows
+            targeted = _discover_non_query_candidates(
+                self.memory,
+                ref_prefix=ref_prefix,
+                source=source,
+                limit=limit,
+            )
+            if targeted is not None:
+                candidate_rows = targeted
+            else:
+                history_rows = self.memory.all()
+                curated_rows = self.memory.curated()
+                candidate_rows = history_rows + curated_rows
 
         candidates = []
         for row in candidate_rows:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import clawlite.core.memory_backend as memory_backend_module
 from clawlite.core.memory_backend import resolve_memory_backend
 
 
@@ -211,3 +212,47 @@ def test_pgvector_query_similar_embeddings_falls_back_when_sql_fails(monkeypatch
 
     assert [item["record_id"] for item in hits] == ["alpha", "beta"]
     assert float(hits[0]["score"]) > float(hits[1]["score"])
+
+
+def test_backends_share_module_level_embedding_and_similarity_helpers(monkeypatch, tmp_path: Path) -> None:
+    normalize_calls: list[object] = []
+    cosine_calls: list[tuple[list[float], list[float]]] = []
+
+    def fake_normalize(raw: object) -> list[float] | None:
+        normalize_calls.append(raw)
+        if raw == [0.0]:
+            return [0.0]
+        if isinstance(raw, str):
+            return [1.0]
+        if isinstance(raw, list):
+            return [float(item) for item in raw]
+        return None
+
+    def fake_cosine(left: list[float], right: list[float]) -> float:
+        cosine_calls.append((list(left), list(right)))
+        return 0.123
+
+    monkeypatch.setattr(memory_backend_module, "_normalize_embedding", fake_normalize)
+    monkeypatch.setattr(memory_backend_module, "_cosine_similarity", fake_cosine)
+
+    sqlite_backend = resolve_memory_backend("sqlite")
+    sqlite_backend.initialize(tmp_path)
+    sqlite_backend.upsert_embedding("alpha", [1.0], "2026-03-01T00:00:00+00:00", "seed")
+    sqlite_hits = sqlite_backend.query_similar_embeddings([1.0], limit=1)
+    assert sqlite_hits == [{"record_id": "alpha", "score": 0.123}]
+
+    pgvector_backend = resolve_memory_backend(
+        "pgvector",
+        pgvector_url="postgresql://user:pass@localhost:5432/clawlite",
+    )
+    monkeypatch.setattr(type(pgvector_backend), "_open_connection", lambda self: None)
+    monkeypatch.setattr(
+        type(pgvector_backend),
+        "fetch_embeddings",
+        lambda self, record_ids=None, limit=5000: {"beta": [1.0]},
+    )
+    pgvector_hits = pgvector_backend.query_similar_embeddings([1.0], limit=1)
+    assert pgvector_hits == [{"record_id": "beta", "score": 0.123}]
+
+    assert normalize_calls
+    assert cosine_calls

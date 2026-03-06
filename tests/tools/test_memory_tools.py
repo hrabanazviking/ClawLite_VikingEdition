@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
+from datetime import timezone
 
 import pytest
 
@@ -315,6 +317,66 @@ def test_memory_forget_ref_only_non_dry_run_uses_targeted_delete_path() -> None:
         assert payload["refs"] == ["mem:abcd1234"]
         assert payload["selectors"] == {"ref": "mem:abcd1234", "query": "", "source": "", "dry_run": False}
         assert memory.calls == [(["abcd1234"], 2)]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_forget_source_dry_run_uses_backend_targeted_candidates_without_full_load() -> None:
+    class _Backend:
+        def fetch_layer_records(self, *, layer: str, category=None, limit: int = 200):
+            del category
+            assert layer == "item"
+            assert limit >= 200
+            return [
+                {
+                    "payload": {
+                        "id": "1111aaaa2222bbbb",
+                        "text": "candidate",
+                        "source": "seed:drop",
+                        "created_at": "2026-03-05T12:00:00+00:00",
+                        "category": "context",
+                    }
+                }
+            ]
+
+    class _TargetedMemory:
+        def __init__(self) -> None:
+            self.backend = _Backend()
+
+        def all(self):
+            raise AssertionError("all() should not run when backend targeted path is sufficient")
+
+        def curated(self):
+            raise AssertionError("curated() should not run when backend targeted path is sufficient")
+
+        @staticmethod
+        def _parse_iso_timestamp(raw: str):
+            clean = str(raw or "").strip()
+            if clean.endswith("Z"):
+                clean = clean[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(clean)
+            except Exception:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+
+    async def _scenario() -> None:
+        memory = _TargetedMemory()
+        tool = MemoryForgetTool(memory)  # type: ignore[arg-type]
+        payload = json.loads(
+            await tool.run(
+                {"source": "seed:drop", "dry_run": True, "limit": 1},
+                ToolContext(session_id="s1"),
+            )
+        )
+        assert payload["status"] == "ok"
+        assert payload["deleted_count"] == 0
+        assert payload["history_deleted"] == 0
+        assert payload["curated_deleted"] == 0
+        assert payload["refs"] == ["mem:1111aaaa"]
+        assert payload["selectors"] == {"ref": "", "query": "", "source": "seed:drop", "dry_run": True}
 
     asyncio.run(_scenario())
 

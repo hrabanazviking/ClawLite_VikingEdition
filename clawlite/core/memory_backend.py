@@ -12,6 +12,40 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 
+def _normalize_embedding(raw: Any) -> list[float] | None:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return None
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[float] = []
+    for item in raw:
+        try:
+            out.append(float(item))
+        except Exception:
+            return None
+    return out if out else None
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = 0.0
+    left_norm = 0.0
+    right_norm = 0.0
+    for idx in range(len(left)):
+        lval = float(left[idx])
+        rval = float(right[idx])
+        dot += lval * rval
+        left_norm += lval * lval
+        right_norm += rval * rval
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        return 0.0
+    return float(dot / ((left_norm * right_norm) ** 0.5))
+
+
 class MemoryBackend(Protocol):
     """Memory backend contract used by MemoryStore persistence layers."""
 
@@ -77,40 +111,6 @@ class SQLiteMemoryBackend:
 
     def is_supported(self) -> bool:
         return True
-
-    @staticmethod
-    def _normalize_embedding(raw: Any) -> list[float] | None:
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:
-                return None
-        if not isinstance(raw, list) or not raw:
-            return None
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                return None
-        return out if out else None
-
-    @staticmethod
-    def _cosine_similarity(left: list[float], right: list[float]) -> float:
-        if not left or not right or len(left) != len(right):
-            return 0.0
-        dot = 0.0
-        left_norm = 0.0
-        right_norm = 0.0
-        for idx in range(len(left)):
-            lval = float(left[idx])
-            rval = float(right[idx])
-            dot += lval * rval
-            left_norm += lval * lval
-            right_norm += rval * rval
-        if left_norm <= 0.0 or right_norm <= 0.0:
-            return 0.0
-        return float(dot / ((left_norm * right_norm) ** 0.5))
 
     def initialize(self, memory_home: str | Path) -> None:
         with self._lock:
@@ -240,7 +240,7 @@ class SQLiteMemoryBackend:
 
     def upsert_embedding(self, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
         clean_id = str(record_id or "").strip()
-        normalized = self._normalize_embedding(embedding)
+        normalized = _normalize_embedding(embedding)
         if not clean_id or normalized is None:
             return
         if self._db_file is None:
@@ -302,7 +302,7 @@ class SQLiteMemoryBackend:
             clean_id = str(row_id or "").strip()
             if not clean_id:
                 continue
-            parsed = self._normalize_embedding(row_embedding)
+            parsed = _normalize_embedding(row_embedding)
             if parsed is None:
                 continue
             out[clean_id] = parsed
@@ -314,7 +314,7 @@ class SQLiteMemoryBackend:
         record_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        normalized_query = self._normalize_embedding(query_embedding)
+        normalized_query = _normalize_embedding(query_embedding)
         if normalized_query is None:
             return []
         bounded_limit = max(1, int(limit or 1))
@@ -324,7 +324,7 @@ class SQLiteMemoryBackend:
 
         scored: list[dict[str, Any]] = []
         for row_id, vector in embeddings.items():
-            score = self._cosine_similarity(normalized_query, vector)
+            score = _cosine_similarity(normalized_query, vector)
             scored.append({"record_id": row_id, "score": float(score)})
         scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
         return scored[:bounded_limit]
@@ -346,40 +346,6 @@ class PgvectorMemoryBackend:
         if not self._is_valid_pg_url():
             return False
         return self._detect_driver()[0] is not None
-
-    @staticmethod
-    def _normalize_embedding(raw: Any) -> list[float] | None:
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:
-                return None
-        if not isinstance(raw, list) or not raw:
-            return None
-        out: list[float] = []
-        for item in raw:
-            try:
-                out.append(float(item))
-            except Exception:
-                return None
-        return out if out else None
-
-    @staticmethod
-    def _cosine_similarity(left: list[float], right: list[float]) -> float:
-        if not left or not right or len(left) != len(right):
-            return 0.0
-        dot = 0.0
-        left_norm = 0.0
-        right_norm = 0.0
-        for idx in range(len(left)):
-            lval = float(left[idx])
-            rval = float(right[idx])
-            dot += lval * rval
-            left_norm += lval * lval
-            right_norm += rval * rval
-        if left_norm <= 0.0 or right_norm <= 0.0:
-            return 0.0
-        return float(dot / ((left_norm * right_norm) ** 0.5))
 
     @staticmethod
     def _to_vector_literal(embedding: list[float]) -> str:
@@ -621,7 +587,7 @@ class PgvectorMemoryBackend:
 
     def upsert_embedding(self, record_id: str, embedding: list[float], created_at: str, source: str) -> None:
         clean_id = str(record_id or "").strip()
-        normalized = self._normalize_embedding(embedding)
+        normalized = _normalize_embedding(embedding)
         if not clean_id or normalized is None:
             return
         conn = self._open_connection()
@@ -738,7 +704,7 @@ class PgvectorMemoryBackend:
             clean_id = str(row_id or "").strip()
             if not clean_id:
                 continue
-            parsed = self._normalize_embedding(row_embedding)
+            parsed = _normalize_embedding(row_embedding)
             if parsed is None:
                 continue
             out[clean_id] = parsed
@@ -750,7 +716,7 @@ class PgvectorMemoryBackend:
         record_ids: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        normalized_query = self._normalize_embedding(query_embedding)
+        normalized_query = _normalize_embedding(query_embedding)
         if normalized_query is None:
             return []
         bounded_limit = max(1, int(limit or 1))
@@ -813,7 +779,7 @@ class PgvectorMemoryBackend:
             return []
         scored: list[dict[str, Any]] = []
         for row_id, vector in embeddings.items():
-            scored.append({"record_id": row_id, "score": self._cosine_similarity(normalized_query, vector)})
+            scored.append({"record_id": row_id, "score": _cosine_similarity(normalized_query, vector)})
         scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
         return scored[:bounded_limit]
 
