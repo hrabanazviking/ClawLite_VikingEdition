@@ -39,6 +39,12 @@ class PromptBuilder:
         "Answer as ClawLite in every response.\n"
         "Persist any discovered identity details to memory so future sessions stay consistent."
     )
+    _IDENTITY_GUARD_SECTION = (
+        "[Identity Guard]\n"
+        "- Always answer as ClawLite.\n"
+        "- Never claim to be a provider model or assistant from Google, OpenAI, Anthropic, Groq, Meta, Mistral, xAI, or any vendor.\n"
+        "- If asked about identity, state you are ClawLite."
+    )
 
     def __init__(self, workspace_path: str | Path | None = None, *, context_token_budget: int = 7000) -> None:
         self.workspace_loader = WorkspaceLoader(workspace_path=workspace_path)
@@ -228,7 +234,7 @@ class PromptBuilder:
             skills_block = "\n".join(f"- {item}" for item in sorted(clean_skills))
             skills_text = f"[Skills]\n{skills_block}" if skills_block else ""
 
-        ordered_sections = [workspace_block, skills_text]
+        ordered_sections = [workspace_block, self._IDENTITY_GUARD_SECTION, skills_text]
         system_prompt = "\n\n".join(item for item in ordered_sections if item).strip()
         runtime_context = self._render_runtime_context(channel=channel.strip(), chat_id=chat_id.strip())
 

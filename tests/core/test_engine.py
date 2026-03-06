@@ -79,6 +79,15 @@ class FakePromptCaptureProvider:
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
 
+class FakeFixedTextProvider:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    async def complete(self, *, messages, tools):
+        del messages, tools
+        return ProviderResult(text=self.text, tool_calls=[], model="fake/model")
+
+
 class SessionStoreCapture:
     def __init__(self) -> None:
         self.last_limit: int | None = None
@@ -454,6 +463,82 @@ def test_engine_runs_tool_roundtrip() -> None:
         assert metrics["turns_cancelled"] == 0
         assert metrics["last_outcome"] == "success"
         assert metrics["last_model"] == "fake/model"
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_normalizes_provider_intro_on_identity_question() -> None:
+    async def _scenario() -> None:
+        memory = FakeMemoryWithAsyncMemorize()
+        provider_text = "I am a language model trained by OpenAI. I can help debug your deployment by checking logs and config drift."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+            memory=memory,
+        )
+        out = await engine.run(session_id="cli:identity-q", user_text="Who are you?")
+        assert out.text == (
+            "I am ClawLite, a self-hosted autonomous AI agent. "
+            "I can help debug your deployment by checking logs and config drift."
+        )
+        assert memory.memorize_calls
+        persisted = memory.memorize_calls[0]["messages"][1]["content"]
+        assert persisted == out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_prepends_identity_on_question_when_no_provider_intro() -> None:
+    async def _scenario() -> None:
+        provider_text = "To set this up, define the environment variables and run the migration command once."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+        )
+        out = await engine.run(session_id="cli:identity-prepend", user_text="What are you?")
+        assert out.text == (
+            "I am ClawLite, a self-hosted autonomous AI agent. "
+            "To set this up, define the environment variables and run the migration command once."
+        )
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_keeps_identity_question_output_when_clawlite_already_present() -> None:
+    async def _scenario() -> None:
+        provider_text = "I am ClawLite, your self-hosted agent. I can also troubleshoot webhook retries."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+        )
+        out = await engine.run(session_id="cli:identity-already", user_text="Who are you?")
+        assert out.text == provider_text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_rewrites_provider_intro_without_identity_question() -> None:
+    async def _scenario() -> None:
+        provider_text = "As an AI language model trained by Anthropic, I can help with this summary."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(provider_text),
+            tools=FakeTools(),
+        )
+        out = await engine.run(session_id="cli:identity-intro", user_text="Summarize deployment notes")
+        assert out.text == "I am ClawLite, a self-hosted autonomous AI agent. I can help with this summary."
+
+    asyncio.run(_scenario())
+
+
+def test_engine_identity_guard_keeps_normal_output_unchanged() -> None:
+    async def _scenario() -> None:
+        text = "Deployment summary: shipped, monitored, and stable."
+        engine = AgentEngine(
+            provider=FakeFixedTextProvider(text),
+            tools=FakeTools(),
+        )
+        out = await engine.run(session_id="cli:identity-clean", user_text="Summarize deployment notes")
+        assert out.text == text
 
     asyncio.run(_scenario())
 

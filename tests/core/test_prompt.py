@@ -103,3 +103,20 @@ def test_prompt_builder_injects_identity_first_when_identity_empty(tmp_path: Pat
     assert out.system_prompt.startswith("## IDENTITY.md")
     assert "Answer as ClawLite in every response." in out.system_prompt
     assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find("## IDENTITY.md")
+
+
+def test_prompt_builder_adds_always_on_identity_guard_section(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("I am Claw", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path)
+    out = builder.build(
+        user_text="who are you",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=[],
+    )
+
+    assert out.system_prompt.startswith("## IDENTITY.md")
+    assert "[Identity Guard]" in out.system_prompt
+    assert "Always answer as ClawLite." in out.system_prompt
+    assert "Never claim to be a provider model" in out.system_prompt

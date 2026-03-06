@@ -246,6 +246,22 @@ class AgentEngine:
         }
     )
     _DIAGNOSTIC_SWITCH_THRESHOLD = 3
+    _IDENTITY_STATEMENT = "I am ClawLite, a self-hosted autonomous AI agent."
+    _CLAWLITE_MENTION_RE = re.compile(r"\bclaw\s*lite\b", re.IGNORECASE)
+    _IDENTITY_QUESTION_RE = re.compile(
+        r"(?:\bwho\s+are\s+you\b|\bwhat\s+are\s+you\b|\bquem\s+[eé]\s+voc[eê]\b|\bo\s+que\s+voc[eê]\s+[eé]\b)",
+        re.IGNORECASE,
+    )
+    _PROVIDER_SELF_ATTRIBUTION_RE = re.compile(
+        r"^\s*(?:"
+        r"(?:as\s+an?\s+(?:ai\s+)?(?:large\s+)?(?:language\s+model|assistant))"
+        r"|(?:i\s+am\s+an?\s+(?:ai\s+)?(?:large\s+)?(?:language\s+model|assistant))"
+        r"|(?:sou\s+um\s+(?:modelo\s+de\s+linguagem|assistente))"
+        r")"
+        r"(?:\s+(?:trained\s+by|created\s+by|from|da|do|de)\s+[A-Za-z0-9_ -]{1,120})?"
+        r"[\s]*[.!?:-]*",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -1047,6 +1063,46 @@ class AgentEngine:
         return f"{text[:keep]}{suffix}", True
 
     @staticmethod
+    def _split_subagent_digest(text: str) -> tuple[str, str]:
+        marker = "\n\n[Subagent Digest]\n"
+        content = str(text or "")
+        if marker not in content:
+            return content, ""
+        main, digest = content.split(marker, 1)
+        return main, f"{marker}{digest}"
+
+    @classmethod
+    def _is_identity_question(cls, user_text: str) -> bool:
+        return bool(cls._IDENTITY_QUESTION_RE.search(str(user_text or "")))
+
+    @classmethod
+    def _normalize_identity_output(cls, *, user_text: str, output_text: str) -> str:
+        main, digest_suffix = cls._split_subagent_digest(output_text)
+        stripped_main = str(main or "").strip()
+        if not stripped_main:
+            return f"{cls._IDENTITY_STATEMENT}{digest_suffix}"
+
+        has_identity_question = cls._is_identity_question(user_text)
+        intro_match = cls._PROVIDER_SELF_ATTRIBUTION_RE.match(stripped_main)
+        if not has_identity_question:
+            if intro_match is None:
+                return str(output_text or "")
+            remainder = stripped_main[intro_match.end() :].lstrip(" \t\n\r,;:-") if intro_match else stripped_main
+            normalized_main = cls._IDENTITY_STATEMENT if not remainder else f"{cls._IDENTITY_STATEMENT} {remainder}"
+            return f"{normalized_main}{digest_suffix}"
+
+        if cls._CLAWLITE_MENTION_RE.search(stripped_main):
+            return str(output_text or "")
+
+        if intro_match is not None:
+            remainder = stripped_main[intro_match.end() :].lstrip(" \t\n\r,;:-")
+            normalized_main = cls._IDENTITY_STATEMENT if not remainder else f"{cls._IDENTITY_STATEMENT} {remainder}"
+        else:
+            normalized_main = f"{cls._IDENTITY_STATEMENT} {stripped_main}"
+
+        return f"{normalized_main}{digest_suffix}"
+
+    @staticmethod
     def _stop_requested(*, session_id: str, stop_event: asyncio.Event | None, stop_requests: set[str]) -> bool:
         if stop_event is not None and stop_event.is_set():
             return True
@@ -1449,6 +1505,11 @@ class AgentEngine:
             )
 
         final = await self._inject_subagent_digest(final=final, session_id=session_id, run_log=run_log)
+        final = ProviderResult(
+            text=self._normalize_identity_output(user_text=user_text, output_text=final.text),
+            tool_calls=list(final.tool_calls),
+            model=final.model,
+        )
 
         self.sessions.append(session_id, "user", user_text)
         if not graceful_error:
