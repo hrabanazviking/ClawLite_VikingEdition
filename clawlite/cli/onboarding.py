@@ -415,6 +415,27 @@ def probe_telegram(token: str, *, timeout_s: float = 8.0) -> dict[str, Any]:
         }
 
 
+def _step_header(console: Console, step: int, total: int, title: str) -> None:
+    bar = "".join("[green]■[/]" if i < step else "[dim]□[/]" for i in range(total))
+    console.print(f"\n{bar}  [bold]Step {step}/{total}[/] — {title}\n")
+
+
+def _probe_summary(console: Console, probe: dict[str, Any], *, label: str) -> None:
+    ok = bool(probe.get("ok", False))
+    status = "[green]OK[/]" if ok else "[red]FAILED[/]"
+    console.print(f"  {label} probe: {status}")
+    if not ok:
+        error = str(probe.get("error", "") or "")
+        detail = str(probe.get("error_detail", "") or "")
+        if error:
+            console.print(f"  [yellow]Error:[/] {error}")
+        if detail:
+            console.print(f"  [yellow]Detail:[/] {detail[:200]}")
+        hints = list(probe.get("hints", []) or [])
+        for hint in hints[:3]:
+            console.print(f"  [dim]→ {hint}[/]")
+
+
 def run_onboarding_wizard(
     config: AppConfig,
     *,
@@ -429,10 +450,22 @@ def run_onboarding_wizard(
         "steps": [],
     }
 
-    try:
-        console.print(Panel("ClawLite Onboarding Wizard", title="clawlite onboard --wizard"))
+    TOTAL_STEPS = 5
 
-        step_1_mode = Prompt.ask("Step 1/5 - mode", choices=["quickstart", "advanced"], default="quickstart")
+    try:
+        console.print(
+            Panel(
+                "[bold cyan]ClawLite[/] — Setup Wizard\n"
+                "[dim]Configure your AI agent in 5 steps. Press Ctrl+C to cancel.[/]",
+                title="clawlite onboard --wizard",
+                border_style="cyan",
+            )
+        )
+
+        _step_header(console, 1, TOTAL_STEPS, "Setup mode")
+        console.print("  [bold]quickstart[/] — sensible defaults, fastest path")
+        console.print("  [bold]advanced[/]    — full control over host, port and auth\n")
+        step_1_mode = Prompt.ask("Mode", choices=["quickstart", "advanced"], default="quickstart")
         payload["steps"].append({"step": 1, "name": "mode", "choice": step_1_mode})
 
         if step_1_mode == "advanced":
@@ -456,7 +489,9 @@ def run_onboarding_wizard(
             if str(config.gateway.auth.mode or "").strip().lower() not in {"off", "optional", "required"}:
                 config.gateway.auth.mode = "off"
 
-        provider = Prompt.ask("Step 2/5 - provider", choices=list(SUPPORTED_PROVIDERS), default="openai")
+        _step_header(console, 2, TOTAL_STEPS, "AI provider")
+        console.print(f"  Supported: {', '.join(SUPPORTED_PROVIDERS)}\n")
+        provider = Prompt.ask("Provider", choices=list(SUPPORTED_PROVIDERS), default="openai")
         provider_spec = _provider_spec(provider)
         provider_key = provider_spec.name if provider_spec is not None else provider
         provider_default_base = DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
@@ -492,7 +527,8 @@ def run_onboarding_wizard(
                 "transport": str(provider_probe.get("transport", "") or ""),
             }
         )
-        if (not bool(provider_probe.get("ok", False))) and (not Confirm.ask("Provider probe failed. Continue?", default=False)):
+        _probe_summary(console, provider_probe, label=provider)
+        if (not bool(provider_probe.get("ok", False))) and (not Confirm.ask("\n  Provider probe failed — continue anyway?", default=False)):
             return {
                 "ok": False,
                 "mode": "wizard",
@@ -508,7 +544,8 @@ def run_onboarding_wizard(
             model=selected_model,
         )
 
-        telegram_enabled = Confirm.ask("Step 3/5 - enable Telegram channel?", default=False)
+        _step_header(console, 3, TOTAL_STEPS, "Telegram channel")
+        telegram_enabled = Confirm.ask("  Enable Telegram bot?", default=False)
         telegram_probe: dict[str, Any] = {
             "ok": True,
             "status_code": 0,
@@ -518,7 +555,8 @@ def run_onboarding_wizard(
         if telegram_enabled:
             telegram_token = Prompt.ask("Telegram bot token", password=True)
             telegram_probe = probe_telegram(telegram_token)
-            if (not bool(telegram_probe.get("ok", False))) and (not Confirm.ask("Telegram probe failed. Continue?", default=False)):
+            _probe_summary(console, telegram_probe, label="Telegram")
+            if (not bool(telegram_probe.get("ok", False))) and (not Confirm.ask("\n  Telegram probe failed — continue anyway?", default=False)):
                 return {
                     "ok": False,
                     "mode": "wizard",
@@ -542,8 +580,13 @@ def run_onboarding_wizard(
 
         generated_token = ensure_gateway_token(config)
 
+        _step_header(console, 4, TOTAL_STEPS, "Workspace files")
         loader = WorkspaceLoader(workspace_path=config.workspace_path)
         generated_files = loader.bootstrap(overwrite=bool(overwrite), variables=variables or {})
+        if generated_files:
+            console.print(f"  Created {len(generated_files)} file(s) in {config.workspace_path}")
+        else:
+            console.print(f"  Workspace already exists at {config.workspace_path}")
         payload["steps"].append(
             {
                 "step": 4,
@@ -557,10 +600,20 @@ def run_onboarding_wizard(
         gateway_url = f"http://{config.gateway.host}:{config.gateway.port}"
         payload["steps"].append({"step": 5, "name": "final", "gateway_url": gateway_url})
 
+        _step_header(console, 5, TOTAL_STEPS, "Done")
+        token_display = _mask_secret(generated_token, keep=8)
+        tg_status = "[green]enabled[/]" if config.channels.telegram.enabled else "[dim]disabled[/]"
         console.print(
             Panel(
-                f"Gateway URL: {gateway_url}\nGateway token: {generated_token}",
-                title="Onboarding complete",
+                f"[bold green]ClawLite is ready![/]\n\n"
+                f"  [bold]Gateway URL:[/]   {gateway_url}\n"
+                f"  [bold]Token:[/]         {token_display}\n"
+                f"  [bold]Provider:[/]      {provider} / {config.provider.model or 'default'}\n"
+                f"  [bold]Telegram:[/]      {tg_status}\n"
+                f"  [bold]Config saved:[/]  {saved_path}\n\n"
+                f"[dim]Start the agent:[/]  [bold cyan]clawlite start[/]",
+                title="[green]Setup complete[/]",
+                border_style="green",
             )
         )
 
