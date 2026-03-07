@@ -869,6 +869,73 @@ def test_subagents_resume_restarts_parallel_group_by_group_id(tmp_path) -> None:
     asyncio.run(_scenario())
 
 
+def test_subagents_resume_queue_limit_does_not_consume_retry_budget(tmp_path) -> None:
+    async def _scenario() -> None:
+        manager = SubagentManager(
+            state_path=tmp_path / "subagents",
+            max_concurrent_runs=1,
+            max_queued_runs=0,
+            max_resume_attempts=2,
+        )
+        blocker = asyncio.Event()
+
+        async def _slow_runner(_session_id: str, task: str):
+            await blocker.wait()
+            return f"done:{task}"
+
+        await manager.spawn(session_id="cli:owner", task="busy slot", runner=_slow_runner)
+
+        resumable = SubagentRun(
+            run_id="run-resume-blocked",
+            session_id="cli:owner",
+            task="retry task",
+            status="interrupted",
+            updated_at="2026-03-05T10:00:00+00:00",
+            metadata={
+                "target_session_id": "cli:owner:subagent",
+                "resume_attempts": 0,
+                "resume_attempts_max": 2,
+                "retry_budget_remaining": 2,
+                "resumable": True,
+                "last_status_reason": "manager_restart",
+            },
+        )
+        manager._runs[resumable.run_id] = resumable
+        manager._save_state()
+
+        async def _resume_runner(_session_id: str, task: str):
+            return f"done:{task}"
+
+        tool = SubagentsTool(manager, resume_runner_factory=lambda row: _resume_runner)
+        payload = json.loads(
+            await tool.run(
+                {"action": "resume", "run_id": "run-resume-blocked"},
+                ToolContext(session_id="cli:owner"),
+            )
+        )
+
+        assert payload["status"] == "failed"
+        assert payload["resumed"] == 0
+        assert payload["failed"] == [
+            {
+                "run_id": "run-resume-blocked",
+                "error": "subagent queue limit reached (0); wait for existing runs to finish",
+            }
+        ]
+        row = manager.get_run("run-resume-blocked")
+        assert row is not None
+        assert row.status == "interrupted"
+        assert row.metadata["resume_attempts"] == 0
+        assert row.metadata["retry_budget_remaining"] == 2
+        assert row.metadata["resumable"] is True
+
+        blocker.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_scenario())
+
+
 def test_session_status_fields(tmp_path) -> None:
     async def _scenario() -> None:
         sessions = SessionStore(root=tmp_path / "sessions")

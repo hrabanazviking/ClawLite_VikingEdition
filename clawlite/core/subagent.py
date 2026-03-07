@@ -521,18 +521,20 @@ class SubagentManager:
                 self._save_state()
                 raise ValueError(f"run '{clean_run_id}' exhausted retry budget")
 
+            should_queue = self._running_count() >= self.max_concurrent_runs
+            if should_queue and len(self._queue) >= self.max_queued_runs:
+                raise SubagentLimitError(
+                    f"subagent queue limit reached ({self.max_queued_runs}); wait for existing runs to finish"
+                )
+
             attempts = int(run.metadata.get("resume_attempts", 0)) + 1
             run.metadata["resume_attempts"] = attempts
             self._ensure_run_defaults(run, now_dt=now_dt, refresh_expiry=True)
 
-            if self._running_count() < self.max_concurrent_runs:
+            if not should_queue:
                 self._pending_runners[run.run_id] = runner
                 self._start_worker_locked(run, runner, reason="resume")
             else:
-                if len(self._queue) >= self.max_queued_runs:
-                    raise SubagentLimitError(
-                        f"subagent queue limit reached ({self.max_queued_runs}); wait for existing runs to finish"
-                    )
                 self._pending_runners[run.run_id] = runner
                 self._mark_queued(run, reason="resume_queued")
                 self._queue.append(run.run_id)
