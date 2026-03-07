@@ -281,6 +281,75 @@ def test_skills_loader_parses_multiline_metadata_json(tmp_path: Path) -> None:
     assert "env:TEST_MULTI_ENV" in row.missing
 
 
+def test_skills_loader_supports_openclaw_any_bins_requirement(tmp_path: Path, monkeypatch) -> None:
+    skill_dir = tmp_path / "coding-agent"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: coding-agent\n"
+        "description: coding agent\n"
+        'metadata: {"openclaw":{"requires":{"anyBins":["missing-a","missing-b"]}}}\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    missing = loader.get("coding-agent")
+    assert missing is not None
+    assert missing.available is False
+    assert missing.missing == ["any_bin:missing-a|missing-b"]
+
+    def _fake_which(name: str) -> str | None:
+        return "/usr/bin/codex" if name == "missing-b" else None
+
+    monkeypatch.setattr("clawlite.core.skills.shutil.which", _fake_which)
+    available = loader.get("coding-agent")
+    assert available is not None
+    assert available.available is True
+    assert available.missing == []
+
+
+def test_skills_loader_supports_openclaw_primary_env_and_config_requirements(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "discord": {"token": "discord-token"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAWLITE_CONFIG", str(config_path))
+
+    skill_dir = tmp_path / "discord"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: discord\n"
+        "description: discord skill\n"
+        'metadata: {"openclaw":{"requires":{"config":["channels.discord.token"]},"primaryEnv":"GH_TOKEN"}}\n'
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("discord")
+    assert row is not None
+    assert row.available is False
+    assert "env:GH_TOKEN" in row.missing
+    assert "config:channels.discord.token" not in row.missing
+
+    monkeypatch.setenv("GH_TOKEN", "token")
+    available = loader.get("discord")
+    assert available is not None
+    assert available.available is True
+    assert available.missing == []
+
+
 def test_skills_loader_normalizes_requirement_schema_and_reports_invalid_env_names(tmp_path: Path) -> None:
     skill_dir = tmp_path / "schema"
     skill_dir.mkdir(parents=True, exist_ok=True)

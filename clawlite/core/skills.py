@@ -19,6 +19,11 @@ from typing import Iterable
 _KEY_VALUE_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.*)$")
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SOURCE_PRIORITY = {"builtin": 10, "marketplace": 20, "workspace": 30}
+_ACTIVE_CONFIG_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime_ns": -1,
+    "payload": {},
+}
 
 
 def _to_bool(value: object) -> bool:
@@ -157,6 +162,64 @@ def _coerce_list(value: object, *, normalize_os: bool = False) -> tuple[list[str
     return out, issues
 
 
+def _coerce_env_names(value: object) -> tuple[list[str], list[str]]:
+    rows, issues = _coerce_list(value)
+    out: list[str] = []
+    for item in rows:
+        if _ENV_NAME_RE.fullmatch(item):
+            out.append(item)
+            continue
+        issues.append(f"requirements:invalid_env_name:{item}")
+    return out, issues
+
+
+def _resolve_active_config_payload() -> dict[str, object]:
+    from clawlite.config.loader import DEFAULT_CONFIG_PATH, _migrate_config, _read_file
+
+    raw_path = os.getenv("CLAWLITE_CONFIG", "").strip()
+    path = Path(raw_path).expanduser() if raw_path else DEFAULT_CONFIG_PATH
+    try:
+        stat = path.stat()
+        mtime_ns = int(stat.st_mtime_ns)
+    except OSError:
+        mtime_ns = -1
+    cache_path = str(path)
+    if (
+        str(_ACTIVE_CONFIG_CACHE.get("path", "")) == cache_path
+        and int(_ACTIVE_CONFIG_CACHE.get("mtime_ns", -2) or -2) == mtime_ns
+    ):
+        cached_payload = _ACTIVE_CONFIG_CACHE.get("payload", {})
+        return dict(cached_payload) if isinstance(cached_payload, dict) else {}
+    try:
+        payload = _migrate_config(_read_file(path))
+    except Exception:
+        payload = {}
+    normalized = dict(payload) if isinstance(payload, dict) else {}
+    _ACTIVE_CONFIG_CACHE["path"] = cache_path
+    _ACTIVE_CONFIG_CACHE["mtime_ns"] = mtime_ns
+    _ACTIVE_CONFIG_CACHE["payload"] = dict(normalized)
+    return normalized
+
+
+def _config_value_present(config: object, dotted_path: str) -> bool:
+    current = config
+    for part in [segment.strip() for segment in str(dotted_path or "").split(".") if segment.strip()]:
+        if not isinstance(current, Mapping) or part not in current:
+            return False
+        current = current[part]
+    if current is None:
+        return False
+    if isinstance(current, bool):
+        return current
+    if isinstance(current, str):
+        return bool(current.strip())
+    if isinstance(current, Mapping):
+        return bool(current)
+    if isinstance(current, (list, tuple, set)):
+        return bool(current)
+    return True
+
+
 def _extract_runtime_metadata(meta: dict[str, object]) -> tuple[dict[str, object], list[str]]:
     raw = meta.get("metadata")
     if raw is None:
@@ -184,7 +247,7 @@ def _extract_runtime_metadata(meta: dict[str, object]) -> tuple[dict[str, object
 
 
 def _extract_requirement_map(meta: dict[str, object]) -> tuple[dict[str, list[str]], list[str]]:
-    out = {"bins": [], "env": [], "os": []}
+    out = {"bins": [], "env": [], "os": [], "any_bins": [], "config": []}
     issues: list[str] = []
 
     legacy_bins, legacy_issues = _coerce_list(meta.get("requires"))
@@ -197,20 +260,30 @@ def _extract_requirement_map(meta: dict[str, object]) -> tuple[dict[str, list[st
         runtime_requires = metadata_runtime.get("requires", {})
         if isinstance(runtime_requires, Mapping):
             bins, bins_issues = _coerce_list(runtime_requires.get("bins"))
-            env, env_issues = _coerce_list(runtime_requires.get("env"))
+            env, env_issues = _coerce_env_names(runtime_requires.get("env"))
             os_items, os_issues = _coerce_list(runtime_requires.get("os"), normalize_os=True)
+            any_bins, any_bins_issues = _coerce_list(runtime_requires.get("anyBins", runtime_requires.get("any_bins")))
+            config_items, config_issues = _coerce_list(runtime_requires.get("config"))
             out["bins"].extend(bins)
             out["env"].extend(env)
             out["os"].extend(os_items)
+            out["any_bins"].extend(any_bins)
+            out["config"].extend(config_items)
             issues.extend(bins_issues)
             issues.extend(env_issues)
             issues.extend(os_issues)
+            issues.extend(any_bins_issues)
+            issues.extend(config_issues)
         elif runtime_requires:
             issues.append("requirements:metadata_requires_invalid_type")
 
         runtime_os, runtime_os_issues = _coerce_list(metadata_runtime.get("os"), normalize_os=True)
         out["os"].extend(runtime_os)
         issues.extend(runtime_os_issues)
+        primary_env = metadata_runtime.get("primaryEnv", metadata_runtime.get("primary_env"))
+        primary_env_rows, primary_env_issues = _coerce_env_names(primary_env)
+        out["env"].extend(primary_env_rows)
+        issues.extend(primary_env_issues)
 
     explicit_requirements = meta.get("requirements")
     if explicit_requirements is not None:
@@ -223,22 +296,22 @@ def _extract_requirement_map(meta: dict[str, object]) -> tuple[dict[str, list[st
                 decoded = None
         if isinstance(decoded, Mapping):
             bins, bins_issues = _coerce_list(decoded.get("bins"))
-            env, env_issues = _coerce_list(decoded.get("env"))
+            env, env_issues = _coerce_env_names(decoded.get("env"))
             os_items, os_issues = _coerce_list(decoded.get("os"), normalize_os=True)
+            any_bins, any_bins_issues = _coerce_list(decoded.get("anyBins", decoded.get("any_bins")))
+            config_items, config_issues = _coerce_list(decoded.get("config"))
             out["bins"].extend(bins)
             out["env"].extend(env)
             out["os"].extend(os_items)
+            out["any_bins"].extend(any_bins)
+            out["config"].extend(config_items)
             issues.extend(bins_issues)
             issues.extend(env_issues)
             issues.extend(os_issues)
+            issues.extend(any_bins_issues)
+            issues.extend(config_issues)
         elif decoded is not None:
             issues.append("requirements:invalid_type")
-
-    env_issue = "requirements:invalid_env_name"
-    for item in list(out["env"]):
-        if _ENV_NAME_RE.fullmatch(item):
-            continue
-        issues.append(f"{env_issue}:{item}")
 
     for key in out:
         dedupe: list[str] = []
@@ -264,9 +337,16 @@ def _missing_requirements(requirements: dict[str, list[str]]) -> list[str]:
     for binary in requirements["bins"]:
         if shutil.which(binary) is None:
             missing.append(f"bin:{binary}")
+    any_bins = requirements.get("any_bins", [])
+    if any_bins and not any(shutil.which(binary) is not None for binary in any_bins):
+        missing.append(f"any_bin:{'|'.join(any_bins)}")
     for env_key in requirements["env"]:
         if not os.getenv(env_key):
             missing.append(f"env:{env_key}")
+    config_payload = _resolve_active_config_payload()
+    for config_key in requirements.get("config", []):
+        if not _config_value_present(config_payload, config_key):
+            missing.append(f"config:{config_key}")
     supported_oses = requirements["os"]
     if supported_oses:
         current = _normalize_os_name(platform.system())
