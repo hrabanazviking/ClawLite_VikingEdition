@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -277,15 +278,33 @@ class PatchApplicator:
 # ── validator ─────────────────────────────────────────────────────────────────
 
 class Validator:
-    def __init__(self, root: Path, *, timeout_s: float = 120.0) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        timeout_s: float = 120.0,
+        python_executable: str | Path | None = None,
+    ) -> None:
         self.root = root
         self.timeout_s = timeout_s
+        self.python_executable = str(python_executable or self._detect_python_executable())
+
+    def _detect_python_executable(self) -> str:
+        candidates = [
+            self.root / ".venv" / "bin" / "python",
+            self.root / ".venv" / "Scripts" / "python.exe",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return sys.executable or "python"
 
     def run_ruff(self) -> tuple[bool, str]:
         try:
             result = subprocess.run(
-                ["ruff", "check", "--fix", "--select=E,F,W", str(self.root)],
-                capture_output=True, text=True,
+                [self.python_executable, "-m", "ruff", "check", "--select=E,F,W", str(self.root)],
+                capture_output=True,
+                text=True,
                 timeout=self.timeout_s,
                 cwd=str(self.root),
             )
@@ -293,7 +312,7 @@ class Validator:
             output = (result.stdout + result.stderr).strip()
             return ok, output
         except FileNotFoundError:
-            return True, "ruff not found, skipped"
+            return False, f"python executable not found: {self.python_executable}"
         except subprocess.TimeoutExpired:
             return False, "ruff timed out"
         except Exception as exc:
@@ -302,8 +321,9 @@ class Validator:
     def run_pytest(self) -> tuple[bool, str]:
         try:
             result = subprocess.run(
-                ["python", "-m", "pytest", "-q", "--tb=short", "--no-header"],
-                capture_output=True, text=True,
+                [self.python_executable, "-m", "pytest", "-q", "--tb=short", "--no-header"],
+                capture_output=True,
+                text=True,
                 timeout=self.timeout_s,
                 cwd=str(self.root),
             )
@@ -311,7 +331,7 @@ class Validator:
             output = (result.stdout + result.stderr).strip()[-3000:]
             return ok, output
         except FileNotFoundError:
-            return False, "pytest not found"
+            return False, f"python executable not found: {self.python_executable}"
         except subprocess.TimeoutExpired:
             return False, "pytest timed out"
         except Exception as exc:
