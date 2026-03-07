@@ -3,7 +3,7 @@ name: gh-issues
 description: GitHub issue workflow helper bound to `gh issue` for fast issue listing, triage, and issue-to-PR orchestration.
 always: false
 metadata: {"clawlite":{"emoji":"🐙","requires":{"bins":["gh","git"]},"auth":{"optionalEnv":["GH_TOKEN"]}}}
-command: gh issue
+script: gh_issues
 ---
 
 # gh-issues

@@ -633,6 +633,149 @@ class SkillTool(Tool):
             user_id=ctx.user_id,
         )
 
+    @staticmethod
+    def _gh_value(payload: dict[str, Any], arguments: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = payload.get(key, arguments.get(key))
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _gh_label_values(payload: dict[str, Any], arguments: dict[str, Any]) -> list[str]:
+        raw = payload.get("labels", arguments.get("labels"))
+        if raw is None:
+            raw = payload.get("label", arguments.get("label"))
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+    @staticmethod
+    def _gh_bool(payload: dict[str, Any], arguments: dict[str, Any], *keys: str) -> bool:
+        for key in keys:
+            if key in payload:
+                return bool(payload.get(key))
+            if key in arguments:
+                return bool(arguments.get(key))
+        return False
+
+    async def _run_gh_issues(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            auth_error = await self._precheck_github_auth(spec_name=spec_name, timeout=timeout, ctx=ctx)
+            if auth_error is not None:
+                return auth_error
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["gh", "issue", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+            )
+
+        action = self._gh_value(payload, arguments, "action").lower() or "guide"
+        repo = self._gh_value(payload, arguments, "repo", "repository")
+        issue_number = self._gh_value(payload, arguments, "issue", "issue_number", "number")
+        title = self._gh_value(payload, arguments, "title")
+        body = self._gh_value(payload, arguments, "body")
+        state = self._gh_value(payload, arguments, "state")
+        search = self._gh_value(payload, arguments, "search", "query")
+        assignee = self._gh_value(payload, arguments, "assignee")
+        labels = self._gh_label_values(payload, arguments)
+        wants_comments = self._gh_bool(payload, arguments, "comments", "include_comments")
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "gh issue",
+                    "available_actions": ["list", "view", "comment", "create"],
+                    "required_fields": {
+                        "list": ["repo(optional)"],
+                        "view": ["issue"],
+                        "comment": ["issue", "body"],
+                        "create": ["title"],
+                    },
+                    "examples": {
+                        "list": {"tool_arguments": {"action": "list", "repo": "owner/repo", "state": "open", "limit": 10}},
+                        "view": {"tool_arguments": {"action": "view", "repo": "owner/repo", "issue": 123, "comments": True}},
+                        "comment": {"tool_arguments": {"action": "comment", "repo": "owner/repo", "issue": 123, "body": "Investigating this now."}},
+                        "create": {"tool_arguments": {"action": "create", "repo": "owner/repo", "title": "Bug title", "body": "Steps to reproduce"}},
+                    },
+                },
+                ensure_ascii=False,
+            )
+
+        argv = ["gh", "issue"]
+        if action == "list":
+            argv.append("list")
+            if repo:
+                argv.extend(["--repo", repo])
+            if state:
+                argv.extend(["--state", state])
+            if search:
+                argv.extend(["--search", search])
+            if assignee:
+                argv.extend(["--assignee", assignee])
+            if labels:
+                argv.extend(["--label", ",".join(labels)])
+            limit_value = payload.get("limit", arguments.get("limit", 20))
+            limit = max(1, min(100, int(limit_value or 20)))
+            argv.extend(["--limit", str(limit)])
+        elif action == "view":
+            if not issue_number:
+                raise ValueError("issue is required for gh-issues view")
+            argv.extend(["view", issue_number])
+            if repo:
+                argv.extend(["--repo", repo])
+            if wants_comments:
+                argv.append("--comments")
+        elif action == "comment":
+            if not issue_number:
+                raise ValueError("issue is required for gh-issues comment")
+            if not body:
+                raise ValueError("body is required for gh-issues comment")
+            argv.extend(["comment", issue_number])
+            if repo:
+                argv.extend(["--repo", repo])
+            argv.extend(["--body", body])
+        elif action == "create":
+            if not title:
+                raise ValueError("title is required for gh-issues create")
+            argv.append("create")
+            if repo:
+                argv.extend(["--repo", repo])
+            argv.extend(["--title", title])
+            if body:
+                argv.extend(["--body", body])
+            if assignee:
+                argv.extend(["--assignee", assignee])
+            if labels:
+                argv.extend(["--label", ",".join(labels)])
+        else:
+            raise ValueError("action must be one of: guide, list, view, comment, create")
+
+        auth_error = await self._precheck_github_auth(spec_name=spec_name, timeout=timeout, ctx=ctx)
+        if auth_error is not None:
+            return auth_error
+        return await self._run_command_via_exec_tool(spec_name=spec_name, argv=argv, timeout=timeout, ctx=ctx)
+
     async def _dispatch_script(self, script_name: str, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
         if script_name == "weather":
             return await self._run_weather(arguments)
@@ -646,6 +789,8 @@ class SkillTool(Tool):
             return await self._run_session_logs(arguments)
         if script_name == "coding_agent":
             return await self._run_coding_agent(arguments, ctx)
+        if script_name == "gh_issues":
+            return await self._run_gh_issues(arguments, ctx, spec_name=spec_name, timeout=self._timeout_value(arguments))
 
         target_tool = self.registry.get(script_name)
         if target_tool is not None and script_name != self.name:

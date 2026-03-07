@@ -398,6 +398,71 @@ def test_run_skill_command_prefix_dispatches_multiword_binding(tmp_path: Path) -
     asyncio.run(_scenario())
 
 
+def test_run_skill_gh_issues_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "gh-issues",
+        "name: gh-issues\ndescription: gh issue helper\nscript: gh_issues",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "gh-issues"},
+            ToolContext(session_id="cli:gh-issues", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert payload["backend"] == "gh issue"
+        assert "list" in payload["available_actions"]
+        assert "comment" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_gh_issues_structured_list_dispatches_gh_issue(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "gh-issues",
+        "name: gh-issues\ndescription: gh issue helper\nscript: gh_issues",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=0\nstdout=ok\nstderr=",
+                    "gh issue list --repo openclaw/openclaw --state open --label bug,high --limit 10": (
+                        "exit=0\nstdout=list ok\nstderr="
+                    ),
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "gh-issues",
+                "tool_arguments": {
+                    "action": "list",
+                    "repo": "openclaw/openclaw",
+                    "state": "open",
+                    "labels": ["bug", "high"],
+                    "limit": 10,
+                },
+            },
+            ToolContext(session_id="cli:gh-issues", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=list ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
