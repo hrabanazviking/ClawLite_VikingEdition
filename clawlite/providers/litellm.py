@@ -531,7 +531,16 @@ class LiteLLMProvider(LLMProvider):
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
-                    message = data.get("choices", [{}])[0].get("message", {})
+                    choices = data.get("choices")
+                    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                        error = "provider_response_invalid:missing_choice"
+                        self._record_failure(error=error)
+                        raise RuntimeError(error)
+                    message = choices[0].get("message")
+                    if not isinstance(message, dict):
+                        error = "provider_response_invalid:missing_choice"
+                        self._record_failure(error=error)
+                        raise RuntimeError(error)
                     text = self._extract_text(message.get("content", ""))
                     tool_calls = self._parse_tool_calls(message)
                     self._record_success()

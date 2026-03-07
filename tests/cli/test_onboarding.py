@@ -348,3 +348,74 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     assert payload["persisted"]["gateway"]["auth_mode"] == "required"
     assert payload["final"]["gateway_url"] == "http://0.0.0.0:19090"
     assert payload["final"]["gateway_token"]
+
+
+def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(monkeypatch, tmp_path) -> None:
+    cfg = AppConfig.from_dict(
+        {
+            "workspace_path": str(tmp_path / "workspace"),
+            "channels": {
+                "telegram": {
+                    "enabled": True,
+                    "token": "123:ABC",
+                }
+            },
+            "provider": {"model": "openai/gpt-4o-mini", "litellm_base_url": "https://api.openai.com/v1"},
+        }
+    )
+
+    prompt_answers = iter(
+        [
+            "basic",
+            "openai",
+            "https://api.openai.com/v1",
+            "sk-openai-123456",
+        ]
+    )
+    confirm_answers = iter([False])
+
+    def _fake_prompt_ask(*args, **kwargs):
+        return next(prompt_answers)
+
+    def _fake_confirm_ask(*args, **kwargs):
+        return next(confirm_answers)
+
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
+    monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_provider",
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
+            "ok": True,
+            "status_code": 200,
+            "provider": provider,
+            "family": "openai_compatible",
+            "recommended_model": "openai/gpt-4o-mini",
+            "recommended_models": ["openai/gpt-4o-mini"],
+            "onboarding_hint": "",
+            "base_url": base_url,
+            "api_key_masked": "********3456",
+            "error": "",
+        },
+    )
+
+    class _FakeWorkspaceLoader:
+        def __init__(self, workspace_path):
+            self.workspace_path = workspace_path
+
+        def bootstrap(self, *, overwrite, variables):
+            return [Path(self.workspace_path) / "IDENTITY.md"]
+
+    monkeypatch.setattr("clawlite.cli.onboarding.WorkspaceLoader", _FakeWorkspaceLoader)
+
+    payload = run_onboarding_wizard(
+        cfg,
+        config_path=tmp_path / "config.json",
+        overwrite=True,
+        variables={"assistant_name": "Fox"},
+    )
+
+    assert payload["ok"] is True
+    assert payload["steps"][2]["enabled"] is False
+    assert payload["persisted"]["telegram"]["enabled"] is False
+    assert cfg.channels.telegram.enabled is False
+    assert cfg.channels.telegram.token == "123:ABC"

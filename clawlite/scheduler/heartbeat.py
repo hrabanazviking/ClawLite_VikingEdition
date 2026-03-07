@@ -136,6 +136,14 @@ class HeartbeatService:
             return ("failed", str(exc))
         return ("done", "")
 
+    def _reset_stale_task(self) -> None:
+        task_state, task_error = self._task_snapshot()
+        if task_state not in {"failed", "cancelled", "done"}:
+            return
+        if task_error:
+            self._state["last_error"] = task_error
+        self._task = None
+
     def _load_state(self) -> None:
         if not self.state_path.exists():
             return
@@ -361,6 +369,7 @@ class HeartbeatService:
         self._task = asyncio.create_task(_loop())
 
     async def trigger_now(self, on_tick: TickHandler) -> HeartbeatDecision:
+        self._reset_stale_task()
         if self._task is None:
             return await self._execute_tick(on_tick, trigger="now")
         loop = asyncio.get_running_loop()

@@ -77,6 +77,35 @@ def test_heartbeat_service_trigger_now() -> None:
     asyncio.run(_scenario())
 
 
+def test_heartbeat_trigger_now_resets_stale_cancelled_task() -> None:
+    async def _scenario() -> None:
+        beats: list[str] = []
+
+        async def _tick() -> dict[str, str]:
+            beats.append("tick")
+            return {"action": "skip", "reason": "manual_check"}
+
+        hb = HeartbeatService(interval_seconds=9999)
+        stale_task = asyncio.create_task(asyncio.sleep(0))
+        stale_task.cancel()
+        try:
+            await stale_task
+        except asyncio.CancelledError:
+            pass
+
+        hb._task = stale_task
+        hb._running = True
+
+        decision = await asyncio.wait_for(hb.trigger_now(_tick), timeout=0.2)
+
+        assert decision.action == "skip"
+        assert decision.reason == "manual_check"
+        assert beats == ["tick"]
+        assert hb._task is None
+
+    asyncio.run(_scenario())
+
+
 def test_heartbeat_service_tracks_wake_pressure_reasons(tmp_path: Path) -> None:
     async def _scenario() -> None:
         hb = HeartbeatService(interval_seconds=9999, state_path=tmp_path / "heartbeat-state.json")

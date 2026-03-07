@@ -527,6 +527,8 @@ def run_onboarding_wizard(
                 }
             config.channels.telegram.enabled = True
             config.channels.telegram.token = str(telegram_token or "").strip()
+        else:
+            config.channels.telegram.enabled = False
         payload["steps"].append(
             {
                 "step": 3,
