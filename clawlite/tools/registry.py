@@ -115,10 +115,107 @@ class ToolRegistry:
     def schema(self) -> list[dict[str, Any]]:
         return [self._tools[name].export_schema() for name in sorted(self._tools.keys())]
 
+    @staticmethod
+    def _matches_schema_type(value: Any, expected_type: str) -> bool:
+        normalized = str(expected_type or "").strip().lower()
+        if normalized == "string":
+            return isinstance(value, str)
+        if normalized == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if normalized == "number":
+            return (isinstance(value, int) and not isinstance(value, bool)) or isinstance(value, float)
+        if normalized == "boolean":
+            return isinstance(value, bool)
+        if normalized == "object":
+            return isinstance(value, dict)
+        if normalized == "array":
+            return isinstance(value, list)
+        if normalized == "null":
+            return value is None
+        return True
+
+    @classmethod
+    def _validate_schema_value(cls, value: Any, schema: dict[str, Any]) -> str:
+        if not isinstance(schema, dict):
+            return ""
+
+        raw_type = schema.get("type")
+        accepted_types = raw_type if isinstance(raw_type, list) else [raw_type] if raw_type is not None else []
+        normalized_types = [str(item or "").strip().lower() for item in accepted_types if str(item or "").strip()]
+        if normalized_types and not any(cls._matches_schema_type(value, item) for item in normalized_types):
+            return f"expected_{'_or_'.join(normalized_types)}"
+
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and enum_values and value not in enum_values:
+            return "value_not_allowed"
+
+        if value is None:
+            return ""
+
+        minimum = schema.get("minimum")
+        if minimum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                if value < minimum:
+                    return f"minimum_{minimum}"
+            except Exception:
+                return "invalid_minimum"
+
+        maximum = schema.get("maximum")
+        if maximum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                if value > maximum:
+                    return f"maximum_{maximum}"
+            except Exception:
+                return "invalid_maximum"
+
+        return ""
+
+    @classmethod
+    def _validate_arguments(cls, tool: Tool, arguments: Any) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            raise RuntimeError(f"tool_invalid_arguments:{tool.name}:expected_object")
+
+        schema = tool.args_schema()
+        if not isinstance(schema, dict):
+            return dict(arguments)
+
+        schema_type = str(schema.get("type", "") or "").strip().lower()
+        if schema_type and schema_type != "object":
+            return dict(arguments)
+
+        required = schema.get("required", [])
+        if isinstance(required, list):
+            missing = [str(item).strip() for item in required if str(item).strip() and str(item).strip() not in arguments]
+            if missing:
+                raise RuntimeError(
+                    f"tool_invalid_arguments:{tool.name}:missing_required:{','.join(sorted(missing))}"
+                )
+
+        properties = schema.get("properties", {})
+        property_schemas = properties if isinstance(properties, dict) else {}
+        additional_properties = schema.get("additionalProperties", True)
+        if additional_properties is False:
+            unexpected = sorted(str(key).strip() for key in arguments.keys() if key not in property_schemas)
+            if unexpected:
+                raise RuntimeError(
+                    f"tool_invalid_arguments:{tool.name}:unexpected_arguments:{','.join(unexpected)}"
+                )
+
+        for key, value in arguments.items():
+            property_schema = property_schemas.get(key)
+            if not isinstance(property_schema, dict):
+                continue
+            validation_error = cls._validate_schema_value(value, property_schema)
+            if validation_error:
+                raise RuntimeError(f"tool_invalid_arguments:{tool.name}:{key}:{validation_error}")
+
+        return dict(arguments)
+
     async def execute(self, name: str, arguments: dict[str, Any], *, session_id: str, channel: str = "", user_id: str = "") -> str:
         tool = self.get(name)
         if tool is None:
             raise KeyError(f"unknown tool: {name}")
+        validated_arguments = self._validate_arguments(tool, arguments)
 
         resolved_channel, risky_tools, blocked_channels, allowed_channels = self._resolve_effective_safety(
             session_id=session_id,
@@ -137,4 +234,4 @@ class ToolRegistry:
             allowed_channels=allowed_channels,
         ):
             raise RuntimeError(f"tool_blocked_by_safety_policy:{name}:{resolved_channel}")
-        return await tool.run(arguments, ToolContext(session_id=session_id, channel=resolved_channel, user_id=user_id))
+        return await tool.run(validated_arguments, ToolContext(session_id=session_id, channel=resolved_channel, user_id=user_id))

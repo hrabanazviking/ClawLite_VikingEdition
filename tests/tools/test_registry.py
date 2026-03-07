@@ -40,6 +40,27 @@ class RunSkillLikeTool(Tool):
         return f"skill={arguments.get('name', '')}"
 
 
+class StrictSchemaTool(Tool):
+    name = "strict"
+    description = "strict schema validation"
+
+    def args_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "count": {"type": "integer", "minimum": 1, "maximum": 3},
+                "mode": {"type": "string", "enum": ["fast", "safe"]},
+            },
+            "required": ["path", "count"],
+            "additionalProperties": False,
+        }
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return f"{arguments['path']}:{arguments['count']}:{arguments.get('mode', '')}"
+
+
 def test_tool_registry_execute() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry()
@@ -243,5 +264,81 @@ def test_tool_registry_layered_channel_override_supersedes_agent_and_global() ->
         reg.register(ExecLikeTool())
         out = await reg.execute("exec", {"command": "id"}, session_id="agent:alpha:42", channel="telegram", user_id="1")
         assert out == "channel=telegram;user=1"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_non_object_arguments_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        try:
+            await reg.execute("strict", ["bad"], session_id="cli:1")  # type: ignore[arg-type]
+            raise AssertionError("expected argument validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:strict:expected_object"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_missing_required_arguments_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        try:
+            await reg.execute("strict", {"path": "demo.txt"}, session_id="cli:1")
+            raise AssertionError("expected missing required validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:strict:missing_required:count"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_type_and_range_mismatches_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        try:
+            await reg.execute("strict", {"path": "demo.txt", "count": 0}, session_id="cli:1")
+            raise AssertionError("expected range validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:strict:count:minimum_1"
+
+        try:
+            await reg.execute("strict", {"path": "demo.txt", "count": "2"}, session_id="cli:1")  # type: ignore[dict-item]
+            raise AssertionError("expected type validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:strict:count:expected_integer"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_unexpected_arguments_when_schema_forbids_them() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        try:
+            await reg.execute(
+                "strict",
+                {"path": "demo.txt", "count": 2, "extra": True},
+                session_id="cli:1",
+            )
+            raise AssertionError("expected unexpected-argument validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:strict:unexpected_arguments:extra"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_allows_valid_arguments_after_schema_validation() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        out = await reg.execute(
+            "strict",
+            {"path": "demo.txt", "count": 2, "mode": "safe"},
+            session_id="cli:1",
+        )
+        assert out == "demo.txt:2:safe"
 
     asyncio.run(_scenario())

@@ -3670,7 +3670,6 @@ class MemoryStore:
             return
 
         filtered: list[dict[str, Any]] = []
-        changed = False
         for item in upcoming_events:
             if not isinstance(item, dict):
                 continue
@@ -3679,10 +3678,8 @@ class MemoryStore:
             if existing_stamp.year > 1 and existing_stamp.tzinfo is None:
                 existing_stamp = existing_stamp.replace(tzinfo=timezone.utc)
             if existing_stamp.year > 1 and existing_stamp < datetime.now(timezone.utc) - timedelta(days=1):
-                changed = True
                 continue
             if existing_id == event_id:
-                changed = True
                 continue
             filtered.append(item)
 
