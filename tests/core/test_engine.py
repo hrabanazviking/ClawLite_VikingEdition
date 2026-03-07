@@ -877,6 +877,44 @@ class FakeInvalidToolNameProvider:
         return ProviderResult(text="done", tool_calls=[], model="fake/model")
 
 
+class FakeDictProviderPayloadProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.calls += 1
+        self.snapshots.append(messages)
+        if self.calls == 1:
+            return {
+                "text": "use dict payload",
+                "tool_calls": (
+                    {
+                        "name": "echo",
+                        "arguments": {"text": "hello"},
+                        "id": "dict-call-1",
+                    },
+                ),
+                "model": 123,
+            }
+        return {
+            "text": "done",
+            "tool_calls": [],
+            "model": "fake/model",
+        }
+
+
+class FakeInvalidToolCallsContainerProvider:
+    async def complete(self, *, messages, tools):
+        del messages, tools
+        return {
+            "text": "done",
+            "tool_calls": "broken-container",
+            "model": "fake/model",
+        }
+
+
 class ContextCaptureTools:
     def __init__(self) -> None:
         self.last_channel = ""
@@ -1034,6 +1072,44 @@ def test_engine_rejects_invalid_tool_names_before_dispatch() -> None:
         assert "tool_error:echo_bad:tool_call_name_invalid_format" in str(tool_rows[0]["content"])
         metrics = engine.turn_metrics_snapshot()
         assert metrics["tool_calls_executed"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_engine_normalizes_dict_provider_payloads_and_tuple_tool_calls() -> None:
+    async def _scenario() -> None:
+        provider = FakeDictProviderPayloadProvider()
+        tools = ExecuteCaptureTools()
+        engine = AgentEngine(provider=provider, tools=tools)
+
+        out = await engine.run(session_id="cli:dict-provider", user_text="say hi")
+        assert out.text == "done"
+        assert tools.execute_calls == [
+            {
+                "name": "echo",
+                "arguments": {"text": "hello"},
+                "session_id": "cli:dict-provider",
+                "channel": "cli",
+                "user_id": "dict-provider",
+            }
+        ]
+        metrics = engine.turn_metrics_snapshot()
+        assert metrics["last_model"] == "fake/model"
+
+    asyncio.run(_scenario())
+
+
+def test_engine_ignores_invalid_tool_call_containers_from_provider() -> None:
+    async def _scenario() -> None:
+        tools = ExecuteCaptureTools()
+        engine = AgentEngine(provider=FakeInvalidToolCallsContainerProvider(), tools=tools)
+
+        out = await engine.run(session_id="cli:bad-tool-calls", user_text="say hi")
+        assert out.text == "done"
+        assert tools.execute_calls == []
+        metrics = engine.turn_metrics_snapshot()
+        assert metrics["tool_calls_executed"] == 0
+        assert metrics["last_model"] == "fake/model"
 
     asyncio.run(_scenario())
 

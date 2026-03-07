@@ -514,7 +514,38 @@ class AgentEngine:
             kwargs["temperature"] = self.temperature
         if accepts_reasoning_effort and reasoning_effort is not None:
             kwargs["reasoning_effort"] = reasoning_effort
-        return await self.provider.complete(**kwargs)
+        raw_result = await self.provider.complete(**kwargs)
+        return self._normalize_provider_result(raw_result)
+
+    @staticmethod
+    def _provider_result_field(payload: Any, key: str, default: Any = None) -> Any:
+        if isinstance(payload, dict):
+            return payload.get(key, default)
+        return getattr(payload, key, default)
+
+    @classmethod
+    def _normalize_provider_result(cls, payload: Any) -> ProviderResult:
+        text = cls._provider_result_field(payload, "text", "")
+        model = cls._provider_result_field(payload, "model", "")
+        raw_tool_calls = cls._provider_result_field(payload, "tool_calls", [])
+
+        if not isinstance(text, str):
+            text = str(text or "")
+        if not isinstance(model, str):
+            model = str(model or "")
+
+        if raw_tool_calls is None:
+            tool_calls: list[Any] = []
+        elif isinstance(raw_tool_calls, (list, tuple)):
+            tool_calls = list(raw_tool_calls)
+        else:
+            tool_calls = []
+
+        return ProviderResult(
+            text=text,
+            tool_calls=tool_calls,
+            model=model,
+        )
 
     @classmethod
     def _normalize_reasoning_effort(cls, value: str | None) -> str | None:
@@ -624,11 +655,17 @@ class AgentEngine:
 
     @staticmethod
     def _tool_call_raw_name(tool_call: Any) -> Any:
+        if isinstance(tool_call, dict):
+            return tool_call.get("name", "")
         return getattr(tool_call, "name", "")
 
     @staticmethod
     def _tool_call_id(tool_call: Any, idx: int) -> str:
-        raw = str(getattr(tool_call, "id", "") or "").strip()
+        if isinstance(tool_call, dict):
+            raw_value = tool_call.get("id", "")
+        else:
+            raw_value = getattr(tool_call, "id", "")
+        raw = str(raw_value or "").strip()
         return raw or f"call_{idx}"
 
     @classmethod
@@ -671,6 +708,8 @@ class AgentEngine:
 
     @staticmethod
     def _tool_call_raw_arguments(tool_call: Any) -> Any:
+        if isinstance(tool_call, dict):
+            return tool_call.get("arguments", {})
         return getattr(tool_call, "arguments", {})
 
     @staticmethod
