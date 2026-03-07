@@ -135,7 +135,27 @@ class ToolRegistry:
         return True
 
     @classmethod
-    def _validate_schema_value(cls, value: Any, schema: dict[str, Any]) -> str:
+    def _format_validation_error(cls, *, path: str, reason: str) -> str:
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            return ""
+        clean_path = str(path or "").strip()
+        return f"{clean_path}:{clean_reason}" if clean_path else clean_reason
+
+    @classmethod
+    def _child_schema_path(cls, path: str, fragment: str) -> str:
+        clean_fragment = str(fragment or "").strip()
+        if not clean_fragment:
+            return str(path or "").strip()
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            return clean_fragment
+        if clean_fragment.startswith("["):
+            return f"{clean_path}{clean_fragment}"
+        return f"{clean_path}.{clean_fragment}"
+
+    @classmethod
+    def _validate_schema_value(cls, value: Any, schema: dict[str, Any], *, path: str = "") -> str:
         if not isinstance(schema, dict):
             return ""
 
@@ -143,30 +163,111 @@ class ToolRegistry:
         accepted_types = raw_type if isinstance(raw_type, list) else [raw_type] if raw_type is not None else []
         normalized_types = [str(item or "").strip().lower() for item in accepted_types if str(item or "").strip()]
         if normalized_types and not any(cls._matches_schema_type(value, item) for item in normalized_types):
-            return f"expected_{'_or_'.join(normalized_types)}"
+            return cls._format_validation_error(path=path, reason=f"expected_{'_or_'.join(normalized_types)}")
 
         enum_values = schema.get("enum")
         if isinstance(enum_values, list) and enum_values and value not in enum_values:
-            return "value_not_allowed"
+            return cls._format_validation_error(path=path, reason="value_not_allowed")
 
         if value is None:
             return ""
+
+        min_length = schema.get("minLength")
+        if min_length is not None and isinstance(value, str):
+            try:
+                if len(value) < int(min_length):
+                    return cls._format_validation_error(path=path, reason=f"min_length_{min_length}")
+            except Exception:
+                return cls._format_validation_error(path=path, reason="invalid_min_length")
+
+        max_length = schema.get("maxLength")
+        if max_length is not None and isinstance(value, str):
+            try:
+                if len(value) > int(max_length):
+                    return cls._format_validation_error(path=path, reason=f"max_length_{max_length}")
+            except Exception:
+                return cls._format_validation_error(path=path, reason="invalid_max_length")
 
         minimum = schema.get("minimum")
         if minimum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
             try:
                 if value < minimum:
-                    return f"minimum_{minimum}"
+                    return cls._format_validation_error(path=path, reason=f"minimum_{minimum}")
             except Exception:
-                return "invalid_minimum"
+                return cls._format_validation_error(path=path, reason="invalid_minimum")
 
         maximum = schema.get("maximum")
         if maximum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
             try:
                 if value > maximum:
-                    return f"maximum_{maximum}"
+                    return cls._format_validation_error(path=path, reason=f"maximum_{maximum}")
             except Exception:
-                return "invalid_maximum"
+                return cls._format_validation_error(path=path, reason="invalid_maximum")
+
+        if isinstance(value, list):
+            min_items = schema.get("minItems")
+            if min_items is not None:
+                try:
+                    if len(value) < int(min_items):
+                        return cls._format_validation_error(path=path, reason=f"min_items_{min_items}")
+                except Exception:
+                    return cls._format_validation_error(path=path, reason="invalid_min_items")
+
+            max_items = schema.get("maxItems")
+            if max_items is not None:
+                try:
+                    if len(value) > int(max_items):
+                        return cls._format_validation_error(path=path, reason=f"max_items_{max_items}")
+                except Exception:
+                    return cls._format_validation_error(path=path, reason="invalid_max_items")
+
+            items_schema = schema.get("items")
+            if isinstance(items_schema, dict):
+                for index, item in enumerate(value):
+                    nested_error = cls._validate_schema_value(
+                        item,
+                        items_schema,
+                        path=cls._child_schema_path(path, f"[{index}]"),
+                    )
+                    if nested_error:
+                        return nested_error
+
+        if isinstance(value, dict):
+            properties = schema.get("properties", {})
+            property_schemas = properties if isinstance(properties, dict) else {}
+            required = schema.get("required", [])
+            if isinstance(required, list):
+                missing = [
+                    str(item).strip()
+                    for item in required
+                    if str(item).strip() and str(item).strip() not in value
+                ]
+                if missing:
+                    return cls._format_validation_error(
+                        path=path,
+                        reason=f"missing_required:{','.join(sorted(missing))}",
+                    )
+
+            additional_properties = schema.get("additionalProperties", True)
+            if additional_properties is False:
+                unexpected = sorted(str(key).strip() for key in value.keys() if key not in property_schemas)
+                if unexpected:
+                    return cls._format_validation_error(
+                        path=path,
+                        reason=f"unexpected_arguments:{','.join(unexpected)}",
+                    )
+
+            for key, item in value.items():
+                child_schema = property_schemas.get(key)
+                if not isinstance(child_schema, dict):
+                    continue
+                nested_error = cls._validate_schema_value(
+                    item,
+                    child_schema,
+                    path=cls._child_schema_path(path, str(key).strip()),
+                )
+                if nested_error:
+                    return nested_error
 
         return ""
 
@@ -205,9 +306,9 @@ class ToolRegistry:
             property_schema = property_schemas.get(key)
             if not isinstance(property_schema, dict):
                 continue
-            validation_error = cls._validate_schema_value(value, property_schema)
+            validation_error = cls._validate_schema_value(value, property_schema, path=str(key).strip())
             if validation_error:
-                raise RuntimeError(f"tool_invalid_arguments:{tool.name}:{key}:{validation_error}")
+                raise RuntimeError(f"tool_invalid_arguments:{tool.name}:{validation_error}")
 
         return dict(arguments)
 

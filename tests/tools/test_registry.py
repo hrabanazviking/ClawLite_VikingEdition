@@ -61,6 +61,52 @@ class StrictSchemaTool(Tool):
         return f"{arguments['path']}:{arguments['count']}:{arguments.get('mode', '')}"
 
 
+class NestedSchemaTool(Tool):
+    name = "nested"
+    description = "nested schema validation"
+
+    def args_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "media": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "url": {"type": "string"},
+                        },
+                        "required": ["type"],
+                        "additionalProperties": False,
+                    },
+                },
+                "buttons": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "url": {"type": "string"},
+                            },
+                            "required": ["text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            },
+            "additionalProperties": False,
+        }
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return str(arguments)
+
+
 def test_tool_registry_execute() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry()
@@ -340,5 +386,54 @@ def test_tool_registry_allows_valid_arguments_after_schema_validation() -> None:
             session_id="cli:1",
         )
         assert out == "demo.txt:2:safe"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_nested_missing_required_arguments_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(NestedSchemaTool())
+        try:
+            await reg.execute("nested", {"media": [{}]}, session_id="cli:1")
+            raise AssertionError("expected nested missing-required validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:nested:media[0]:missing_required:type"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_nested_unexpected_arguments_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(NestedSchemaTool())
+        try:
+            await reg.execute("nested", {"media": [{"type": "photo", "extra": True}]}, session_id="cli:1")
+            raise AssertionError("expected nested unexpected-argument validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:nested:media[0]:unexpected_arguments:extra"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_blocks_nested_item_type_and_min_items_fail_closed() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(NestedSchemaTool())
+        try:
+            await reg.execute("nested", {"media": []}, session_id="cli:1")
+            raise AssertionError("expected nested min-items validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:nested:media:min_items_1"
+
+        try:
+            await reg.execute(
+                "nested",
+                {"buttons": [[{"text": 123}]]},
+                session_id="cli:1",
+            )
+            raise AssertionError("expected nested item type validation block")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_invalid_arguments:nested:buttons[0][0].text:expected_string"
 
     asyncio.run(_scenario())

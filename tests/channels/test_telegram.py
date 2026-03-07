@@ -3415,6 +3415,94 @@ def test_telegram_polling_stale_update_is_skipped_and_counted(tmp_path: Path) ->
     asyncio.run(_scenario())
 
 
+def test_telegram_polling_duplicate_update_advances_offset_and_recovers(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        emitted: list[str] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            del session_id, user_id, metadata
+            emitted.append(text)
+            channel._running = False
+
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "poll_interval_s": 0.01,
+                "dedupe_state_path": str(tmp_path / "telegram-dedupe.json"),
+            },
+            on_message=_on_message,
+        )
+        saved_offsets: list[int] = []
+        channel._save_offset = lambda: saved_offsets.append(channel._offset)  # type: ignore[method-assign]
+        channel._offset = 100
+        assert channel._remember_update_dedupe_key("update:100", source="polling") is True
+
+        user = SimpleNamespace(id=1, username="alice", first_name="Alice", language_code="en")
+        chat = SimpleNamespace(type="private")
+
+        duplicate_message = SimpleNamespace(
+            text="already-seen",
+            caption=None,
+            chat_id=42,
+            from_user=user,
+            message_id=10,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        fresh_message = SimpleNamespace(
+            text="fresh-after-duplicate",
+            caption=None,
+            chat_id=42,
+            from_user=user,
+            message_id=11,
+            chat=chat,
+            date=None,
+            edit_date=None,
+            reply_to_message=None,
+        )
+        duplicate_update = SimpleNamespace(
+            update_id=100,
+            message=duplicate_message,
+            edited_message=None,
+            effective_message=duplicate_message,
+        )
+        fresh_update = SimpleNamespace(
+            update_id=101,
+            message=fresh_message,
+            edited_message=None,
+            effective_message=fresh_message,
+        )
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.offsets: list[int] = []
+
+            async def get_updates(self, *, offset, timeout, allowed_updates):
+                del timeout, allowed_updates
+                self.offsets.append(offset)
+                if offset < 101:
+                    return [duplicate_update]
+                if offset == 101:
+                    return [fresh_update]
+                channel._running = False
+                return []
+
+        channel.bot = FakeBot()
+        channel._running = True
+        with patch("clawlite.channels.telegram.asyncio.sleep", new=AsyncMock()):
+            await channel._poll_loop()
+
+        assert emitted == ["fresh-after-duplicate"]
+        assert channel._offset == 102
+        assert saved_offsets == [101, 102]
+        assert channel.bot.offsets[:2] == [100, 101]
+        assert channel.signals()["update_duplicate_skip_count"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_auth_breaker_close_count_tracks_natural_cooldown() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(
