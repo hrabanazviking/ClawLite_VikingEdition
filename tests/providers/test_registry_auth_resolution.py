@@ -40,6 +40,55 @@ def test_resolve_gateway_from_openrouter_key(monkeypatch) -> None:
     assert resolved.base_url == "https://openrouter.ai/api/v1"
 
 
+def test_resolve_xai_uses_provider_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-live-test")
+
+    resolved = resolve_litellm_provider(
+        model="xai/grok-4",
+        api_key="",
+        base_url="https://api.openai.com/v1",
+    )
+
+    assert resolved.name == "xai"
+    assert resolved.model == "grok-4"
+    assert resolved.api_key == "xai-live-test"
+    assert resolved.base_url == "https://api.x.ai/v1"
+
+
+def test_resolve_kilocode_detects_gateway_from_base_url(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.setenv("KILOCODE_API_KEY", "kilo-test")
+
+    resolved = resolve_litellm_provider(
+        model="openai/gpt-4.1-mini",
+        api_key="",
+        base_url="https://api.kilo.ai/api/gateway/",
+    )
+
+    assert resolved.name == "kilocode"
+    assert resolved.model == "openai/gpt-4.1-mini"
+    assert resolved.api_key == "kilo-test"
+    assert resolved.base_url == "https://api.kilo.ai/api/gateway"
+
+
+def test_resolve_zai_accepts_env_aliases(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setenv("Z_AI_API_KEY", "zai-test")
+
+    resolved = resolve_litellm_provider(
+        model="zai/glm-5",
+        api_key="",
+        base_url="",
+    )
+
+    assert resolved.name == "zai"
+    assert resolved.model == "glm-5"
+    assert resolved.api_key == "zai-test"
+    assert resolved.base_url == "https://api.z.ai/api/paas/v4"
+
+
 def test_provider_returns_missing_key_error_before_http() -> None:
     async def _scenario() -> None:
         provider = LiteLLMProvider(
@@ -73,6 +122,25 @@ def test_build_provider_uses_groq_env_key(monkeypatch) -> None:
     assert provider.provider_name == "groq"
     assert provider.api_key == "gsk_test"
     assert provider.base_url == "https://api.groq.com/openai/v1"
+
+
+def test_build_provider_uses_dynamic_xai_block(monkeypatch) -> None:
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+
+    provider = build_provider(
+        {
+            "model": "xai/grok-4",
+            "providers": {
+                "litellm": {"api_key": "", "base_url": ""},
+                "xai": {"api_key": "xai-config", "api_base": "https://api.x.ai/v1"},
+            },
+        }
+    )
+
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.provider_name == "xai"
+    assert provider.api_key == "xai-config"
+    assert provider.base_url == "https://api.x.ai/v1"
 
 
 def test_build_provider_openai_codex_is_deterministic_even_without_codex_auth(monkeypatch) -> None:

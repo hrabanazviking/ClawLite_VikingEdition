@@ -112,6 +112,8 @@ def _validate_config_keys(config: dict[str, Any]) -> None:
                 _walk(value, ref[key], location)
                 continue
 
+            if path == "providers" and isinstance(value, dict):
+                continue
             if path == "channels" and isinstance(value, dict):
                 continue
             if path == "tools.mcp.servers" and isinstance(value, dict):

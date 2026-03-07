@@ -1804,6 +1804,50 @@ def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, cap
     assert persisted_after["providers"]["openai"]["extra_headers"] == {}
 
 
+def test_cli_provider_set_auth_supports_dynamic_provider_blocks(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "xai/grok-4"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_set = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "set-auth",
+            "xai",
+            "--api-key",
+            "xai-live-1234",
+            "--api-base",
+            "https://api.x.ai/v1",
+        ]
+    )
+    assert rc_set == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["provider"] == "xai"
+    assert payload["api_base"] == "https://api.x.ai/v1"
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["providers"]["xai"]["api_key"] == "xai-live-1234"
+    assert persisted["providers"]["xai"]["api_base"] == "https://api.x.ai/v1"
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "xai"])
+    assert rc_status == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["ok"] is True
+    assert status_payload["provider"] == "xai"
+    assert status_payload["configured"] is True
+
+
 def test_cli_provider_set_auth_invalid_header_returns_rc2(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

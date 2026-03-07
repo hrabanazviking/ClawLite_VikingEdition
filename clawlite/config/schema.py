@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 
 @dataclass(slots=True)
@@ -323,9 +323,28 @@ class ProviderOverrideConfig:
         extra_headers = dict(extra_headers_raw) if isinstance(extra_headers_raw, dict) else {}
         return cls(api_key=api_key, api_base=api_base, extra_headers=extra_headers)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "api_key": self.api_key,
+            "api_base": self.api_base,
+            "extra_headers": dict(self.extra_headers),
+        }
+
 
 @dataclass(slots=True)
 class ProvidersConfig:
+    BUILTIN_KEYS: ClassVar[tuple[str, ...]] = (
+        "openrouter",
+        "gemini",
+        "openai",
+        "anthropic",
+        "deepseek",
+        "groq",
+        "ollama",
+        "vllm",
+        "custom",
+    )
+
     openrouter: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
     gemini: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
     openai: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
@@ -335,10 +354,42 @@ class ProvidersConfig:
     ollama: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
     vllm: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
     custom: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
+    extra: dict[str, ProviderOverrideConfig] = field(default_factory=dict)
+
+    @staticmethod
+    def normalize_name(value: str) -> str:
+        return str(value or "").strip().lower().replace("-", "_")
+
+    def get(self, name: str) -> ProviderOverrideConfig | None:
+        key = self.normalize_name(name)
+        if key in self.BUILTIN_KEYS:
+            return getattr(self, key)
+        return self.extra.get(key)
+
+    def ensure(self, name: str) -> ProviderOverrideConfig:
+        key = self.normalize_name(name)
+        existing = self.get(key)
+        if existing is not None:
+            return existing
+        created = ProviderOverrideConfig()
+        self.extra[key] = created
+        return created
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {key: getattr(self, key).to_dict() for key in self.BUILTIN_KEYS}
+        for key in sorted(self.extra):
+            payload[key] = self.extra[key].to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> ProvidersConfig:
         data = dict(raw or {})
+        extras: dict[str, ProviderOverrideConfig] = {}
+        for key, value in data.items():
+            normalized = cls.normalize_name(key)
+            if normalized in cls.BUILTIN_KEYS or not isinstance(value, dict):
+                continue
+            extras[normalized] = ProviderOverrideConfig.from_dict(value)
         return cls(
             openrouter=ProviderOverrideConfig.from_dict(dict(data.get("openrouter") or {})),
             gemini=ProviderOverrideConfig.from_dict(dict(data.get("gemini") or {})),
@@ -349,6 +400,7 @@ class ProvidersConfig:
             ollama=ProviderOverrideConfig.from_dict(dict(data.get("ollama") or {})),
             vllm=ProviderOverrideConfig.from_dict(dict(data.get("vllm") or {})),
             custom=ProviderOverrideConfig.from_dict(dict(data.get("custom") or {})),
+            extra=extras,
         )
 
 
@@ -1250,7 +1302,7 @@ class AppConfig:
             "workspace_path": self.workspace_path,
             "state_path": self.state_path,
             "provider": asdict(self.provider),
-            "providers": asdict(self.providers),
+            "providers": self.providers.to_dict(),
             "auth": asdict(self.auth),
             "agents": asdict(self.agents),
             "gateway": asdict(self.gateway),

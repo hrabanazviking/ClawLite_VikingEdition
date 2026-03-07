@@ -799,12 +799,12 @@ class _MessageAPI:
 def _provider_config(config: AppConfig) -> dict[str, Any]:
     active_model = str(config.agents.defaults.model or config.provider.model).strip() or config.provider.model
     model_hint_name = detect_provider_name(active_model)
-    hint_selected = getattr(config.providers, model_hint_name, None)
+    hint_selected = config.providers.get(model_hint_name)
     hint_api_key = str(getattr(hint_selected, "api_key", "") or "").strip()
     hint_api_base = str(getattr(hint_selected, "api_base", "") or "").strip()
     local_base_hint = ""
     for local_name in ("ollama", "vllm"):
-        local_selected = getattr(config.providers, local_name, None)
+        local_selected = config.providers.get(local_name)
         local_candidate = str(getattr(local_selected, "api_base", "") or "").strip()
         if local_candidate:
             local_base_hint = local_candidate
@@ -814,9 +814,15 @@ def _provider_config(config: AppConfig) -> dict[str, Any]:
         api_key=hint_api_key or str(config.provider.litellm_api_key or "").strip(),
         base_url=hint_api_base or str(config.provider.litellm_base_url or "").strip() or local_base_hint,
     )
-    selected = getattr(config.providers, provider_name, None) or hint_selected
+    selected = config.providers.get(provider_name) or hint_selected
     selected_api_key = selected.api_key if selected is not None else ""
     selected_api_base = selected.api_base if selected is not None else ""
+    providers_payload = config.providers.to_dict()
+    providers_payload["litellm"] = {
+        "base_url": selected_api_base or config.provider.litellm_base_url,
+        "api_key": selected_api_key or config.provider.litellm_api_key,
+        "extra_headers": dict(selected.extra_headers) if selected is not None else {},
+    }
 
     return {
         "model": active_model,
@@ -829,50 +835,7 @@ def _provider_config(config: AppConfig) -> dict[str, Any]:
                 }
             }
         },
-        "providers": {
-            "litellm": {
-                "base_url": selected_api_base or config.provider.litellm_base_url,
-                "api_key": selected_api_key or config.provider.litellm_api_key,
-                "extra_headers": selected.extra_headers if selected is not None else {},
-            },
-            "custom": {
-                "api_base": config.providers.custom.api_base,
-                "api_key": config.providers.custom.api_key,
-                "extra_headers": dict(config.providers.custom.extra_headers),
-            },
-            "openrouter": {
-                "api_key": config.providers.openrouter.api_key,
-                "api_base": config.providers.openrouter.api_base,
-            },
-            "gemini": {
-                "api_key": config.providers.gemini.api_key,
-                "api_base": config.providers.gemini.api_base,
-            },
-            "openai": {
-                "api_key": config.providers.openai.api_key,
-                "api_base": config.providers.openai.api_base,
-            },
-            "anthropic": {
-                "api_key": config.providers.anthropic.api_key,
-                "api_base": config.providers.anthropic.api_base,
-            },
-            "deepseek": {
-                "api_key": config.providers.deepseek.api_key,
-                "api_base": config.providers.deepseek.api_base,
-            },
-            "groq": {
-                "api_key": config.providers.groq.api_key,
-                "api_base": config.providers.groq.api_base,
-            },
-            "ollama": {
-                "api_key": config.providers.ollama.api_key,
-                "api_base": config.providers.ollama.api_base,
-            },
-            "vllm": {
-                "api_key": config.providers.vllm.api_key,
-                "api_base": config.providers.vllm.api_base,
-            },
-        },
+        "providers": providers_payload,
     }
 
 

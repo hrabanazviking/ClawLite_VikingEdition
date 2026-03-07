@@ -31,17 +31,13 @@ def _mask_secret(value: str, *, keep: int = 4) -> str:
     return f"{'*' * max(3, len(token) - keep)}{token[-keep:]}"
 
 
-SUPPORTED_PROVIDER_AUTH: tuple[str, ...] = (
-    "openai",
-    "gemini",
-    "groq",
-    "deepseek",
-    "anthropic",
-    "openrouter",
-    "ollama",
-    "vllm",
-    "custom",
-)
+def _provider_name_variants(spec_name: str, aliases: tuple[str, ...]) -> set[str]:
+    values = {str(spec_name or "").strip().lower().replace("-", "_")}
+    values.update(str(alias or "").strip().lower().replace("-", "_") for alias in aliases)
+    return values
+
+
+SUPPORTED_PROVIDER_AUTH: tuple[str, ...] = tuple(spec.name for spec in SPECS if not spec.is_oauth)
 
 
 def _normalize_provider_name(value: str) -> str:
@@ -51,9 +47,20 @@ def _normalize_provider_name(value: str) -> str:
 def _resolve_supported_provider(provider: str) -> str:
     provider_norm = _normalize_provider_name(provider)
     provider_key = provider_norm.replace("-", "_")
-    if provider_key not in SUPPORTED_PROVIDER_AUTH:
-        raise ValueError(f"unsupported_provider:{provider_norm or provider}")
-    return provider_key
+    for spec in SPECS:
+        if spec.is_oauth:
+            continue
+        if provider_key in _provider_name_variants(spec.name, spec.aliases):
+            return spec.name
+    raise ValueError(f"unsupported_provider:{provider_norm or provider}")
+
+
+def _provider_override(config: AppConfig, name: str) -> Any:
+    return config.providers.get(name)
+
+
+def _provider_override_for_update(config: AppConfig, name: str) -> Any:
+    return config.providers.ensure(name)
 
 
 def provider_set_auth(
@@ -80,7 +87,7 @@ def provider_set_auth(
             "provider": provider_key,
         }
 
-    selected = getattr(config.providers, provider_key)
+    selected = _provider_override_for_update(config, provider_key)
     selected.api_key = token
 
     if clear_headers:
@@ -120,7 +127,7 @@ def provider_clear_auth(
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
-    selected = getattr(config.providers, provider_key)
+    selected = _provider_override_for_update(config, provider_key)
     selected.api_key = ""
     selected.extra_headers = {}
     if clear_api_base:
@@ -413,27 +420,17 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
             "model": str(config.agents.defaults.model or config.provider.model),
         }
 
-    supported_api_key_providers = {
-        "openai",
-        "gemini",
-        "groq",
-        "deepseek",
-        "anthropic",
-        "openrouter",
-        "ollama",
-        "vllm",
-        "custom",
-    }
+    supported_api_key_providers = set(SUPPORTED_PROVIDER_AUTH)
 
     provider_key = provider_norm.replace("-", "_")
-    spec = next((row for row in SPECS if row.name == provider_key), None)
+    spec = _provider_spec(provider_key)
     if spec is None or spec.name not in supported_api_key_providers:
         return {
             "ok": False,
             "error": f"unsupported_provider:{provider}",
         }
 
-    selected = getattr(config.providers, spec.name, None)
+    selected = _provider_override(config, spec.name)
     cfg_api_key = str(getattr(selected, "api_key", "") or "").strip()
     cfg_base_url = str(getattr(selected, "api_base", "") or "").strip()
     global_api_key = str(config.provider.litellm_api_key or "").strip()
@@ -511,31 +508,22 @@ def provider_logout_openai_codex(config: AppConfig, *, config_path: str | Path |
     }
 
 
-SUPPORTED_PROVIDER_USE: tuple[str, ...] = (
-    "openai-codex",
-    "openai",
-    "gemini",
-    "groq",
-    "deepseek",
-    "anthropic",
-    "openrouter",
-    "custom",
-)
-
-OPENAI_COMPATIBLE_PROBE_PROVIDERS: tuple[str, ...] = (
-    "openai",
-    "gemini",
-    "groq",
-    "deepseek",
-    "openrouter",
-    "custom",
-    "openai_codex",
+SUPPORTED_PROVIDER_USE: tuple[str, ...] = tuple(
+    "openai-codex" if spec.name == "openai_codex" else spec.name.replace("_", "-")
+    for spec in SPECS
 )
 
 
 def _provider_spec(name: str) -> Any:
     provider_name = str(name or "").strip().lower().replace("-", "_")
-    return next((row for row in SPECS if row.name == provider_name), None)
+    return next(
+        (
+            row
+            for row in SPECS
+            if provider_name in _provider_name_variants(row.name, row.aliases)
+        ),
+        None,
+    )
 
 
 def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dict[str, Any]:
@@ -543,7 +531,8 @@ def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dic
 
     if provider_key == "openai_codex":
         codex = resolve_codex_auth(config)
-        cfg_openai_base = str(getattr(config.providers.openai, "api_base", "") or "").strip()
+        openai_override = _provider_override(config, "openai")
+        cfg_openai_base = str(getattr(openai_override, "api_base", "") or "").strip()
         global_base = str(config.provider.litellm_base_url or "").strip()
         base_url = cfg_openai_base or global_base or "https://api.openai.com/v1"
         base_url_source = (
@@ -564,19 +553,22 @@ def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dic
             "auth_mode": "oauth",
         }
 
-    if provider_key == "ollama":
-        cfg_base = str(config.providers.custom.api_base or "").strip()
+    if provider_key in {"ollama", "vllm"}:
+        selected = _provider_override(config, provider_key)
+        cfg_base = str(getattr(selected, "api_base", "") or "").strip()
         global_base = str(config.provider.litellm_base_url or "").strip()
-        env_base = str(os.getenv("OLLAMA_BASE_URL", "") or "").strip()
-        base_url = cfg_base or global_base or env_base or "http://127.0.0.1:11434"
+        env_name = "OLLAMA_BASE_URL" if provider_key == "ollama" else "VLLM_BASE_URL"
+        env_base = str(os.getenv(env_name, "") or "").strip()
+        default_base = "http://127.0.0.1:11434" if provider_key == "ollama" else "http://127.0.0.1:8000/v1"
+        base_url = cfg_base or global_base or env_base or default_base
         base_url_source = (
-            "config:providers.custom.api_base"
+            f"config:providers.{provider_key}.api_base"
             if cfg_base
             else "config:provider.litellm_base_url"
             if global_base
-            else "env:OLLAMA_BASE_URL"
+            else f"env:{env_name}"
             if env_base
-            else "default:ollama"
+            else f"default:{provider_key}"
         )
         return {
             "ok": True,
@@ -593,7 +585,7 @@ def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dic
     if spec is None:
         return {"ok": False, "provider": provider_key, "error": f"unsupported_provider:{provider_key}"}
 
-    selected = getattr(config.providers, spec.name, None)
+    selected = _provider_override(config, spec.name)
     cfg_api_key = str(getattr(selected, "api_key", "") or "").strip()
     cfg_base_url = str(getattr(selected, "api_base", "") or "").strip()
     global_api_key = str(config.provider.litellm_api_key or "").strip()
@@ -677,28 +669,14 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     provider = str(target.get("provider", detected) or detected)
     base_url = str(target.get("base_url", "") or "").strip().rstrip("/")
     api_key = str(target.get("api_key", "") or "").strip()
+    spec = _provider_spec(provider)
     endpoint = ""
     headers: dict[str, str] = {}
 
-    if provider in OPENAI_COMPATIBLE_PROBE_PROVIDERS:
-        endpoint = "/models"
-        if not api_key:
-            return {
-                "ok": False,
-                "provider": provider,
-                "provider_detected": detected,
-                "model": model,
-                "status_code": 0,
-                "error": "api_key_missing",
-                "api_key_masked": str(target.get("api_key_masked", "") or ""),
-                "api_key_source": str(target.get("api_key_source", "") or ""),
-                "base_url": base_url,
-                "base_url_source": str(target.get("base_url_source", "") or ""),
-                "endpoint": endpoint,
-            }
-        headers["Authorization"] = f"Bearer {api_key}"
+    if provider == "ollama":
+        endpoint = "/api/tags"
     elif provider == "anthropic":
-        endpoint = "/v1/models"
+        endpoint = "/models"
         if not api_key:
             return {
                 "ok": False,
@@ -715,8 +693,24 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             }
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
-    elif provider == "ollama":
-        endpoint = "/api/tags"
+    elif spec is not None and spec.openai_compatible:
+        endpoint = "/models"
+        if not api_key and provider not in {"vllm"}:
+            return {
+                "ok": False,
+                "provider": provider,
+                "provider_detected": detected,
+                "model": model,
+                "status_code": 0,
+                "error": "api_key_missing",
+                "api_key_masked": str(target.get("api_key_masked", "") or ""),
+                "api_key_source": str(target.get("api_key_source", "") or ""),
+                "base_url": base_url,
+                "base_url_source": str(target.get("base_url_source", "") or ""),
+                "endpoint": endpoint,
+            }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
     else:
         return {
             "ok": False,
@@ -896,12 +890,12 @@ def provider_use_model(
 def provider_validation(config: AppConfig) -> dict[str, Any]:
     model = str(config.agents.defaults.model or config.provider.model).strip() or config.provider.model
     model_hint_name = detect_provider_name(model)
-    hint_selected = getattr(config.providers, model_hint_name, None)
+    hint_selected = _provider_override(config, model_hint_name)
     hint_api_key = str(getattr(hint_selected, "api_key", "") or "")
     hint_api_base = str(getattr(hint_selected, "api_base", "") or "")
     local_base_hint = ""
     for local_name in ("ollama", "vllm"):
-        local_selected = getattr(config.providers, local_name, None)
+        local_selected = _provider_override(config, local_name)
         local_candidate = str(getattr(local_selected, "api_base", "") or "")
         if local_candidate.strip():
             local_base_hint = local_candidate
@@ -913,8 +907,8 @@ def provider_validation(config: AppConfig) -> dict[str, Any]:
         api_key=hint_api_key or global_api_key,
         base_url=hint_api_base or global_base_url or local_base_hint,
     )
-    spec = next((row for row in SPECS if row.name == provider_name), None)
-    selected = getattr(config.providers, provider_name, None) or hint_selected
+    spec = _provider_spec(provider_name)
+    selected = _provider_override(config, provider_name) or hint_selected
 
     provider_api_key = str(getattr(selected, "api_key", "") or "")
     provider_api_base = str(getattr(selected, "api_base", "") or "")

@@ -282,6 +282,33 @@ def test_load_config_provider_blocks(tmp_path: Path, monkeypatch) -> None:
     assert cfg.providers.custom.extra_headers == {"X-Test": "1"}
 
 
+def test_load_config_preserves_dynamic_provider_blocks(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider": {"model": "xai/grok-4"},
+                "providers": {
+                    "xai": {"api_key": "xai-123", "api_base": "https://api.x.ai/v1"},
+                    "kilocode": {"api_key": "kilo-123", "api_base": "https://api.kilo.ai/api/gateway/"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.providers.get("xai") is not None
+    assert cfg.providers.get("xai").api_key == "xai-123"
+    assert cfg.providers.get("kilocode") is not None
+    assert cfg.providers.get("kilocode").api_base == "https://api.kilo.ai/api/gateway/"
+
+    saved = save_config(cfg, path)
+    raw = json.loads(saved.read_text(encoding="utf-8"))
+    assert raw["providers"]["xai"]["api_key"] == "xai-123"
+    assert raw["providers"]["kilocode"]["api_base"] == "https://api.kilo.ai/api/gateway/"
+
+
 def test_load_config_channels_and_gateway_heartbeat_backward_compat(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(
@@ -324,6 +351,25 @@ def test_load_config_strict_mode_rejects_invalid_keys(tmp_path: Path) -> None:
         raise AssertionError("expected strict invalid-key failure")
     except RuntimeError as exc:
         assert "invalid config keys" in str(exc)
+
+
+def test_load_config_strict_mode_allows_dynamic_provider_blocks(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider": {"model": "xai/grok-4"},
+                "providers": {
+                    "xai": {"api_key": "xai-123", "api_base": "https://api.x.ai/v1"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path, strict=True)
+    assert cfg.providers.get("xai") is not None
+    assert cfg.providers.get("xai").api_base == "https://api.x.ai/v1"
 
 
 def test_load_config_migrates_legacy_gateway_token(tmp_path: Path) -> None:
