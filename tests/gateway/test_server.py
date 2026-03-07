@@ -1130,6 +1130,7 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
         alias_payload = client.get("/api/diagnostics").json()
 
         assert "autonomy_wake" in payload
+        assert "autonomy_log" in payload
         assert "supervisor" in payload
         assert set(payload["autonomy_wake"].keys()) >= {
             "running",
@@ -1146,6 +1147,21 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "last_error",
             "by_kind",
         }
+        assert set(payload["autonomy_log"].keys()) >= {
+            "enabled",
+            "path",
+            "max_entries",
+            "total",
+            "last_event_at",
+            "counts",
+            "recent",
+        }
+        assert set(payload["autonomy_log"]["counts"].keys()) >= {
+            "by_source",
+            "by_action",
+            "by_status",
+        }
+        assert isinstance(payload["autonomy_log"]["recent"], list)
         assert set(payload["supervisor"].keys()) >= {
             "running",
             "worker_state",
@@ -1165,6 +1181,7 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "cooldown_active",
         }
         assert alias_payload["autonomy_wake"] == payload["autonomy_wake"]
+        assert alias_payload["autonomy_log"] == payload["autonomy_log"]
         assert alias_payload["supervisor"] == payload["supervisor"]
 
 
@@ -2646,6 +2663,18 @@ def test_gateway_channel_recovery_notice_uses_runtime_send(tmp_path: Path) -> No
         assert metadata["recovery_channel"] == "fake"
         assert metadata["recovery_status"] == "recovered"
         assert "Autonomy notice: channel fake recovered." in str(send_kwargs["text"])
+        autonomy_recent = payload["autonomy_log"]["recent"]
+        assert any(
+            str(row.get("action", "")) == "channel_recovery"
+            and str(row.get("status", "")) == "recovered"
+            and str((row.get("metadata", {}) or {}).get("channel", "")) == "fake"
+            for row in autonomy_recent
+        )
+        assert any(
+            str(row.get("action", "")) == "channel_recovery_notice"
+            and str(row.get("status", "")) == "sent"
+            for row in autonomy_recent
+        )
 
 
 def test_gateway_diagnostics_include_provider_telemetry_when_enabled(tmp_path: Path) -> None:
@@ -3550,7 +3579,23 @@ def test_gateway_diagnostics_omits_provider_telemetry_when_disabled(tmp_path: Pa
 
         alias_payload = client.get("/api/diagnostics").json()
         assert "provider" not in alias_payload["engine"]
-        assert alias_payload["engine"] == payload["engine"]
+        expected_engine = dict(payload["engine"])
+        actual_engine = dict(alias_payload["engine"])
+        for engine_block in (expected_engine, actual_engine):
+            skills_diag = dict(engine_block.get("skills", {}) or {})
+            watcher = dict(skills_diag.get("watcher", {}) or {})
+            for key in (
+                "ticks",
+                "last_result",
+                "last_tick_monotonic",
+                "last_refresh_monotonic",
+                "pending",
+                "debounced",
+            ):
+                watcher.pop(key, None)
+            skills_diag["watcher"] = watcher
+            engine_block["skills"] = skills_diag
+        assert actual_engine == expected_engine
 
 
 def test_gateway_diagnostics_provider_summary_surfaces_failover_state(tmp_path: Path) -> None:

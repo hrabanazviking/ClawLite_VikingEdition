@@ -36,7 +36,7 @@ from clawlite.providers.reliability import is_quota_429_error
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
 from clawlite.session.store import SessionStore
-from clawlite.runtime import AutonomyWakeCoordinator, RuntimeSupervisor, SupervisorIncident
+from clawlite.runtime import AutonomyLog, AutonomyWakeCoordinator, RuntimeSupervisor, SupervisorIncident
 from clawlite.gateway.tool_catalog import build_tools_catalog_payload, parse_include_schema_flag
 from clawlite.tools.agents import AgentsListTool
 from clawlite.tools.cron import CronTool
@@ -306,6 +306,7 @@ class DiagnosticsResponse(BaseModel):
     heartbeat: dict[str, Any]
     supervisor: dict[str, Any] = {}
     autonomy_wake: dict[str, Any] = {}
+    autonomy_log: dict[str, Any] = {}
     bootstrap: dict[str, Any]
     memory_monitor: dict[str, Any] = {}
     memory_quality_tuning: dict[str, Any] = {}
@@ -606,6 +607,7 @@ class RuntimeContainer:
     cron: CronService
     heartbeat: HeartbeatService
     autonomy_wake: AutonomyWakeCoordinator
+    autonomy_log: AutonomyLog
     workspace: WorkspaceLoader
     skills_loader: SkillsLoader
     memory_monitor: MemoryMonitor | None = None
@@ -1036,6 +1038,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
 
     bus = MessageQueue()
     channels = ChannelManager(bus=bus, engine=engine)
+    autonomy_log = AutonomyLog(path=Path(config.state_path) / "autonomy-events.json")
     tools.register(MessageTool(_MessageAPI(channels)))
 
     bind_event("gateway.runtime").info("runtime ready provider_model={} tools={}", config.agents.defaults.model, len(tools.schema()))
@@ -1047,6 +1050,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         cron=cron,
         heartbeat=heartbeat,
         autonomy_wake=autonomy_wake,
+        autonomy_log=autonomy_log,
         workspace=workspace,
         skills_loader=skills,
         memory_monitor=memory_monitor,
@@ -1294,6 +1298,32 @@ async def _run_proactive_monitor(runtime: RuntimeContainer) -> dict[str, Any]:
         result["status"] = "next_step_error"
         result["error"] = str(exc)
 
+    if (
+        str(result.get("status", "") or "") not in {"ok", "disabled"}
+        or int(result.get("delivered", 0) or 0) > 0
+        or int(result.get("replayed", 0) or 0) > 0
+        or int(result.get("failed", 0) or 0) > 0
+        or bool(result.get("next_step_sent", False))
+    ):
+        summary = (
+            f"status={result.get('status', '')} scanned={int(result.get('scanned', 0) or 0)} "
+            f"delivered={int(result.get('delivered', 0) or 0)} replayed={int(result.get('replayed', 0) or 0)} "
+            f"failed={int(result.get('failed', 0) or 0)}"
+        )
+        try:
+            runtime.autonomy_log.record(
+                source="memory_monitor",
+                action="proactive_scan",
+                status=str(result.get("status", "") or "ok"),
+                summary=summary,
+                metadata=dict(result),
+            )
+        except Exception as exc:
+            bind_event("autonomy.log", source="memory_monitor", action="proactive_scan").warning(
+                "autonomy log record failed error={}",
+                exc,
+            )
+
     return result
 
 
@@ -1423,6 +1453,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "action_status_by_layer": {},
         "last_action_metadata": {},
     }
+
+    def _record_autonomy_event(
+        source: str,
+        action: str,
+        status: str,
+        *,
+        summary: str = "",
+        metadata: dict[str, Any] | None = None,
+        event_at: str = "",
+    ) -> None:
+        try:
+            runtime.autonomy_log.record(
+                source=source,
+                action=action,
+                status=status,
+                summary=summary,
+                metadata=metadata,
+                event_at=event_at,
+            )
+        except Exception as exc:
+            bind_event("autonomy.log", source=source, action=action).warning("autonomy log record failed error={}", exc)
     memory_quality_cache: dict[str, Any] = {
         "fingerprint": "",
         "payload": None,
@@ -1609,6 +1660,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         status = str(payload.get("status", "") or "").strip() or "unknown"
         reason = str(payload.get("reason", "") or "").strip()
         error = str(payload.get("error", "") or "").strip()
+        event_at = str(payload.get("at", "") or "").strip()
+        if normalized_channel:
+            _record_autonomy_event(
+                "channels",
+                "channel_recovery",
+                status,
+                summary=f"channel {normalized_channel} {status}",
+                metadata={
+                    "channel": normalized_channel,
+                    "reason": reason,
+                    "error": error,
+                },
+                event_at=event_at,
+            )
         if not channel_name or not target:
             return
         text = f"Autonomy notice: channel {normalized_channel} {status}."
@@ -1630,7 +1695,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "recovery_error": error,
                 },
             )
+            _record_autonomy_event(
+                "channels",
+                "channel_recovery_notice",
+                "sent",
+                summary=f"notice sent for channel {normalized_channel} {status}",
+                metadata={
+                    "channel": channel_name,
+                    "target": target,
+                    "recovery_channel": normalized_channel,
+                    "recovery_status": status,
+                },
+                event_at=event_at,
+            )
         except Exception as exc:
+            _record_autonomy_event(
+                "channels",
+                "channel_recovery_notice",
+                "failed",
+                summary=f"notice failed for channel {normalized_channel} {status}",
+                metadata={
+                    "channel": channel_name,
+                    "target": target,
+                    "recovery_channel": normalized_channel,
+                    "recovery_status": status,
+                    "error": str(exc),
+                },
+                event_at=event_at,
+            )
             bind_event("channel.recovery", channel=normalized_channel or channel_name).warning(
                 "channel recovery notice failed error={}",
                 exc,
@@ -2065,6 +2157,40 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 tuning_runner_state["last_action_reason"] = str(action_reason or "")
                 if tick_error and not tuning_runner_state.get("last_error"):
                     tuning_runner_state["last_error"] = tick_error
+                if tick_error:
+                    _record_autonomy_event(
+                        "memory_quality_tuning",
+                        "tuning_tick",
+                        "failed",
+                        summary=f"memory quality tuning failed: {tick_error}",
+                        metadata={
+                            "error": tick_error,
+                            "last_action": action,
+                            "last_action_status": action_status,
+                        },
+                        event_at=now_iso,
+                    )
+                elif action:
+                    _record_autonomy_event(
+                        "memory_quality_tuning",
+                        action,
+                        action_status or "ok",
+                        summary=f"{action} -> {action_status or 'ok'}",
+                        metadata={
+                            "reason": action_reason,
+                            **dict(action_metadata),
+                        },
+                        event_at=now_iso,
+                    )
+                elif str(tuning_runner_state.get("last_result", "") or "") == "unsupported":
+                    _record_autonomy_event(
+                        "memory_quality_tuning",
+                        "tuning_tick",
+                        "unsupported",
+                        summary="memory quality methods unavailable",
+                        metadata={"error": str(tuning_runner_state.get("last_error", "") or "")},
+                        event_at=now_iso,
+                    )
 
         async def _loop() -> None:
             first_tick = True
@@ -2225,23 +2351,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _recover_supervised_component(component: str, reason: str) -> bool:
         bind_event("supervisor.recover").warning("runtime recover component={} reason={}", component, reason)
+        recovered = False
         if component == "heartbeat":
             await runtime.heartbeat.start(_submit_heartbeat_wake)
             _refresh_runtime_components()
-            return bool(runtime.heartbeat.status().get("running", False))
-        if component == "cron":
+            recovered = bool(runtime.heartbeat.status().get("running", False))
+        elif component == "cron":
             await runtime.cron.start(_submit_cron_wake)
             _refresh_runtime_components()
-            return bool(runtime.cron.status().get("running", False))
-        if component == "autonomy_wake":
+            recovered = bool(runtime.cron.status().get("running", False))
+        elif component == "autonomy_wake":
             await runtime.autonomy_wake.start(_dispatch_autonomy_wake)
             _refresh_runtime_components()
-            return bool(runtime.autonomy_wake.status().get("running", False))
-        if component == "skills_watcher":
+            recovered = bool(runtime.autonomy_wake.status().get("running", False))
+        elif component == "skills_watcher":
             await runtime.skills_loader.start_watcher()
             _refresh_runtime_components()
-            return bool(runtime.skills_loader.watcher_status().get("running", False))
-        if component == "proactive_monitor":
+            recovered = bool(runtime.skills_loader.watcher_status().get("running", False))
+        elif component == "proactive_monitor":
             await _start_proactive_monitor()
             _refresh_runtime_components()
             proactive_state, _proactive_error = _background_task_snapshot(
@@ -2249,8 +2376,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 running=proactive_running,
                 last_error=str(proactive_runner_state.get("last_error", "") or ""),
             )
-            return proactive_state == "running"
-        if component == "memory_quality_tuning":
+            recovered = proactive_state == "running"
+        elif component == "memory_quality_tuning":
             await _start_memory_quality_tuning()
             _refresh_runtime_components()
             tuning_state, _tuning_error = _background_task_snapshot(
@@ -2258,8 +2385,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 running=tuning_running,
                 last_error=str(tuning_runner_state.get("last_error", "") or ""),
             )
-            return tuning_state == "running"
-        return False
+            recovered = tuning_state == "running"
+        _record_autonomy_event(
+            "supervisor",
+            "component_recovery",
+            "recovered" if recovered else "failed",
+            summary=f"{component} recovery -> {'recovered' if recovered else 'failed'}",
+            metadata={"component": component, "reason": reason},
+        )
+        return recovered
 
     runtime.supervisor = RuntimeSupervisor(
         interval_s=cfg.gateway.supervisor.interval_s,
@@ -2336,6 +2470,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         elif replayed:
             bind_event("gateway.subagents").info("subagent replay completed replayed={}", replayed)
+        _record_autonomy_event(
+            "subagents",
+            "startup_replay",
+            "ok" if not failed else "partial",
+            summary=f"startup replay replayed={replayed} failed={len(failed)}",
+            metadata={
+                "replayed": replayed,
+                "replayed_groups": len(grouped_run_ids),
+                "failed": len(failed),
+                "failed_groups": len(failed_group_ids),
+                "group_ids": sorted(grouped_run_ids.keys())[-8:],
+            },
+            event_at=str(component.get("last_run_iso", "") or ""),
+        )
         return {
             "replayed": replayed,
             "failed": len(failed),
@@ -2374,6 +2522,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     replay_component["replayed"] = int(replay_summary.get("replayed", 0) or 0)
                     replay_component["failed"] = int(replay_summary.get("failed", 0) or 0)
                     replay_component["skipped"] = int(replay_summary.get("skipped", 0) or 0)
+                    _record_autonomy_event(
+                        "channels",
+                        "startup_delivery_replay",
+                        "ok" if not replay_component["last_error"] else "failed",
+                        summary=(
+                            f"startup delivery replay replayed={replay_component['replayed']} "
+                            f"failed={replay_component['failed']} skipped={replay_component['skipped']}"
+                        ),
+                        metadata=dict(replay_summary),
+                    )
                 elif name == "autonomy_wake":
                     await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":
@@ -2419,6 +2577,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
             row["running"] = False
             row["last_error"] = str(exc)
+            _record_autonomy_event(
+                "subagents",
+                "startup_replay",
+                "failed",
+                summary="startup replay failed",
+                metadata={"error": str(exc)},
+            )
             bind_event("gateway.lifecycle").warning("subagent replay startup failed error={}", exc)
 
     async def _stop_subsystems() -> None:
@@ -2939,6 +3104,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
             autonomy_wake=runtime.autonomy_wake.status(),
+            autonomy_log=runtime.autonomy_log.snapshot(),
             bootstrap=_bootstrap_status_snapshot(),
             memory_monitor=monitor_payload,
             memory_quality_tuning=dict(tuning_runner_state),
