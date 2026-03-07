@@ -3498,6 +3498,50 @@ def test_telegram_handle_webhook_update_normalizes_callback_payload_and_dedupes(
     asyncio.run(_scenario())
 
 
+def test_telegram_webhook_success_persists_dedupe_state_before_restart(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        emitted: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def _on_message(session_id: str, user_id: str, text: str, metadata: dict[str, object]) -> None:
+            emitted.append((session_id, user_id, text, metadata))
+
+        dedupe_path = tmp_path / "telegram-dedupe.json"
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dedupe_state_path": str(dedupe_path),
+            },
+            on_message=_on_message,
+        )
+
+        payload = {
+            "update_id": 901,
+            "message": {
+                "message_id": 55,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 7, "username": "alice"},
+                "text": "persist me",
+            },
+        }
+
+        processed = await channel.handle_webhook_update(payload)
+
+        assert processed is True
+        persisted = json.loads(dedupe_path.read_text(encoding="utf-8"))
+        assert "update:901" in persisted["keys"]
+
+        reloaded = TelegramChannel(
+            config={
+                "token": "x:token",
+                "dedupe_state_path": str(dedupe_path),
+            },
+        )
+        duplicate = await reloaded.handle_webhook_update(payload)
+        assert duplicate is False
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_webhook_failed_processing_allows_redelivery_then_commits_dedupe(tmp_path: Path) -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(

@@ -916,7 +916,7 @@ class TelegramChannel(BaseChannel):
             return True
         return False
 
-    def _commit_update_dedupe_key(self, dedupe_key: str) -> None:
+    def _commit_update_dedupe_key(self, dedupe_key: str, *, schedule_persist: bool = True) -> None:
         key = str(dedupe_key or "").strip()
         if not key or key in self._seen_update_keys:
             return
@@ -925,7 +925,8 @@ class TelegramChannel(BaseChannel):
         while len(self._seen_update_order) > self._update_dedupe_limit:
             oldest = self._seen_update_order.popleft()
             self._seen_update_keys.discard(oldest)
-        self._schedule_dedupe_state_persist()
+        if schedule_persist:
+            self._schedule_dedupe_state_persist()
 
     def _remember_update_dedupe_key(self, dedupe_key: str, *, source: str) -> bool:
         if self._is_duplicate_update_dedupe_key(dedupe_key, source=source):
@@ -2725,7 +2726,8 @@ class TelegramChannel(BaseChannel):
         try:
             processed = bool(await self._handle_update(item))
             if processed and dedupe_key:
-                self._commit_update_dedupe_key(dedupe_key)
+                self._commit_update_dedupe_key(dedupe_key, schedule_persist=False)
+                await self._persist_update_dedupe_state()
             return processed
         except Exception as exc:
             self._last_error = str(exc)
