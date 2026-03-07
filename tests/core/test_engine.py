@@ -841,6 +841,42 @@ class FakeInvalidToolArgumentsProvider:
         return ProviderResult(text="done", tool_calls=[], model="fake/model")
 
 
+class FakeUnknownToolNameProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.calls += 1
+        self.snapshots.append(messages)
+        if self.calls == 1:
+            return ProviderResult(
+                text="use unknown tool",
+                tool_calls=[ToolCall(name="ghost", arguments={"text": "hello"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="done", tool_calls=[], model="fake/model")
+
+
+class FakeInvalidToolNameProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.calls += 1
+        self.snapshots.append(messages)
+        if self.calls == 1:
+            return ProviderResult(
+                text="use malformed tool name",
+                tool_calls=[ToolCall(name="echo bad", arguments={"text": "hello"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="done", tool_calls=[], model="fake/model")
+
+
 class ContextCaptureTools:
     def __init__(self) -> None:
         self.last_channel = ""
@@ -962,6 +998,42 @@ def test_engine_rejects_invalid_tool_argument_payloads_before_dispatch() -> None
         tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
         assert len(tool_rows) == 1
         assert "tool_error:echo:tool_call_arguments_invalid_json" in str(tool_rows[0]["content"])
+
+    asyncio.run(_scenario())
+
+
+def test_engine_rejects_unknown_tool_names_before_dispatch() -> None:
+    async def _scenario() -> None:
+        provider = FakeUnknownToolNameProvider()
+        tools = ExecuteCaptureTools()
+        engine = AgentEngine(provider=provider, tools=tools)
+
+        out = await engine.run(session_id="cli:unknown-tool", user_text="say hi")
+        assert out.text == "done"
+        assert tools.execute_calls == []
+        tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
+        assert len(tool_rows) == 1
+        assert "tool_error:ghost:tool_call_name_unknown" in str(tool_rows[0]["content"])
+        metrics = engine.turn_metrics_snapshot()
+        assert metrics["tool_calls_executed"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_engine_rejects_invalid_tool_names_before_dispatch() -> None:
+    async def _scenario() -> None:
+        provider = FakeInvalidToolNameProvider()
+        tools = ExecuteCaptureTools()
+        engine = AgentEngine(provider=provider, tools=tools)
+
+        out = await engine.run(session_id="cli:invalid-tool-name", user_text="say hi")
+        assert out.text == "done"
+        assert tools.execute_calls == []
+        tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
+        assert len(tool_rows) == 1
+        assert "tool_error:echo_bad:tool_call_name_invalid_format" in str(tool_rows[0]["content"])
+        metrics = engine.turn_metrics_snapshot()
+        assert metrics["tool_calls_executed"] == 0
 
     asyncio.run(_scenario())
 

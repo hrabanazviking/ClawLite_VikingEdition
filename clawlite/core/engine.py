@@ -155,6 +155,7 @@ class InMemorySessionStore(SessionStoreProtocol):
 class AgentEngine:
     """Core autonomous loop used by channels, cron and CLI."""
 
+    _TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,127}$")
     _TOOL_RESULT_TRUNCATED_SUFFIX = "\n...[tool result truncated]"
     _MAX_DYNAMIC_MESSAGES_PER_TURN = 192
     _MESSAGE_PRUNE_PADDING = 16
@@ -622,13 +623,51 @@ class AgentEngine:
         return False, "", alternating_length, last.tool_name
 
     @staticmethod
+    def _tool_call_raw_name(tool_call: Any) -> Any:
+        return getattr(tool_call, "name", "")
+
+    @staticmethod
     def _tool_call_id(tool_call: Any, idx: int) -> str:
         raw = str(getattr(tool_call, "id", "") or "").strip()
         return raw or f"call_{idx}"
 
+    @classmethod
+    def _tool_call_name(cls, tool_call: Any, *, available_tools: set[str] | None = None) -> str:
+        raw = cls._tool_call_raw_name(tool_call)
+        if raw is None:
+            raise ValueError("tool_call_name_missing")
+        if not isinstance(raw, str):
+            raise ValueError(f"tool_call_name_invalid_type:{type(raw).__name__}")
+        name = raw.strip()
+        if not name:
+            raise ValueError("tool_call_name_missing")
+        if not cls._TOOL_NAME_RE.fullmatch(name):
+            raise ValueError("tool_call_name_invalid_format")
+        if available_tools is not None and name not in available_tools:
+            raise ValueError("tool_call_name_unknown")
+        return name
+
+    @classmethod
+    def _tool_call_label_for_error(cls, tool_call: Any) -> str:
+        raw = cls._tool_call_raw_name(tool_call)
+        if isinstance(raw, str):
+            clean = re.sub(r"\s+", "_", raw.strip())
+            if cls._TOOL_NAME_RE.fullmatch(clean):
+                return clean
+        return "unknown"
+
     @staticmethod
-    def _tool_call_name(tool_call: Any) -> str:
-        return str(getattr(tool_call, "name", "") or "").strip()
+    def _tool_schema_names(schema: list[dict[str, Any]]) -> set[str]:
+        names: set[str] = set()
+        for row in schema:
+            if not isinstance(row, dict):
+                continue
+            raw = row.get("name")
+            if isinstance(raw, str):
+                name = raw.strip()
+                if name:
+                    names.add(name)
+        return names
 
     @staticmethod
     def _tool_call_raw_arguments(tool_call: Any) -> Any:
@@ -683,8 +722,9 @@ class AgentEngine:
     def _assistant_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for idx, tool_call in enumerate(tool_calls):
-            name = AgentEngine._tool_call_name(tool_call)
-            if not name:
+            try:
+                name = AgentEngine._tool_call_name(tool_call)
+            except ValueError:
                 continue
             rows.append(
                 {
@@ -2022,9 +2062,10 @@ class AgentEngine:
                 limit=budget.max_progress_events or 1,
             )
             try:
+                tool_schema = self.tools.schema()
                 step = await self._complete_provider(
                     messages=messages,
-                    tools=self.tools.schema(),
+                    tools=tool_schema,
                     reasoning_effort=resolved_reasoning_effort,
                 )
             except Exception as exc:
@@ -2080,6 +2121,7 @@ class AgentEngine:
                     max_dynamic=dynamic_message_cap,
                 )
 
+                available_tool_names = self._tool_schema_names(tool_schema)
                 for idx, tool_call in enumerate(step.tool_calls):
                     if self._stop_requested(session_id=session_id, stop_event=stop_event):
                         final = ProviderResult(text="Stopped current task.", tool_calls=[], model="engine/stop")
@@ -2099,10 +2141,12 @@ class AgentEngine:
                         break
 
                     call_id = self._tool_call_id(tool_call, idx)
-                    name = self._tool_call_name(tool_call)
-                    if not name:
-                        run_log.error("tool call without name iteration={} idx={}", iteration, idx)
-                        continue
+                    tool_name_error = ""
+                    try:
+                        name = self._tool_call_name(tool_call, available_tools=available_tool_names)
+                    except ValueError as exc:
+                        name = self._tool_call_label_for_error(tool_call)
+                        tool_name_error = str(exc)
                     raw_arguments = self._tool_call_raw_arguments(tool_call)
                     tool_argument_error = ""
                     try:
@@ -2111,6 +2155,14 @@ class AgentEngine:
                         arguments = {}
                         tool_argument_error = str(exc)
                     signature = self._tool_signature(name, arguments)
+                    if tool_name_error:
+                        signature = self._tool_signature(
+                            "__invalid_tool_call__",
+                            {
+                                "_tool": name,
+                                "_error": tool_name_error,
+                            },
+                        )
                     if tool_argument_error:
                         signature = self._tool_signature(
                             name,
@@ -2221,7 +2273,15 @@ class AgentEngine:
                         limit=budget.max_progress_events or 1,
                     )
                     bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).debug("executing call_id={}", call_id)
-                    if tool_argument_error:
+                    if tool_name_error:
+                        bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).warning(
+                            "tool call rejected call_id={} error={} raw_name_type={}",
+                            call_id,
+                            tool_name_error,
+                            type(self._tool_call_raw_name(tool_call)).__name__,
+                        )
+                        tool_result = f"tool_error:{name}:{tool_name_error}"
+                    elif tool_argument_error:
                         bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).warning(
                             "tool call rejected call_id={} error={} raw_type={}",
                             call_id,
