@@ -9,10 +9,13 @@ from clawlite.runtime.autonomy import AutonomyWakeCoordinator
 
 def test_autonomy_wake_coalesces_same_key_and_shares_result() -> None:
     calls = {"count": 0}
+    entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def _on_wake(kind: str, payload: dict[str, object]) -> str:
         calls["count"] += 1
-        await asyncio.sleep(0.01)
+        entered.set()
+        await release.wait()
         return f"{kind}:{payload.get('value', 'na')}"
 
     async def _scenario() -> None:
@@ -27,6 +30,7 @@ def test_autonomy_wake_coalesces_same_key_and_shares_result() -> None:
                     payload={"value": "once"},
                 )
             )
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
             second = asyncio.create_task(
                 coordinator.submit(
                     kind="heartbeat",
@@ -35,6 +39,7 @@ def test_autonomy_wake_coalesces_same_key_and_shares_result() -> None:
                     payload={"value": "ignored"},
                 )
             )
+            release.set()
             first_result = await first
             second_result = await second
             snapshot = coordinator.status()
@@ -45,6 +50,76 @@ def test_autonomy_wake_coalesces_same_key_and_shares_result() -> None:
             assert snapshot["enqueued"] == 1
             assert snapshot["coalesced"] == 1
             assert snapshot["executed_ok"] == 1
+            assert snapshot["coalesced_priority_upgrades"] == 0
+            assert snapshot["coalesced_payload_updates"] == 0
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_wake_upgrades_queued_priority_and_payload_on_coalesce() -> None:
+    entered_blocker = asyncio.Event()
+    release_blocker = asyncio.Event()
+    order: list[str] = []
+
+    async def _on_wake(kind: str, payload: dict[str, object]) -> str:
+        order.append(kind)
+        if kind == "blocker":
+            entered_blocker.set()
+            await release_blocker.wait()
+            return "blocker"
+        return f"{kind}:{payload.get('value', 'na')}"
+
+    async def _scenario() -> None:
+        coordinator = AutonomyWakeCoordinator(max_pending=10)
+        await coordinator.start(_on_wake)
+        try:
+            blocker = asyncio.create_task(
+                coordinator.submit(kind="blocker", key="blocker:1", priority=1, payload={})
+            )
+            await asyncio.wait_for(entered_blocker.wait(), timeout=1.0)
+
+            first = asyncio.create_task(
+                coordinator.submit(
+                    kind="heartbeat",
+                    key="heartbeat:loop",
+                    priority=50,
+                    payload={"value": "once", "phase": "queued"},
+                )
+            )
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                if coordinator.status()["queue_depth"] >= 1:
+                    break
+            else:
+                raise AssertionError("queued wake did not reach the backlog")
+
+            second = asyncio.create_task(
+                coordinator.submit(
+                    kind="heartbeat",
+                    key="heartbeat:loop",
+                    priority=5,
+                    payload={"value": "updated", "extra": "yes"},
+                )
+            )
+
+            release_blocker.set()
+            blocker_result = await blocker
+            first_result = await first
+            second_result = await second
+            snapshot = coordinator.status()
+
+            assert blocker_result == "blocker"
+            assert first_result == "heartbeat:updated"
+            assert second_result == "heartbeat:updated"
+            assert order == ["blocker", "heartbeat"]
+            assert snapshot["enqueued"] == 2
+            assert snapshot["coalesced"] == 1
+            assert snapshot["coalesced_priority_upgrades"] == 1
+            assert snapshot["coalesced_payload_updates"] == 1
+            assert snapshot["by_kind"]["heartbeat"]["coalesced_priority_upgrades"] == 1
+            assert snapshot["by_kind"]["heartbeat"]["coalesced_payload_updates"] == 1
         finally:
             await coordinator.stop()
 

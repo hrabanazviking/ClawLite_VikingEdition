@@ -27,6 +27,7 @@ class _WakeQueueEntry:
     key: str = field(compare=False)
     payload: dict[str, Any] = field(compare=False)
     future: asyncio.Future[Any] = field(compare=False)
+    queued: bool = field(default=True, compare=False)
 
 
 class AutonomyWakeCoordinator:
@@ -50,6 +51,8 @@ class AutonomyWakeCoordinator:
         self._dropped_backpressure = 0
         self._executed_ok = 0
         self._executed_error = 0
+        self._coalesced_priority_upgrades = 0
+        self._coalesced_payload_updates = 0
         self._inflight = 0
         self._max_queue_depth_seen = 0
         self._restored = 0
@@ -80,6 +83,8 @@ class AutonomyWakeCoordinator:
             {
                 "enqueued": 0,
                 "coalesced": 0,
+                "coalesced_priority_upgrades": 0,
+                "coalesced_payload_updates": 0,
                 "dropped_backpressure": 0,
                 "executed_ok": 0,
                 "executed_error": 0,
@@ -224,6 +229,7 @@ class AutonomyWakeCoordinator:
                 if not self._running and not self._queue:
                     break
                 entry = heapq.heappop(self._queue)
+                entry.queued = False
                 self._inflight += 1
 
             callback = self._on_wake
@@ -320,7 +326,30 @@ class AutonomyWakeCoordinator:
             existing = self._pending_by_key.get(normalized_key)
             if existing is not None and not existing.done():
                 self._coalesced += 1
-                self._track_kind(normalized_kind, "coalesced")
+                entry = self._pending_entries_by_key.get(normalized_key)
+                tracked_kind = normalized_kind
+                changed = False
+                if entry is not None:
+                    tracked_kind = entry.kind
+                    if entry.queued:
+                        normalized_priority = int(priority)
+                        if normalized_priority < entry.priority:
+                            entry.priority = normalized_priority
+                            heapq.heapify(self._queue)
+                            self._coalesced_priority_upgrades += 1
+                            self._track_kind(tracked_kind, "coalesced_priority_upgrades")
+                            changed = True
+                        if normalized_payload:
+                            merged_payload = dict(entry.payload)
+                            merged_payload.update(normalized_payload)
+                            if merged_payload != entry.payload:
+                                entry.payload = merged_payload
+                                self._coalesced_payload_updates += 1
+                                self._track_kind(tracked_kind, "coalesced_payload_updates")
+                                changed = True
+                self._track_kind(tracked_kind, "coalesced")
+                if changed:
+                    await self._persist_journal_locked()
                 future = existing
             else:
                 if len(self._pending_by_key) >= self.max_pending:
@@ -368,6 +397,8 @@ class AutonomyWakeCoordinator:
             "dropped_backpressure": self._dropped_backpressure,
             "executed_ok": self._executed_ok,
             "executed_error": self._executed_error,
+            "coalesced_priority_upgrades": self._coalesced_priority_upgrades,
+            "coalesced_payload_updates": self._coalesced_payload_updates,
             "queue_depth": len(self._queue),
             "inflight": self._inflight,
             "max_queue_depth_seen": self._max_queue_depth_seen,

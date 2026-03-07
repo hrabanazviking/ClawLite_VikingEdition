@@ -2717,6 +2717,40 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         )
                 elif name == "autonomy_wake":
                     await start_fn(_dispatch_autonomy_wake)
+                    wake_component = lifecycle.components.setdefault(
+                        "wake_replay",
+                        {"enabled": True, "running": False, "last_error": "", "restored": 0, "pending": 0},
+                    )
+                    wake_summary = runtime.autonomy_wake.status()
+                    wake_component["enabled"] = True
+                    wake_component["running"] = False
+                    wake_component["last_error"] = str(wake_summary.get("last_journal_error", "") or "")
+                    wake_component["restored"] = int(wake_summary.get("restored", 0) or 0)
+                    wake_component["pending"] = int(wake_summary.get("journal_entries", 0) or 0)
+                    _record_autonomy_event(
+                        "autonomy",
+                        "startup_wake_replay",
+                        "ok" if not wake_component["last_error"] else "failed",
+                        summary=(
+                            f"startup wake replay restored={wake_component['restored']} "
+                            f"pending={wake_component['pending']}"
+                        ),
+                        metadata=dict(wake_summary),
+                    )
+                    if wake_component["restored"] > 0 or bool(wake_component["last_error"]):
+                        await _send_autonomy_notice(
+                            "autonomy",
+                            "startup_wake_replay",
+                            "ok" if not wake_component["last_error"] else "failed",
+                            text=(
+                                "Autonomy notice: startup wake replay "
+                                f"restored={wake_component['restored']} pending={wake_component['pending']}."
+                            ),
+                            metadata={
+                                "source": "wake_replay",
+                                **dict(wake_summary),
+                            },
+                        )
                 elif name == "cron":
                     await start_fn(_submit_cron_wake)
                 elif name == "skills_watcher":
