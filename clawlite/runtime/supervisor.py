@@ -18,6 +18,7 @@ class SupervisorIncident:
 
 IncidentCheck = Callable[[], Awaitable[list[SupervisorIncident | dict[str, Any]]]]
 RecoveryHandler = Callable[[str, str], Awaitable[bool]]
+IncidentHandler = Callable[[SupervisorIncident], Awaitable[None]]
 NowMonotonic = Callable[[], float]
 NowUTC = Callable[[], datetime]
 
@@ -30,6 +31,7 @@ class RuntimeSupervisor:
         cooldown_s: float = 30.0,
         incident_checks: IncidentCheck | None = None,
         recover: RecoveryHandler | None = None,
+        on_incident: IncidentHandler | None = None,
         now_monotonic: NowMonotonic | None = None,
         now_utc: NowUTC | None = None,
     ) -> None:
@@ -38,6 +40,7 @@ class RuntimeSupervisor:
         self.cooldown_s = max(0.0, float(cooldown_s))
         self._incident_checks = incident_checks
         self._recover = recover
+        self._on_incident = on_incident
         self._now_monotonic = now_monotonic or time.monotonic
         self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
         self._task: asyncio.Task[Any] | None = None
@@ -98,6 +101,16 @@ class RuntimeSupervisor:
             "at": self._now_utc().isoformat(),
         }
 
+    async def _notify_incident(self, incident: SupervisorIncident) -> None:
+        if self._on_incident is None:
+            return
+        try:
+            await self._on_incident(incident)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_error(exc)
+
     async def _recover_component(self, *, component: str, reason: str) -> bool:
         if self._recover is None:
             return False
@@ -129,6 +142,7 @@ class RuntimeSupervisor:
 
             for incident in incidents:
                 self._record_incident(incident)
+                await self._notify_incident(incident)
                 if not incident.recoverable:
                     continue
                 cooldown_until = float(self._cooldown_until.get(incident.component, 0.0) or 0.0)

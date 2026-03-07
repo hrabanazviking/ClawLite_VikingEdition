@@ -1435,6 +1435,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     tuning_task: asyncio.Task[Any] | None = None
     tuning_running = False
     tuning_stop_event = asyncio.Event()
+    supervisor_incident_notice_until: dict[str, float] = {}
     tuning_runner_state: dict[str, Any] = {
         "enabled": bool(cfg.gateway.autonomy.tuning_loop_enabled),
         "running": False,
@@ -2385,7 +2386,56 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     SupervisorIncident(component="memory_quality_tuning", reason=f"memory_quality_tuning_{tuning_state}")
                 )
 
+        provider_telemetry = _provider_telemetry_snapshot(runtime.engine.provider)
+        provider_summary = provider_telemetry.get("summary", {}) if isinstance(provider_telemetry, dict) else {}
+        provider_state = str(provider_summary.get("state", "") or "").strip().lower()
+        provider_name = str(provider_telemetry.get("provider", "") or "provider").strip().lower() or "provider"
+        if provider_state in {"circuit_open", "cooldown"}:
+            incidents.append(
+                SupervisorIncident(
+                    component="provider",
+                    reason=f"provider_{provider_state}:{provider_name}",
+                    recoverable=False,
+                )
+            )
+
         return incidents
+
+    async def _handle_supervisor_incident(incident: SupervisorIncident) -> None:
+        if incident.recoverable:
+            return
+        key = f"{incident.component}:{incident.reason}"
+        now = time.monotonic()
+        cooldown_s = max(30.0, float(cfg.gateway.supervisor.cooldown_s or 0.0))
+        if now < float(supervisor_incident_notice_until.get(key, 0.0) or 0.0):
+            return
+        supervisor_incident_notice_until[key] = now + cooldown_s
+        _record_autonomy_event(
+            "supervisor",
+            "component_incident",
+            "observed",
+            summary=f"{incident.component} incident -> {incident.reason}",
+            metadata={
+                "component": incident.component,
+                "incident_reason": incident.reason,
+                "recoverable": incident.recoverable,
+            },
+        )
+        text = f"Autonomy notice: supervisor detected component={incident.component} issue."
+        if incident.reason:
+            text += f" reason={incident.reason}."
+        await _send_autonomy_notice(
+            "supervisor",
+            "component_incident",
+            "observed",
+            text=text,
+            metadata={
+                "source": "supervisor",
+                "component": incident.component,
+                "incident_reason": incident.reason,
+                "recoverable": incident.recoverable,
+            },
+        )
 
     async def _recover_supervised_component(component: str, reason: str) -> bool:
         bind_event("supervisor.recover").warning("runtime recover component={} reason={}", component, reason)
@@ -2455,6 +2505,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         cooldown_s=cfg.gateway.supervisor.cooldown_s,
         incident_checks=_supervisor_incident_checks,
         recover=_recover_supervised_component,
+        on_incident=_handle_supervisor_incident,
     )
 
     async def _resume_recoverable_subagents() -> dict[str, Any]:

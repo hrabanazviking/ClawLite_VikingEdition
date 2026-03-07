@@ -80,6 +80,7 @@ def test_supervisor_cron_down_recovery_counters() -> None:
 
 def test_supervisor_provider_circuit_open_tracks_incident_without_recovery() -> None:
     clock = _Clock()
+    notifications: list[tuple[str, str]] = []
 
     async def _checks() -> list[SupervisorIncident]:
         return [SupervisorIncident(component="provider", reason="circuit_open", recoverable=False)]
@@ -87,12 +88,16 @@ def test_supervisor_provider_circuit_open_tracks_incident_without_recovery() -> 
     async def _recover(_component: str, _reason: str) -> bool:
         raise AssertionError("recover should not be called for non-recoverable incidents")
 
+    async def _on_incident(incident: SupervisorIncident) -> None:
+        notifications.append((incident.component, incident.reason))
+
     async def _scenario() -> None:
         supervisor = RuntimeSupervisor(
             interval_s=20,
             cooldown_s=30,
             incident_checks=_checks,
             recover=_recover,
+            on_incident=_on_incident,
             now_monotonic=clock.monotonic,
         )
         await supervisor.run_once()
@@ -103,6 +108,7 @@ def test_supervisor_provider_circuit_open_tracks_incident_without_recovery() -> 
         assert status["component_incidents"]["provider"] == 1
         assert status["last_incident"]["component"] == "provider"
         assert status["last_incident"]["reason"] == "circuit_open"
+        assert notifications == [("provider", "circuit_open")]
 
     asyncio.run(_scenario())
 

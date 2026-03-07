@@ -1280,6 +1280,62 @@ def test_gateway_supervisor_recovers_crashed_heartbeat_task(tmp_path: Path) -> N
     asyncio.run(_scenario())
 
 
+def test_gateway_supervisor_reports_provider_circuit_open_once_per_cooldown(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "supervisor": {"enabled": False, "interval_s": 60, "cooldown_s": 0},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
+            runtime.engine.provider = SimpleNamespace(
+                provider_name="failover",
+                model="openai/gpt-4.1-mini",
+                diagnostics=lambda: {
+                    "provider": "failover",
+                    "model": "openai/gpt-4.1-mini",
+                    "candidate_count": 2,
+                    "candidates": [],
+                    "counters": {"fallback_attempts": 1},
+                    "circuit_open": True,
+                },
+            )
+
+            await runtime.supervisor.run_once()
+            await runtime.supervisor.run_once()
+
+            supervisor_status = runtime.supervisor.status()
+            assert supervisor_status["incident_count"] >= 2
+            assert supervisor_status["recovery_attempts"] == 0
+            assert supervisor_status["component_incidents"]["provider"] >= 2
+            assert supervisor_status["last_incident"]["component"] == "provider"
+            assert "provider_circuit_open:failover" in str(supervisor_status["last_incident"]["reason"])
+
+            incident_calls = [
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_incident"
+            ]
+            assert len(incident_calls) == 1
+            metadata = dict(incident_calls[0]["metadata"])
+            assert metadata["source"] == "supervisor"
+            assert metadata["component"] == "provider"
+            assert metadata["incident_reason"] == "provider_circuit_open:failover"
+            assert metadata["autonomy_notice"] is True
+
+    asyncio.run(_scenario())
+
+
 def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
