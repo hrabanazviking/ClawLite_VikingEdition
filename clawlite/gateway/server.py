@@ -1474,6 +1474,71 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         except Exception as exc:
             bind_event("autonomy.log", source=source, action=action).warning("autonomy log record failed error={}", exc)
+
+    async def _send_autonomy_notice(
+        source: str,
+        action: str,
+        status: str,
+        *,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        summary: str = "",
+        event_at: str = "",
+    ) -> bool:
+        notice_text = str(text or "").strip()
+        if not notice_text:
+            return False
+        memory_store = getattr(runtime.engine, "memory", None)
+        channel_name, target = await _latest_memory_route(memory_store)
+        if not channel_name or not target:
+            return False
+
+        payload_metadata = dict(metadata or {})
+        payload_metadata.setdefault("source", source)
+        payload_metadata["autonomy_notice"] = True
+        payload_metadata.setdefault("autonomy_action", action)
+        payload_metadata.setdefault("autonomy_status", status)
+
+        event_metadata = {
+            "channel": channel_name,
+            "target": target,
+            "notice_status": status,
+            **payload_metadata,
+        }
+        try:
+            await runtime.channels.send(
+                channel=channel_name,
+                target=target,
+                text=notice_text,
+                metadata=payload_metadata,
+            )
+        except Exception as exc:
+            event_metadata["error"] = str(exc)
+            _record_autonomy_event(
+                source,
+                f"{action}_notice",
+                "failed",
+                summary=summary or f"notice failed for {action}",
+                metadata=event_metadata,
+                event_at=event_at,
+            )
+            bind_event("autonomy.notice", source=source, action=action).warning(
+                "autonomy notice failed channel={} target={} error={}",
+                channel_name,
+                target,
+                exc,
+            )
+            return False
+
+        _record_autonomy_event(
+            source,
+            f"{action}_notice",
+            "sent",
+            summary=summary or f"notice sent for {action}",
+            metadata=event_metadata,
+            event_at=event_at,
+        )
+        return True
     memory_quality_cache: dict[str, Any] = {
         "fingerprint": "",
         "payload": None,
@@ -1654,8 +1719,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return fallback
 
     async def _send_channel_recovery_notice(payload: dict[str, Any]) -> None:
-        memory_store = getattr(runtime.engine, "memory", None)
-        channel_name, target = await _latest_memory_route(memory_store)
         normalized_channel = str(payload.get("channel", "") or "").strip()
         status = str(payload.get("status", "") or "").strip() or "unknown"
         reason = str(payload.get("reason", "") or "").strip()
@@ -1674,59 +1737,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 },
                 event_at=event_at,
             )
-        if not channel_name or not target:
-            return
         text = f"Autonomy notice: channel {normalized_channel} {status}."
         if reason:
             text += f" reason={reason}."
         if error and status != "recovered":
             text += f" error={error}."
-        try:
-            await runtime.channels.send(
-                channel=channel_name,
-                target=target,
-                text=text,
-                metadata={
-                    "source": "channel_recovery",
-                    "autonomy_notice": True,
-                    "recovery_channel": normalized_channel,
-                    "recovery_status": status,
-                    "recovery_reason": reason,
-                    "recovery_error": error,
-                },
-            )
-            _record_autonomy_event(
-                "channels",
-                "channel_recovery_notice",
-                "sent",
-                summary=f"notice sent for channel {normalized_channel} {status}",
-                metadata={
-                    "channel": channel_name,
-                    "target": target,
-                    "recovery_channel": normalized_channel,
-                    "recovery_status": status,
-                },
-                event_at=event_at,
-            )
-        except Exception as exc:
-            _record_autonomy_event(
-                "channels",
-                "channel_recovery_notice",
-                "failed",
-                summary=f"notice failed for channel {normalized_channel} {status}",
-                metadata={
-                    "channel": channel_name,
-                    "target": target,
-                    "recovery_channel": normalized_channel,
-                    "recovery_status": status,
-                    "error": str(exc),
-                },
-                event_at=event_at,
-            )
-            bind_event("channel.recovery", channel=normalized_channel or channel_name).warning(
-                "channel recovery notice failed error={}",
-                exc,
-            )
+        await _send_autonomy_notice(
+            "channels",
+            "channel_recovery",
+            status,
+            text=text,
+            metadata={
+                "source": "channel_recovery",
+                "recovery_channel": normalized_channel,
+                "recovery_status": status,
+                "recovery_reason": reason,
+                "recovery_error": error,
+            },
+            summary=f"notice sent for channel {normalized_channel} {status}",
+            event_at=event_at,
+        )
 
     runtime.channels.set_recovery_notifier(_send_channel_recovery_notice)
 
@@ -2021,16 +2051,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         action_status = "rate_limited"
                     else:
                         if action == "notify_operator":
-                            channel, target = await _latest_memory_route(memory_store)
                             layer_suffix = f" layer={weakest_layer}." if weakest_layer else ""
                             template_id, text_marker = _resolve_tuning_notify_variant(
                                 layer=weakest_layer,
                                 severity=severity,
                             )
                             action_metadata["template_id"] = template_id
-                            await runtime.channels.send(
-                                channel=channel,
-                                target=target,
+                            await _send_autonomy_notice(
+                                "memory_quality_tuning",
+                                action,
+                                "ok",
                                 text=(
                                     f"Memory quality drift detected ({severity}). "
                                     f"score={score} streak={degrading_streak}.{layer_suffix} "
@@ -2042,6 +2072,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                                     "drift": drift,
                                     **action_metadata,
                                 },
+                                summary=f"notice sent for {action}",
+                                event_at=now_iso,
                             )
                             action_status = "ok"
                         elif action == "semantic_backfill":
@@ -2393,6 +2425,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             summary=f"{component} recovery -> {'recovered' if recovered else 'failed'}",
             metadata={"component": component, "reason": reason},
         )
+        text = (
+            f"Autonomy notice: supervisor {'recovered' if recovered else 'failed'} "
+            f"component={component}."
+        )
+        if reason:
+            text += f" reason={reason}."
+        await _send_autonomy_notice(
+            "supervisor",
+            "component_recovery",
+            "recovered" if recovered else "failed",
+            text=text,
+            metadata={
+                "source": "supervisor",
+                "component": component,
+                "recovery_reason": reason,
+            },
+        )
         return recovered
 
     runtime.supervisor = RuntimeSupervisor(
@@ -2484,6 +2533,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             },
             event_at=str(component.get("last_run_iso", "") or ""),
         )
+        if replayed or failed:
+            await _send_autonomy_notice(
+                "subagents",
+                "startup_replay",
+                "ok" if not failed else "partial",
+                text=(
+                    "Autonomy notice: startup subagent replay "
+                    f"replayed={replayed} failed={len(failed)} groups={len(grouped_run_ids)}."
+                ),
+                metadata={
+                    "source": "subagents",
+                    "replayed": replayed,
+                    "replayed_groups": len(grouped_run_ids),
+                    "failed": len(failed),
+                    "failed_groups": len(failed_group_ids),
+                    "group_ids": sorted(grouped_run_ids.keys())[-8:],
+                },
+                event_at=str(component.get("last_run_iso", "") or ""),
+            )
         return {
             "replayed": replayed,
             "failed": len(failed),
@@ -2532,6 +2600,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         ),
                         metadata=dict(replay_summary),
                     )
+                    if (
+                        replay_component["replayed"] > 0
+                        or replay_component["failed"] > 0
+                        or bool(replay_component["last_error"])
+                    ):
+                        await _send_autonomy_notice(
+                            "channels",
+                            "startup_delivery_replay",
+                            "ok" if not replay_component["last_error"] else "failed",
+                            text=(
+                                "Autonomy notice: startup delivery replay "
+                                f"replayed={replay_component['replayed']} failed={replay_component['failed']} "
+                                f"skipped={replay_component['skipped']}."
+                            ),
+                            metadata={
+                                "source": "delivery_replay",
+                                **dict(replay_summary),
+                            },
+                        )
                 elif name == "autonomy_wake":
                     await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":

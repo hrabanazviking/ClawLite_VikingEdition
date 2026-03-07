@@ -853,12 +853,15 @@ def test_gateway_startup_replays_resumable_subagents_after_restart(tmp_path: Pat
             return_value={"checked": False, "ok": True},
         ):
             app = create_app(cfg)
+            app.state.runtime.channels.send = AsyncMock(return_value="ok")
             with TestClient(app) as client:
                 deadline = time.time() + 1.0
                 rows = client.app.state.runtime.engine.subagents.list_runs(session_id="cli:owner")
+                payload: dict[str, object] = {}
                 while time.time() < deadline:
                     rows = client.app.state.runtime.engine.subagents.list_runs(session_id="cli:owner")
-                    if rows and rows[0].status == "done":
+                    payload = client.get("/v1/diagnostics").json()
+                    if rows and rows[0].status == "done" and app.state.runtime.channels.send.await_count >= 1:
                         break
                     time.sleep(0.01)
 
@@ -876,6 +879,21 @@ def test_gateway_startup_replays_resumable_subagents_after_restart(tmp_path: Pat
                 assert replay_component["failed_groups"] == 0
                 assert replay_component["last_group_ids"] == ["run-replay-1"]
                 assert provider.calls >= 1
+                send_kwargs = next(
+                    call.kwargs
+                    for call in app.state.runtime.channels.send.await_args_list
+                    if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "startup_replay"
+                )
+                assert send_kwargs["metadata"]["source"] == "subagents"
+                assert send_kwargs["metadata"]["autonomy_notice"] is True
+                assert send_kwargs["metadata"]["autonomy_action"] == "startup_replay"
+                assert "startup subagent replay replayed=1 failed=0 groups=1" in str(send_kwargs["text"])
+                autonomy_recent = payload["autonomy_log"]["recent"]
+                assert any(
+                    str(row.get("action", "")) == "startup_replay_notice"
+                    and str(row.get("status", "")) == "sent"
+                    for row in autonomy_recent
+                )
 
 
 def test_gateway_startup_replays_parallel_subagent_group_after_restart(tmp_path: Path) -> None:
@@ -1202,6 +1220,7 @@ def test_gateway_supervisor_recovers_crashed_heartbeat_task(tmp_path: Path) -> N
         async with app.router.lifespan_context(app):
             runtime = app.state.runtime
             assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
 
             heartbeat_task = runtime.heartbeat._task
             assert heartbeat_task is not None
@@ -1224,8 +1243,68 @@ def test_gateway_supervisor_recovers_crashed_heartbeat_task(tmp_path: Path) -> N
             assert supervisor_status["recovery_attempts"] >= 1
             assert supervisor_status["recovery_success"] >= 1
             assert supervisor_status["component_incidents"]["heartbeat"] >= 1
+            send_kwargs = next(
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_recovery"
+            )
+            assert send_kwargs["metadata"]["source"] == "supervisor"
+            assert send_kwargs["metadata"]["autonomy_notice"] is True
+            assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
+            assert send_kwargs["metadata"]["component"] == "heartbeat"
+            assert "supervisor recovered component=heartbeat" in str(send_kwargs["text"])
 
     asyncio.run(_scenario())
+
+
+def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.channels.start = AsyncMock(return_value=None)
+    app.state.runtime.channels.stop = AsyncMock(return_value=None)
+    app.state.runtime.channels.send = AsyncMock(return_value="ok")
+    app.state.runtime.channels.startup_replay_status = lambda: {
+        "enabled": True,
+        "running": False,
+        "last_error": "",
+        "restored": 2,
+        "replayed": 2,
+        "failed": 1,
+        "skipped": 0,
+    }
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        payload: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            payload = client.get("/v1/diagnostics").json()
+            if app.state.runtime.channels.send.await_count >= 1:
+                break
+            time.sleep(0.05)
+
+        send_kwargs = app.state.runtime.channels.send.await_args.kwargs
+        metadata = dict(send_kwargs["metadata"])
+        assert metadata["source"] == "delivery_replay"
+        assert metadata["autonomy_notice"] is True
+        assert metadata["autonomy_action"] == "startup_delivery_replay"
+        assert metadata["replayed"] == 2
+        assert metadata["failed"] == 1
+        assert "startup delivery replay replayed=2 failed=1 skipped=0" in str(send_kwargs["text"])
+        autonomy_recent = payload["autonomy_log"]["recent"]
+        assert any(
+            str(row.get("action", "")) == "startup_delivery_replay_notice"
+            and str(row.get("status", "")) == "sent"
+            for row in autonomy_recent
+        )
 
 
 def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
