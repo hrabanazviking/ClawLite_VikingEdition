@@ -76,6 +76,14 @@ def _parse_bool_flag(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected boolean value: true|false")
 
 
+def _skills_loader_for_args(args: argparse.Namespace) -> SkillsLoader:
+    config_path = getattr(args, "config", None)
+    if config_path:
+        cfg = load_config(config_path)
+        return SkillsLoader(state_path=Path(cfg.state_path) / "skills-state.json")
+    return SkillsLoader()
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     from clawlite.gateway.server import run_gateway
 
@@ -720,7 +728,7 @@ def cmd_cron_run(args: argparse.Namespace) -> int:
 
 
 def cmd_skills_list(args: argparse.Namespace) -> int:
-    loader = SkillsLoader()
+    loader = _skills_loader_for_args(args)
     rows = loader.discover(include_unavailable=args.all)
     payload = {
         "skills": [
@@ -730,6 +738,9 @@ def cmd_skills_list(args: argparse.Namespace) -> int:
                 "always": row.always,
                 "source": row.source,
                 "available": row.available,
+                "enabled": row.enabled,
+                "pinned": row.pinned,
+                "version": row.version,
                 "missing": row.missing,
                 "command": row.command,
                 "script": row.script,
@@ -743,7 +754,7 @@ def cmd_skills_list(args: argparse.Namespace) -> int:
 
 
 def cmd_skills_show(args: argparse.Namespace) -> int:
-    loader = SkillsLoader()
+    loader = _skills_loader_for_args(args)
     row = loader.get(args.name)
     if row is None:
         _print_json({"error": f"skill_not_found:{args.name}"})
@@ -755,6 +766,9 @@ def cmd_skills_show(args: argparse.Namespace) -> int:
             "always": row.always,
             "source": row.source,
             "available": row.available,
+            "enabled": row.enabled,
+            "pinned": row.pinned,
+            "version": row.version,
             "missing": row.missing,
             "command": row.command,
             "script": row.script,
@@ -768,8 +782,62 @@ def cmd_skills_show(args: argparse.Namespace) -> int:
 
 
 def cmd_skills_check(args: argparse.Namespace) -> int:
-    loader = SkillsLoader()
+    loader = _skills_loader_for_args(args)
     _print_json(loader.diagnostics_report())
+    return 0
+
+
+def _skills_lifecycle_payload(action: str, row: Any) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "action": action,
+        "name": row.name,
+        "enabled": row.enabled,
+        "pinned": row.pinned,
+        "available": row.available,
+        "version": row.version,
+        "source": row.source,
+        "path": str(row.path),
+    }
+
+
+def cmd_skills_enable(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.set_enabled(args.name, True)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("enable", row))
+    return 0
+
+
+def cmd_skills_disable(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.set_enabled(args.name, False)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("disable", row))
+    return 0
+
+
+def cmd_skills_pin(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.set_pinned(args.name, True)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("pin", row))
+    return 0
+
+
+def cmd_skills_unpin(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.set_pinned(args.name, False)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("unpin", row))
     return 0
 
 
@@ -1034,6 +1102,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_skills_check = skills_sub.add_parser("check", help="Emit aggregated deterministic skills diagnostics")
     p_skills_check.set_defaults(handler=cmd_skills_check)
+
+    p_skills_enable = skills_sub.add_parser("enable", help="Enable one skill in the local state")
+    p_skills_enable.add_argument("name")
+    p_skills_enable.set_defaults(handler=cmd_skills_enable)
+
+    p_skills_disable = skills_sub.add_parser("disable", help="Disable one skill in the local state")
+    p_skills_disable.add_argument("name")
+    p_skills_disable.set_defaults(handler=cmd_skills_disable)
+
+    p_skills_pin = skills_sub.add_parser("pin", help="Pin one skill in the local state")
+    p_skills_pin.add_argument("name")
+    p_skills_pin.set_defaults(handler=cmd_skills_pin)
+
+    p_skills_unpin = skills_sub.add_parser("unpin", help="Unpin one skill in the local state")
+    p_skills_unpin.add_argument("name")
+    p_skills_unpin.set_defaults(handler=cmd_skills_unpin)
 
     return parser
 

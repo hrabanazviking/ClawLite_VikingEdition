@@ -91,6 +91,10 @@ def test_cli_skills_list_and_show(capsys) -> None:
     payload = json.loads(out)
     assert isinstance(payload.get("skills"), list)
     assert any(item.get("name") == "cron" for item in payload["skills"])
+    cron = next(item for item in payload["skills"] if item.get("name") == "cron")
+    assert "enabled" in cron
+    assert "pinned" in cron
+    assert "version" in cron
 
     rc_show = main(["skills", "show", "cron"])
     assert rc_show == 0
@@ -98,6 +102,9 @@ def test_cli_skills_list_and_show(capsys) -> None:
     one = json.loads(out_show)
     assert one.get("name") == "cron"
     assert "Schedule" in one.get("description", "")
+    assert "enabled" in one
+    assert "pinned" in one
+    assert "version" in one
 
 
 def test_cli_skills_check_returns_diagnostics_report(capsys) -> None:
@@ -114,6 +121,57 @@ def test_cli_skills_check_returns_diagnostics_report(capsys) -> None:
     }
     summary = payload["summary"]
     assert summary["total"] == summary["available"] + summary["unavailable"]
+    assert summary["enabled"] == summary["total"] - summary["disabled"]
+
+
+def test_cli_skills_enable_disable_and_pin_unpin(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_disable = main(["--config", str(config_path), "skills", "disable", "cron"])
+    assert rc_disable == 0
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["ok"] is True
+    assert disabled["action"] == "disable"
+    assert disabled["name"] == "cron"
+    assert disabled["enabled"] is False
+
+    rc_pin = main(["--config", str(config_path), "skills", "pin", "cron"])
+    assert rc_pin == 0
+    pinned = json.loads(capsys.readouterr().out)
+    assert pinned["ok"] is True
+    assert pinned["action"] == "pin"
+    assert pinned["pinned"] is True
+    assert pinned["enabled"] is False
+
+    rc_show = main(["--config", str(config_path), "skills", "show", "cron"])
+    assert rc_show == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["enabled"] is False
+    assert shown["pinned"] is True
+
+    rc_enable = main(["--config", str(config_path), "skills", "enable", "cron"])
+    assert rc_enable == 0
+    enabled = json.loads(capsys.readouterr().out)
+    assert enabled["ok"] is True
+    assert enabled["action"] == "enable"
+    assert enabled["enabled"] is True
+
+    rc_unpin = main(["--config", str(config_path), "skills", "unpin", "cron"])
+    assert rc_unpin == 0
+    unpinned = json.loads(capsys.readouterr().out)
+    assert unpinned["ok"] is True
+    assert unpinned["action"] == "unpin"
+    assert unpinned["pinned"] is False
 
 
 def test_cli_status_and_version(tmp_path: Path, capsys) -> None:

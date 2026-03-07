@@ -91,6 +91,28 @@ def test_run_skill_respects_unavailable_requirements(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_run_skill_blocks_disabled_skill(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "echo-skill",
+        "name: echo-skill\ndescription: echo\ncommand: echo",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        loader = SkillsLoader(builtin_root=tmp_path, state_path=tmp_path / "skills-state.json")
+        loader.set_enabled("echo-skill", False)
+        tool = SkillTool(loader=loader, registry=reg)
+        out = await tool.run(
+            {"name": "echo-skill", "input": "hello"},
+            ToolContext(session_id="s-disabled"),
+        )
+        assert out == "skill_disabled:echo-skill"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_dispatches_script_to_tool_registry(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

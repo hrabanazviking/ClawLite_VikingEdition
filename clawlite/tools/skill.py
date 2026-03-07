@@ -203,6 +203,8 @@ class SkillTool(Tool):
         spec = self.loader.get(name)
         if spec is None:
             raise ValueError(f"skill_not_found:{name}")
+        if not spec.enabled:
+            return f"skill_disabled:{spec.name}"
         if not spec.available:
             details = ", ".join([*spec.missing, *spec.contract_issues])
             return f"skill_unavailable:{spec.name}:{details}"

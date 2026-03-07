@@ -6,6 +6,9 @@ import platform
 import re
 import shlex
 import shutil
+import time
+import hashlib
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -327,6 +330,9 @@ class SkillSpec:
     body: str
     metadata: dict[str, str]
     available: bool
+    enabled: bool
+    pinned: bool
+    version: str
     missing: list[str]
     requirements: dict[str, list[str]]
     execution_kind: str
@@ -338,42 +344,136 @@ class SkillSpec:
 class SkillsLoader:
     """Loads SKILL.md from builtin/workspace/marketplace skill roots."""
 
-    def __init__(self, builtin_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        builtin_root: str | Path | None = None,
+        *,
+        state_path: str | Path | None = None,
+        watch_debounce_ms: int = 250,
+        now_monotonic=None,
+    ) -> None:
         default_builtin = Path(__file__).resolve().parents[1] / "skills"
         self.roots = [
             Path(builtin_root) if builtin_root else default_builtin,
             Path.home() / ".clawlite" / "workspace" / "skills",
             Path.home() / ".clawlite" / "marketplace" / "skills",
         ]
+        self.state_path = (
+            Path(state_path)
+            if state_path is not None
+            else (Path.home() / ".clawlite" / "state" / "skills-state.json")
+        )
+        self.watch_debounce_ms = max(0, int(watch_debounce_ms or 0))
+        self._now_monotonic = now_monotonic or time.monotonic
         self._discovery_signature: tuple[tuple[str, bool, int], ...] | None = None
         self._discovered_specs: list[SkillSpec] | None = None
         self._name_index: dict[str, SkillSpec] | None = None
+        self._last_refresh_monotonic = 0.0
+        self._pending_signature: tuple[tuple[str, bool, int], ...] | None = None
+
+    @staticmethod
+    def _default_state_payload() -> dict[str, object]:
+        return {
+            "version": 1,
+            "entries": {},
+        }
+
+    @staticmethod
+    def _flush_and_fsync(handle) -> None:
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except Exception:
+            pass
+
+    def _atomic_write_state(self, payload: dict[str, object]) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.state_path.parent / f".{self.state_path.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with temp_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+                self._flush_and_fsync(fh)
+            os.replace(temp_path, self.state_path)
+            dir_fd = -1
+            try:
+                dir_fd = os.open(str(self.state_path.parent), os.O_RDONLY)
+                os.fsync(dir_fd)
+            except Exception:
+                pass
+            finally:
+                if dir_fd >= 0:
+                    try:
+                        os.close(dir_fd)
+                    except Exception:
+                        pass
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+
+    def _load_state_payload(self) -> dict[str, object]:
+        if not self.state_path.exists():
+            return self._default_state_payload()
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return self._default_state_payload()
+        if not isinstance(payload, dict):
+            return self._default_state_payload()
+        entries = payload.get("entries")
+        if not isinstance(entries, dict):
+            payload["entries"] = {}
+        payload.setdefault("version", 1)
+        return payload
+
+    def _entry_state(self, name: str) -> dict[str, object]:
+        payload = self._load_state_payload()
+        entries = payload.get("entries", {})
+        if not isinstance(entries, dict):
+            return {}
+        raw = entries.get(str(name).strip().lower())
+        return dict(raw) if isinstance(raw, dict) else {}
 
     def _roots_signature(self) -> tuple[tuple[str, bool, int], ...]:
         signature: list[tuple[str, bool, int]] = []
         for root in self.roots:
             exists = root.exists()
-            mtime = root.stat().st_mtime_ns if exists else 0
-            signature.append((str(root), exists, mtime))
+            if not exists:
+                signature.append((str(root), False, 0))
+                continue
+            skill_files = sorted(root.rglob("SKILL.md"))
+            if not skill_files:
+                signature.append((str(root), True, root.stat().st_mtime_ns))
+                continue
+            for path in skill_files:
+                try:
+                    stat = path.stat()
+                except Exception:
+                    continue
+                file_sig = f"{path.relative_to(root)}:{stat.st_mtime_ns}:{stat.st_size}"
+                digest = int(hashlib.sha1(file_sig.encode("utf-8")).hexdigest()[:15], 16)
+                signature.append((str(path), True, digest))
         return tuple(signature)
 
-    @staticmethod
-    def _refresh_runtime_status(spec: SkillSpec) -> SkillSpec:
+    def _refresh_runtime_status(self, spec: SkillSpec) -> SkillSpec:
         missing = _missing_requirements(spec.requirements)
         available = (not missing) and (not spec.contract_issues)
-        if spec.missing == missing and spec.available == available:
-            return spec
-        return replace(spec, missing=missing, available=available)
-
-    def _ensure_discovery_cache(self) -> None:
-        signature = self._roots_signature()
+        entry_state = self._entry_state(spec.name)
+        enabled = bool(entry_state.get("enabled", True))
+        pinned = bool(entry_state.get("pinned", False))
         if (
-            self._discovery_signature == signature
-            and self._discovered_specs is not None
-            and self._name_index is not None
+            spec.missing == missing
+            and spec.available == available
+            and spec.enabled == enabled
+            and spec.pinned == pinned
         ):
-            return
+            return spec
+        return replace(spec, missing=missing, available=available, enabled=enabled, pinned=pinned)
 
+    def _rebuild_discovery_cache(self, *, signature: tuple[tuple[str, bool, int], ...]) -> None:
         found: dict[str, SkillSpec] = {}
         for idx, root in enumerate(self.roots):
             if not root.exists():
@@ -391,6 +491,31 @@ class SkillsLoader:
         self._discovered_specs = rows
         self._name_index = {item.name.lower(): item for item in rows}
         self._discovery_signature = signature
+        self._last_refresh_monotonic = float(self._now_monotonic())
+        self._pending_signature = None
+
+    def _ensure_discovery_cache(self, *, force: bool = False) -> None:
+        signature = self._roots_signature()
+        if (
+            not force
+            and
+            self._discovery_signature == signature
+            and self._discovered_specs is not None
+            and self._name_index is not None
+        ):
+            return
+        if self._discovered_specs is None or self._name_index is None or self._discovery_signature is None:
+            self._rebuild_discovery_cache(signature=signature)
+            return
+        if force:
+            self._rebuild_discovery_cache(signature=signature)
+            return
+        now = float(self._now_monotonic())
+        debounce_s = float(self.watch_debounce_ms) / 1000.0
+        if debounce_s > 0 and now < (self._last_refresh_monotonic + debounce_s):
+            self._pending_signature = signature
+            return
+        self._rebuild_discovery_cache(signature=signature)
 
     @staticmethod
     def _source_label(root: Path, index: int) -> str:
@@ -419,6 +544,7 @@ class SkillsLoader:
         missing = _missing_requirements(req_map)
         execution_kind, execution_target, execution_argv, contract_issues = _build_execution_contract(meta)
         metadata_as_text = {key: _serialize_frontmatter_value(value) for key, value in meta.items()}
+        version = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
         return SkillSpec(
             name=name,
@@ -433,6 +559,9 @@ class SkillsLoader:
             body=body.strip(),
             metadata=metadata_as_text,
             available=(not missing) and (not contract_issues) and (not req_issues),
+            enabled=True,
+            pinned=False,
+            version=version,
             missing=missing,
             requirements=req_map,
             execution_kind=execution_kind,
@@ -456,6 +585,55 @@ class SkillsLoader:
         if include_unavailable:
             return rows
         return [item for item in rows if item.available]
+
+    def refresh(self, *, force: bool = False) -> dict[str, object]:
+        before = self._discovery_signature
+        before_refresh_at = self._last_refresh_monotonic
+        self._ensure_discovery_cache(force=force)
+        return {
+            "refreshed": bool(force or before != self._discovery_signature),
+            "debounced": bool(not force and self._pending_signature is not None),
+            "pending": self._pending_signature is not None,
+            "watch_debounce_ms": self.watch_debounce_ms,
+            "refreshed_at_monotonic": self._last_refresh_monotonic,
+            "previous_refresh_at_monotonic": before_refresh_at,
+        }
+
+    def set_enabled(self, name: str, enabled: bool) -> SkillSpec | None:
+        spec = self.get(name)
+        if spec is None:
+            return None
+        payload = self._load_state_payload()
+        entries = payload.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            payload["entries"] = entries
+        key = spec.name.strip().lower()
+        row = dict(entries.get(key) or {}) if isinstance(entries.get(key), dict) else {}
+        row["enabled"] = bool(enabled)
+        row.setdefault("pinned", False)
+        row["name"] = spec.name
+        entries[key] = row
+        self._atomic_write_state(payload)
+        return self.get(spec.name)
+
+    def set_pinned(self, name: str, pinned: bool) -> SkillSpec | None:
+        spec = self.get(name)
+        if spec is None:
+            return None
+        payload = self._load_state_payload()
+        entries = payload.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            payload["entries"] = entries
+        key = spec.name.strip().lower()
+        row = dict(entries.get(key) or {}) if isinstance(entries.get(key), dict) else {}
+        row["enabled"] = bool(row.get("enabled", True))
+        row["pinned"] = bool(pinned)
+        row["name"] = spec.name
+        entries[key] = row
+        self._atomic_write_state(payload)
+        return self.get(spec.name)
 
     def diagnostics_report(self) -> dict[str, object]:
         rows = self.discover(include_unavailable=True)
@@ -489,18 +667,30 @@ class SkillsLoader:
         unavailable_count = 0
         always_on_available_count = 0
         always_on_unavailable_count = 0
+        enabled_count = 0
+        disabled_count = 0
+        pinned_count = 0
+        runnable_count = 0
         contract_total = 0
 
         skill_rows: list[dict[str, object]] = []
 
         for row in rows:
+            if row.enabled:
+                enabled_count += 1
+            else:
+                disabled_count += 1
+            if row.pinned:
+                pinned_count += 1
             if row.available:
                 available_count += 1
-                if row.always:
+                if row.enabled:
+                    runnable_count += 1
+                if row.always and row.enabled:
                     always_on_available_count += 1
             else:
                 unavailable_count += 1
-                if row.always:
+                if row.always and row.enabled:
                     always_on_unavailable_count += 1
 
             kind = row.execution_kind if row.execution_kind in execution_kinds else "invalid"
@@ -532,6 +722,10 @@ class SkillsLoader:
                 {
                     "name": row.name,
                     "available": row.available,
+                    "enabled": row.enabled,
+                    "pinned": row.pinned,
+                    "version": row.version,
+                    "runnable": bool(row.available and row.enabled),
                     "source": row.source,
                     "execution_kind": row.execution_kind,
                     "missing": sorted(row.missing),
@@ -547,6 +741,10 @@ class SkillsLoader:
                 "total": len(rows),
                 "available": available_count,
                 "unavailable": unavailable_count,
+                "enabled": enabled_count,
+                "disabled": disabled_count,
+                "pinned": pinned_count,
+                "runnable": runnable_count,
                 "always_on_available": always_on_available_count,
                 "always_on_unavailable": always_on_unavailable_count,
             },
@@ -562,7 +760,7 @@ class SkillsLoader:
 
     def always_on(self, *, only_available: bool = True) -> list[SkillSpec]:
         rows = self.discover(include_unavailable=not only_available)
-        return [item for item in rows if item.always and (item.available or not only_available)]
+        return [item for item in rows if item.enabled and item.always and (item.available or not only_available)]
 
     def get(self, name: str) -> SkillSpec | None:
         self._ensure_discovery_cache()
@@ -583,7 +781,7 @@ class SkillsLoader:
         parts: list[str] = []
         for name in skill_names:
             spec = self.get(name)
-            if spec is None or not spec.body:
+            if spec is None or not spec.enabled or not spec.body:
                 continue
             parts.append(f"### Skill: {spec.name}\n\n{spec.body}")
         return "\n\n---\n\n".join(parts)
@@ -592,6 +790,8 @@ class SkillsLoader:
         selected_set = {item.strip() for item in (selected or []) if item.strip()}
         lines = ["<available_skills>"]
         for skill in self.discover(include_unavailable=include_unavailable):
+            if not skill.enabled:
+                continue
             if not skill.available and not include_unavailable:
                 continue
             if selected_set and skill.name not in selected_set and not skill.always:
@@ -600,6 +800,7 @@ class SkillsLoader:
             lines.append(f"<name>{_escape_xml(skill.name)}</name>")
             lines.append(f"<description>{_escape_xml(skill.description or 'no description')}</description>")
             lines.append(f"<location>{_escape_xml(str(skill.path))}</location>")
+            lines.append(f"<version>{_escape_xml(skill.version)}</version>")
             if include_unavailable and not skill.available:
                 missing = ", ".join([*skill.missing, *skill.contract_issues])
                 lines.append(f"<requires>{_escape_xml(missing)}</requires>")

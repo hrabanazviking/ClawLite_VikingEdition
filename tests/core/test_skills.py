@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from clawlite.core.skills import SkillsLoader
@@ -87,6 +88,74 @@ def test_skills_loader_can_load_body_and_render_prompt(tmp_path: Path) -> None:
     assert "<available_skills>" in prompt_rows[0]
     assert "<name>alpha</name>" in prompt_rows[0]
     assert "<location>" in prompt_rows[0]
+    assert "<version>" in prompt_rows[0]
+
+
+def test_skills_loader_persists_enable_disable_and_pin_state(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: skill alpha\nalways: true\n---\n\n# Alpha\n",
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "skills-state.json"
+
+    loader = SkillsLoader(builtin_root=tmp_path, state_path=state_path)
+    initial = loader.get("alpha")
+    assert initial is not None
+    assert initial.enabled is True
+    assert initial.pinned is False
+
+    disabled = loader.set_enabled("alpha", False)
+    assert disabled is not None
+    assert disabled.enabled is False
+
+    pinned = loader.set_pinned("alpha", True)
+    assert pinned is not None
+    assert pinned.enabled is False
+    assert pinned.pinned is True
+
+    reloaded = SkillsLoader(builtin_root=tmp_path, state_path=state_path).get("alpha")
+    assert reloaded is not None
+    assert reloaded.enabled is False
+    assert reloaded.pinned is True
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["entries"]["alpha"]["enabled"] is False
+    assert payload["entries"]["alpha"]["pinned"] is True
+
+
+def test_skills_loader_debounces_skill_file_refreshes(tmp_path: Path) -> None:
+    now = {"value": 10.0}
+
+    def _now() -> float:
+        return now["value"]
+
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\nname: alpha\ndescription: first\n---\n\n# Alpha\n",
+        encoding="utf-8",
+    )
+    loader = SkillsLoader(builtin_root=tmp_path, state_path=tmp_path / "skills-state.json", watch_debounce_ms=1000, now_monotonic=_now)
+
+    first = loader.get("alpha")
+    assert first is not None
+    first_version = first.version
+
+    skill_path.write_text(
+        "---\nname: alpha\ndescription: second\n---\n\n# Alpha 2\n",
+        encoding="utf-8",
+    )
+
+    debounced = loader.get("alpha")
+    assert debounced is not None
+    assert debounced.version == first_version
+
+    now["value"] += 1.1
+    refreshed = loader.get("alpha")
+    assert refreshed is not None
+    assert refreshed.version != first_version
 
 
 def test_skills_loader_marks_invalid_execution_contract(tmp_path: Path) -> None:
@@ -243,6 +312,10 @@ def test_skills_loader_diagnostics_report_aggregates_deterministically(tmp_path:
         "total": 3,
         "available": 1,
         "unavailable": 2,
+        "enabled": 3,
+        "disabled": 0,
+        "pinned": 0,
+        "runnable": 1,
         "always_on_available": 1,
         "always_on_unavailable": 0,
     }
@@ -275,3 +348,5 @@ def test_skills_loader_diagnostics_report_aggregates_deterministically(tmp_path:
 
     skills = report["skills"]
     assert [row["name"] for row in skills] == ["command-ok", "invalid-contract", "missing-reqs"]
+    assert all("version" in row for row in skills)
+    assert all("enabled" in row for row in skills)

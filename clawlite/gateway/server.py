@@ -956,7 +956,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     tools.register(WebSearchTool(proxy=config.tools.web.proxy, timeout=config.tools.web.search_timeout))
     tools.register(CronTool(_CronAPI(cron)))
     tools.register(MCPTool(config.tools.mcp))
-    skills = SkillsLoader()
+    skills = SkillsLoader(state_path=Path(config.state_path) / "skills-state.json")
 
     sessions = SessionStore(
         root=Path(config.state_path) / "sessions",
