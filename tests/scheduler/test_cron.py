@@ -193,6 +193,12 @@ def test_cron_loop_survives_callback_failure_and_tracks_job_health(tmp_path: Pat
         assert job.consecutive_failures == 0
         assert status_running["job_failure_count"] >= 1
         assert status_running["job_success_count"] >= 1
+        assert status_running["last_job_id"] == job_id
+        assert status_running["last_job_status"] == "success"
+        assert status_running["last_job_trigger"] == "loop"
+        assert status_running["last_job_started_iso"]
+        assert status_running["last_job_completed_iso"]
+        assert status_running["max_job_lag_s"] >= status_running["last_job_lag_s"] >= 0.0
 
         await service.stop()
 
@@ -271,6 +277,43 @@ def test_cron_loop_times_out_slow_callback_and_keeps_processing(tmp_path: Path) 
         assert slow_job is not None
         assert slow_job.last_status == "failed"
         assert "callback_timeout" in slow_job.last_error
+
+        await service.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_cron_status_tracks_overdue_lag_for_due_job(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json")
+        ran = asyncio.Event()
+
+        job_id = await service.add_job(session_id="s1", expression="every 60", prompt="overdue", name="overdue")
+        job = service.get_job(job_id)
+        assert job is not None
+        job.next_run_iso = (service._now() - timedelta(seconds=3)).isoformat()
+        service._save()
+
+        async def _on_job(_job):
+            ran.set()
+            return "ok"
+
+        await service.start(_on_job)
+        await asyncio.wait_for(ran.wait(), timeout=4.0)
+        await asyncio.sleep(0.1)
+
+        status = service.status()
+        assert status["last_job_id"] == job_id
+        assert status["last_job_name"] == "overdue"
+        assert status["last_job_session_id"] == "s1"
+        assert status["last_job_status"] == "success"
+        assert status["last_job_trigger"] == "loop"
+        assert status["last_job_due_iso"]
+        assert status["last_job_started_iso"]
+        assert status["last_job_completed_iso"]
+        assert status["last_job_lag_s"] >= 2.5
+        assert status["max_job_lag_s"] >= status["last_job_lag_s"]
+        assert status["overdue_run_count"] >= 1
 
         await service.stop()
 

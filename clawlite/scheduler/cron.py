@@ -34,6 +34,7 @@ DEFAULT_CALLBACK_TIMEOUT_SECONDS = 300.0
 class CronService:
     _LOOP_SLEEP_MIN_SECONDS = 0.05
     _LOOP_SLEEP_MAX_SECONDS = 5.0
+    _OVERDUE_THRESHOLD_SECONDS = 1.0
 
     def __init__(
         self,
@@ -70,6 +71,18 @@ class CronService:
             "lease_released_on_stop": 0,
             "lease_finalize_mismatch": 0,
             "lease_finalize_missing": 0,
+            "last_job_id": "",
+            "last_job_name": "",
+            "last_job_session_id": "",
+            "last_job_trigger": "",
+            "last_job_status": "",
+            "last_job_error": "",
+            "last_job_due_iso": "",
+            "last_job_started_iso": "",
+            "last_job_completed_iso": "",
+            "last_job_lag_s": 0.0,
+            "max_job_lag_s": 0.0,
+            "overdue_run_count": 0,
             "last_load_error": "",
             "last_save_error": "",
         }
@@ -305,6 +318,18 @@ class CronService:
             "lease_released_on_stop": int(self._diag.get("lease_released_on_stop", 0) or 0),
             "lease_finalize_mismatch": int(self._diag.get("lease_finalize_mismatch", 0) or 0),
             "lease_finalize_missing": int(self._diag.get("lease_finalize_missing", 0) or 0),
+            "last_job_id": str(self._diag.get("last_job_id", "") or ""),
+            "last_job_name": str(self._diag.get("last_job_name", "") or ""),
+            "last_job_session_id": str(self._diag.get("last_job_session_id", "") or ""),
+            "last_job_trigger": str(self._diag.get("last_job_trigger", "") or ""),
+            "last_job_status": str(self._diag.get("last_job_status", "") or ""),
+            "last_job_error": str(self._diag.get("last_job_error", "") or ""),
+            "last_job_due_iso": str(self._diag.get("last_job_due_iso", "") or ""),
+            "last_job_started_iso": str(self._diag.get("last_job_started_iso", "") or ""),
+            "last_job_completed_iso": str(self._diag.get("last_job_completed_iso", "") or ""),
+            "last_job_lag_s": float(self._diag.get("last_job_lag_s", 0.0) or 0.0),
+            "max_job_lag_s": float(self._diag.get("max_job_lag_s", 0.0) or 0.0),
+            "overdue_run_count": int(self._diag.get("overdue_run_count", 0) or 0),
             "last_load_error": str(self._diag.get("last_load_error", "") or ""),
             "last_save_error": str(self._diag.get("last_save_error", "") or ""),
             "last_error": task_error,
@@ -323,6 +348,39 @@ class CronService:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
+
+    def _record_job_snapshot(
+        self,
+        *,
+        job: CronJob,
+        trigger: str,
+        due_iso: str,
+        started_at: datetime,
+        completed_at: datetime,
+    ) -> None:
+        normalized_due = str(due_iso or "").strip()
+        lag_s = 0.0
+        if normalized_due:
+            try:
+                due_at = self._normalize_datetime(normalized_due)
+            except ValueError:
+                normalized_due = ""
+            else:
+                lag_s = max(0.0, (started_at - due_at).total_seconds())
+                if lag_s >= self._OVERDUE_THRESHOLD_SECONDS:
+                    self._diag["overdue_run_count"] = int(self._diag.get("overdue_run_count", 0) or 0) + 1
+                self._diag["max_job_lag_s"] = max(float(self._diag.get("max_job_lag_s", 0.0) or 0.0), float(lag_s))
+
+        self._diag["last_job_id"] = str(job.id or "")
+        self._diag["last_job_name"] = str(job.name or "")
+        self._diag["last_job_session_id"] = str(job.session_id or "")
+        self._diag["last_job_trigger"] = str(trigger or "")
+        self._diag["last_job_status"] = str(job.last_status or "")
+        self._diag["last_job_error"] = str(job.last_error or "")
+        self._diag["last_job_due_iso"] = normalized_due
+        self._diag["last_job_started_iso"] = started_at.isoformat()
+        self._diag["last_job_completed_iso"] = completed_at.isoformat()
+        self._diag["last_job_lag_s"] = float(lag_s)
 
     def _is_lease_active(self, job: CronJob, now: datetime) -> bool:
         if not job.lease_token or not job.lease_expires_iso:
@@ -516,6 +574,8 @@ class CronService:
                 if claimed is None:
                     continue
                 callback_failed = False
+                due_iso = str(claimed.next_run_iso or "")
+                started_at = self._now()
                 if self._on_job is not None:
                     logger.info("cron job executing id={} session={} name={}", claimed.id, claimed.session_id, claimed.name)
                     try:
@@ -546,6 +606,13 @@ class CronService:
                         claimed.consecutive_failures = int(claimed.consecutive_failures or 0) + 1
                         self._diag["job_failure_count"] = int(self._diag.get("job_failure_count", 0) or 0) + 1
                         logger.error("cron job failed id={} session={} error={}", claimed.id, claimed.session_id, exc)
+                self._record_job_snapshot(
+                    job=claimed,
+                    trigger="loop",
+                    due_iso=due_iso,
+                    started_at=started_at,
+                    completed_at=self._now(),
+                )
                 committed = await asyncio.to_thread(
                     self._commit_job_result,
                     job_id=claimed.id,
@@ -641,6 +708,8 @@ class CronService:
         if callback is None:
             raise RuntimeError("cron_job_callback_missing")
         job.run_count = int(job.run_count or 0) + 1
+        due_iso = str(job.next_run_iso or "")
+        started_at = self._now()
         try:
             out = await asyncio.wait_for(callback(job), timeout=self._callback_timeout_seconds)
             job.last_status = "success"
@@ -654,6 +723,13 @@ class CronService:
             job.consecutive_failures = int(job.consecutive_failures or 0) + 1
             self._clear_lease(job)
             self._diag["job_failure_count"] = int(self._diag.get("job_failure_count", 0) or 0) + 1
+            self._record_job_snapshot(
+                job=job,
+                trigger="manual",
+                due_iso=due_iso,
+                started_at=started_at,
+                completed_at=self._now(),
+            )
             await self._save_async()
             raise TimeoutError(timeout_error) from exc
         except Exception as exc:
@@ -662,8 +738,22 @@ class CronService:
             job.consecutive_failures = int(job.consecutive_failures or 0) + 1
             self._clear_lease(job)
             self._diag["job_failure_count"] = int(self._diag.get("job_failure_count", 0) or 0) + 1
+            self._record_job_snapshot(
+                job=job,
+                trigger="manual",
+                due_iso=due_iso,
+                started_at=started_at,
+                completed_at=self._now(),
+            )
             await self._save_async()
             raise
+        self._record_job_snapshot(
+            job=job,
+            trigger="manual",
+            due_iso=due_iso,
+            started_at=started_at,
+            completed_at=self._now(),
+        )
         now = self._now()
         job.last_run_iso = now.isoformat()
         self._clear_lease(job)

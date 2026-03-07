@@ -2782,6 +2782,12 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         }
         assert "cron" in payload
         assert "wake_policy" in payload["cron"]
+        assert set(payload["cron"].keys()) >= {
+            "last_job_status",
+            "last_job_trigger",
+            "last_job_lag_s",
+            "overdue_run_count",
+        }
         assert "heartbeat" in payload
         assert "bootstrap" in payload
         assert "pending" in payload["bootstrap"]
