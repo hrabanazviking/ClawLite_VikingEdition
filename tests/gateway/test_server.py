@@ -2754,6 +2754,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "delivery_replay" in payload["control_plane"]["components"]
         assert "inbound_replay" in payload["control_plane"]["components"]
         assert "wake_replay" in payload["control_plane"]["components"]
+        assert "wake_pressure" in payload["control_plane"]["components"]
         assert "queue" in payload
         assert "dead_letter_recent" in payload["queue"]
         assert isinstance(payload["queue"]["dead_letter_recent"], list)
@@ -4200,3 +4201,66 @@ def test_gateway_heartbeat_trigger_surfaces_wake_backpressure_from_coordinator(t
         assert payload["decision"]["reason"] == "wake_backpressure"
 
     submit_mock.assert_awaited()
+
+
+def test_gateway_heartbeat_trigger_reports_quota_pressure_and_notices_on_repeat(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": True, "interval_s": 9999}},
+        channels={},
+    )
+    app = create_app(cfg)
+    counters = {"quota": 0, "global": 0, "total": 0}
+
+    async def _engine_run(*, session_id: str, user_text: str):
+        del session_id, user_text
+        return SimpleNamespace(text="HEARTBEAT_OK", model="fake/test")
+
+    app.state.runtime.engine.run = _engine_run
+
+    def _status() -> dict[str, object]:
+        return {
+            "running": True,
+            "worker_state": "running",
+            "dropped_backpressure": counters["total"],
+            "dropped_quota": counters["quota"],
+            "dropped_global_backpressure": counters["global"],
+            "pending_by_kind": {"heartbeat": 1},
+            "kind_limits": {"heartbeat": 1},
+            "by_kind": {
+                "heartbeat": {
+                    "dropped_backpressure": counters["total"],
+                    "dropped_quota": counters["quota"],
+                    "dropped_global_backpressure": counters["global"],
+                }
+            },
+        }
+
+    async def _submit(**_kwargs):
+        counters["quota"] += 1
+        counters["total"] += 1
+        return HeartbeatDecision(action="skip", reason="wake_backpressure")
+
+    with TestClient(app) as client:
+        app.state.runtime.channels.send = AsyncMock(return_value="ok")
+        app.state.runtime.autonomy_wake.status = _status
+        app.state.runtime.autonomy_wake.submit = AsyncMock(side_effect=_submit)
+
+        first = client.post("/v1/control/heartbeat/trigger")
+        second = client.post("/v1/control/heartbeat/trigger")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["decision"]["reason"] == "wake_quota_backpressure"
+        assert second.json()["decision"]["reason"] == "wake_quota_backpressure"
+        assert app.state.runtime.channels.send.await_count == 1
+
+        send_kwargs = app.state.runtime.channels.send.await_args.kwargs
+        metadata = dict(send_kwargs["metadata"])
+        assert metadata["autonomy_action"] == "wake_backpressure"
+        assert metadata["pressure_kind"] == "heartbeat"
+        assert metadata["pressure_class"] == "quota"
+        assert metadata["pressure_streak"] == 2
+        assert "heartbeat wakes throttled by quota backpressure" in str(send_kwargs["text"])

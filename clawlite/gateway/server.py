@@ -634,6 +634,15 @@ class GatewayLifecycleState:
                 "proactive_monitor": {"enabled": False, "running": False, "last_error": ""},
                 "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
+                "wake_pressure": {
+                    "enabled": True,
+                    "running": False,
+                    "last_error": "",
+                    "event_count": 0,
+                    "notice_count": 0,
+                    "last_kind": "",
+                    "last_reason": "",
+                },
                 "subagent_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0},
                 "delivery_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0, "skipped": 0},
                 "inbound_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "remaining": 0},
@@ -1423,9 +1432,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "success_count": 0,
         "error_count": 0,
         "backpressure_count": 0,
+        "backpressure_by_reason": {},
         "delivered_count": 0,
         "replayed_count": 0,
         "last_trigger": "",
+        "last_backpressure_reason": "",
         "last_result": "",
         "last_error": "",
         "last_run_iso": "",
@@ -1441,6 +1452,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     tuning_running = False
     tuning_stop_event = asyncio.Event()
     supervisor_incident_notice_until: dict[str, float] = {}
+    wake_pressure_notice_until: dict[str, float] = {}
+    wake_pressure_state: dict[str, Any] = {
+        "enabled": True,
+        "event_count": 0,
+        "notice_count": 0,
+        "events_by_kind": {},
+        "events_by_reason": {},
+        "streaks": {},
+        "last_seen_monotonic": {},
+        "last_kind": "",
+        "last_reason": "",
+        "last_summary": "",
+        "last_event_at": "",
+        "last_notice_at": "",
+    }
     tuning_runner_state: dict[str, Any] = {
         "enabled": bool(cfg.gateway.autonomy.tuning_loop_enabled),
         "running": False,
@@ -1486,6 +1512,135 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             )
         except Exception as exc:
             bind_event("autonomy.log", source=source, action=action).warning("autonomy log record failed error={}", exc)
+
+    def _wake_backpressure_row(snapshot: dict[str, Any], kind: str) -> dict[str, int]:
+        by_kind = snapshot.get("by_kind") if isinstance(snapshot, dict) else {}
+        row = by_kind.get(kind) if isinstance(by_kind, dict) else {}
+        if not isinstance(row, dict):
+            row = {}
+        return {
+            "dropped_backpressure": int(row.get("dropped_backpressure", 0) or 0),
+            "dropped_quota": int(row.get("dropped_quota", 0) or 0),
+            "dropped_global_backpressure": int(row.get("dropped_global_backpressure", 0) or 0),
+        }
+
+    def _classify_wake_backpressure(
+        kind: str,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> tuple[str, int]:
+        before_row = _wake_backpressure_row(before, kind)
+        after_row = _wake_backpressure_row(after, kind)
+        quota_delta = after_row["dropped_quota"] - before_row["dropped_quota"]
+        if quota_delta > 0:
+            return ("quota", quota_delta)
+        global_delta = after_row["dropped_global_backpressure"] - before_row["dropped_global_backpressure"]
+        if global_delta > 0:
+            return ("global", global_delta)
+        total_delta = after_row["dropped_backpressure"] - before_row["dropped_backpressure"]
+        if total_delta > 0:
+            return ("backpressure", total_delta)
+        return ("backpressure", 0)
+
+    def _wake_reason_label(pressure_class: str) -> str:
+        normalized = str(pressure_class or "backpressure").strip().lower()
+        if normalized == "quota":
+            return "quota_backpressure"
+        if normalized == "global":
+            return "global_backpressure"
+        return "backpressure"
+
+    async def _track_wake_backpressure(
+        *,
+        kind: str,
+        source: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> str:
+        normalized_kind = str(kind or "unknown").strip() or "unknown"
+        pressure_class, delta = _classify_wake_backpressure(normalized_kind, before=before, after=after)
+        now = time.monotonic()
+        event_at = _utc_now_iso()
+        streak_key = f"{normalized_kind}:{pressure_class}"
+        last_seen = float(wake_pressure_state["last_seen_monotonic"].get(streak_key, 0.0) or 0.0)
+        streaks = wake_pressure_state["streaks"]
+        if (now - last_seen) > 120.0:
+            streaks[streak_key] = 0
+        streaks[streak_key] = int(streaks.get(streak_key, 0) or 0) + 1
+        streak = int(streaks[streak_key])
+        wake_pressure_state["last_seen_monotonic"][streak_key] = now
+        wake_pressure_state["event_count"] = int(wake_pressure_state.get("event_count", 0) or 0) + 1
+        wake_pressure_state["last_kind"] = normalized_kind
+        wake_pressure_state["last_reason"] = pressure_class
+        wake_pressure_state["last_event_at"] = event_at
+        wake_pressure_state["events_by_kind"][normalized_kind] = int(wake_pressure_state["events_by_kind"].get(normalized_kind, 0) or 0) + 1
+        wake_pressure_state["events_by_reason"][pressure_class] = int(wake_pressure_state["events_by_reason"].get(pressure_class, 0) or 0) + 1
+
+        pending_by_kind = after.get("pending_by_kind") if isinstance(after.get("pending_by_kind"), dict) else {}
+        kind_limits = after.get("kind_limits") if isinstance(after.get("kind_limits"), dict) else {}
+        summary = (
+            f"{normalized_kind} wake {pressure_class} "
+            f"delta={max(1, int(delta))} pending={int(pending_by_kind.get(normalized_kind, 0) or 0)} "
+            f"limit={int(kind_limits.get(normalized_kind, 0) or 0)}"
+        )
+        wake_pressure_state["last_summary"] = summary
+
+        wake_component = lifecycle.components.setdefault(
+            "wake_pressure",
+            {"enabled": True, "running": False, "last_error": "", "event_count": 0, "notice_count": 0, "last_kind": "", "last_reason": ""},
+        )
+        wake_component["enabled"] = True
+        wake_component["running"] = False
+        wake_component["last_error"] = ""
+        wake_component["event_count"] = int(wake_pressure_state.get("event_count", 0) or 0)
+        wake_component["notice_count"] = int(wake_pressure_state.get("notice_count", 0) or 0)
+        wake_component["last_kind"] = normalized_kind
+        wake_component["last_reason"] = pressure_class
+        wake_component["last_event_at"] = event_at
+        wake_component["events_by_kind"] = dict(wake_pressure_state["events_by_kind"])
+        wake_component["events_by_reason"] = dict(wake_pressure_state["events_by_reason"])
+        wake_component["last_summary"] = summary
+
+        metadata = {
+            "pressure_kind": normalized_kind,
+            "pressure_class": pressure_class,
+            "pressure_delta": max(1, int(delta)),
+            "pressure_streak": streak,
+            "pressure_source": source,
+            "pending_by_kind": dict(pending_by_kind),
+            "kind_limits": dict(kind_limits),
+            "autonomy_wake": dict(after),
+        }
+        _record_autonomy_event(
+            "autonomy",
+            "wake_backpressure",
+            pressure_class,
+            summary=summary,
+            metadata=metadata,
+            event_at=event_at,
+        )
+
+        if streak >= 2 and now >= float(wake_pressure_notice_until.get(streak_key, 0.0) or 0.0):
+            sent = await _send_autonomy_notice(
+                "autonomy",
+                "wake_backpressure",
+                pressure_class,
+                text=(
+                    f"Autonomy notice: {normalized_kind} wakes throttled by {pressure_class} backpressure. "
+                    f"streak={streak} pending={int(pending_by_kind.get(normalized_kind, 0) or 0)} "
+                    f"limit={int(kind_limits.get(normalized_kind, 0) or 0)}."
+                ),
+                metadata=metadata,
+                summary=f"notice sent for {normalized_kind} wake {pressure_class}",
+                event_at=event_at,
+            )
+            wake_pressure_notice_until[streak_key] = now + 120.0
+            if sent:
+                wake_pressure_state["notice_count"] = int(wake_pressure_state.get("notice_count", 0) or 0) + 1
+                wake_pressure_state["last_notice_at"] = event_at
+                wake_component["notice_count"] = int(wake_pressure_state.get("notice_count", 0) or 0)
+        return pressure_class
 
     async def _send_autonomy_notice(
         source: str,
@@ -1692,6 +1847,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _submit_heartbeat_wake() -> HeartbeatDecision:
         fallback = HeartbeatDecision(action="skip", reason="wake_backpressure")
+        before = runtime.autonomy_wake.status()
         decision = await runtime.autonomy_wake.submit(
             kind="heartbeat",
             key="heartbeat:loop",
@@ -1699,16 +1855,35 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             payload={},
             fallback_result=fallback,
         )
-        return HeartbeatDecision.from_result(decision)
+        normalized = HeartbeatDecision.from_result(decision)
+        if normalized.reason == "wake_backpressure":
+            pressure_class = await _track_wake_backpressure(
+                kind="heartbeat",
+                source="heartbeat",
+                before=before,
+                after=runtime.autonomy_wake.status(),
+            )
+            normalized.reason = f"wake_{_wake_reason_label(pressure_class)}"
+        return normalized
 
     async def _submit_cron_wake(job) -> str | None:
-        return await runtime.autonomy_wake.submit(
+        before = runtime.autonomy_wake.status()
+        result = await runtime.autonomy_wake.submit(
             kind="cron",
             key=f"cron:{job.id}",
             priority=50,
             payload={"job": job},
             fallback_result="cron_backpressure_skipped",
         )
+        if result == "cron_backpressure_skipped":
+            pressure_class = await _track_wake_backpressure(
+                kind="cron",
+                source="cron",
+                before=before,
+                after=runtime.autonomy_wake.status(),
+            )
+            return f"cron_{_wake_reason_label(pressure_class)}_skipped"
+        return result
 
     async def _submit_proactive_wake() -> dict[str, Any]:
         fallback = {
@@ -1719,6 +1894,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "next_step_sent": False,
             "error": "",
         }
+        before = runtime.autonomy_wake.status()
         response = await runtime.autonomy_wake.submit(
             kind="proactive",
             key="proactive:memory_monitor",
@@ -1727,7 +1903,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             fallback_result=fallback,
         )
         if isinstance(response, dict):
-            return dict(response)
+            normalized = dict(response)
+            if str(normalized.get("status", "") or "").strip().lower() == "wake_backpressure":
+                pressure_class = await _track_wake_backpressure(
+                    kind="proactive",
+                    source="proactive",
+                    before=before,
+                    after=runtime.autonomy_wake.status(),
+                )
+                normalized["status"] = f"wake_{_wake_reason_label(pressure_class)}"
+                normalized["pressure_class"] = pressure_class
+            return normalized
         return fallback
 
     async def _send_channel_recovery_notice(payload: dict[str, Any]) -> None:
@@ -2308,8 +2494,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 try:
                     scan_result = await _submit_proactive_wake()
                     status = str(scan_result.get("status", "") or "").strip().lower()
-                    if status == "wake_backpressure":
+                    if status.endswith("backpressure"):
                         proactive_runner_state["backpressure_count"] = int(proactive_runner_state.get("backpressure_count", 0) or 0) + 1
+                        pressure_reason = str(scan_result.get("pressure_class", "") or status.removeprefix("wake_")).strip() or "backpressure"
+                        backpressure_by_reason = proactive_runner_state.get("backpressure_by_reason")
+                        if not isinstance(backpressure_by_reason, dict):
+                            backpressure_by_reason = {}
+                            proactive_runner_state["backpressure_by_reason"] = backpressure_by_reason
+                        backpressure_by_reason[pressure_reason] = int(backpressure_by_reason.get(pressure_reason, 0) or 0) + 1
+                        proactive_runner_state["last_backpressure_reason"] = pressure_reason
                     elif status in {"ok", "disabled"}:
                         proactive_runner_state["success_count"] = int(proactive_runner_state.get("success_count", 0) or 0) + 1
                     else:
