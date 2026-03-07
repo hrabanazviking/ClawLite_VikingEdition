@@ -42,6 +42,9 @@ _GAP_PATTERN = re.compile(
     r"#\s*(TODO|FIXME|HACK|XXX|STUB|NOT IMPLEMENTED|raise NotImplementedError)",
     re.IGNORECASE,
 )
+_RAISE_NOT_IMPL = re.compile(r"^\s*raise\s+NotImplementedError", re.IGNORECASE)
+_STUB_BODY = re.compile(r"^\s*(pass|\.\.\.)\s*$")
+_DEF_LINE = re.compile(r"^\s*(async\s+)?def\s+\w+")
 _ROADMAP_UNCHECKED = re.compile(r"^\s*-\s*\[\s*\]\s+(.+)$")
 
 NotifyCallback = Callable[[str, dict[str, Any]], Awaitable[Any]]
@@ -104,14 +107,69 @@ class SourceScanner:
             except OSError:
                 continue
             rel = str(py_file.relative_to(self.root))
-            for idx, line in enumerate(lines, 1):
-                m = _GAP_PATTERN.search(line)
-                if m:
-                    kind = m.group(1).lower().replace(" ", "_")
-                    gaps.append(Gap(file=rel, line=idx, kind=kind, text=line.strip()))
-                    if len(gaps) >= max_gaps:
-                        return gaps
+            gaps.extend(self._scan_file_lines(rel, lines, remaining=max_gaps - len(gaps)))
+            if len(gaps) >= max_gaps:
+                return gaps[:max_gaps]
         return gaps
+
+    def _scan_file_lines(self, rel: str, lines: list[str], *, remaining: int) -> list[Gap]:
+        found: list[Gap] = []
+        last_def_idx: int | None = None
+
+        for idx, line in enumerate(lines, 1):
+            if remaining <= 0:
+                break
+
+            # Explicit gap markers
+            m = _GAP_PATTERN.search(line)
+            if m:
+                kind = m.group(1).lower().replace(" ", "_")
+                found.append(Gap(file=rel, line=idx, kind=kind, text=line.strip()))
+                remaining -= 1
+                continue
+
+            # Track last def/async def header
+            if _DEF_LINE.match(line):
+                last_def_idx = idx
+                continue
+
+            # raise NotImplementedError as the meaningful body line
+            if _RAISE_NOT_IMPL.match(line) and last_def_idx is not None:
+                found.append(Gap(
+                    file=rel, line=idx,
+                    kind="not_implemented",
+                    text=f"raise NotImplementedError (def at line {last_def_idx})",
+                ))
+                remaining -= 1
+                last_def_idx = None
+                continue
+
+            # pass / ... as the only body (stub detection)
+            if _STUB_BODY.match(line) and last_def_idx is not None:
+                # Only flag if this is the first non-comment, non-docstring body line
+                # after the def header.
+                body_between = lines[last_def_idx:idx - 1]
+                meaningful = [
+                    bl for bl in body_between
+                    if bl.strip() and not bl.strip().startswith("#")
+                    and not (bl.strip().startswith('"""') or bl.strip().startswith("'''"))
+                    and not bl.strip() == '"""' and not bl.strip() == "'''"
+                ]
+                if not meaningful:
+                    found.append(Gap(
+                        file=rel, line=idx,
+                        kind="stub_pass",
+                        text=f"stub body (pass/...) for def at line {last_def_idx}",
+                    ))
+                    remaining -= 1
+                last_def_idx = None
+                continue
+
+            # Reset def tracker on non-trivial lines
+            if line.strip() and not line.strip().startswith("#"):
+                last_def_idx = None
+
+        return found
 
     def scan_roadmap(self, roadmap_path: Path, *, max_items: int = 10) -> list[Gap]:
         gaps: list[Gap] = []
@@ -127,6 +185,37 @@ class SourceScanner:
                 gaps.append(Gap(file=str(roadmap_path.name), line=idx, kind="roadmap", text=m.group(1).strip()))
                 if len(gaps) >= max_items:
                     break
+        return gaps
+
+    def scan_reference_gaps(self, catalog_path: Path, *, max_items: int = 10) -> list[Gap]:
+        """Load gaps from a JSON reference catalog (OpenClaw/nanobot feature parity).
+
+        Expected format:
+        [{"feature": "...", "status": "missing|partial", "notes": "..."}]
+        """
+        if not catalog_path.exists():
+            return []
+        try:
+            raw = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        gaps: list[Gap] = []
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "") or "").strip().lower()
+            if status not in {"missing", "partial"}:
+                continue
+            feature = str(item.get("feature", "") or "").strip()
+            notes = str(item.get("notes", "") or "").strip()
+            if not feature:
+                continue
+            text = feature if not notes else f"{feature} — {notes}"
+            gaps.append(Gap(file=str(catalog_path.name), line=idx + 1, kind="reference_gap", text=text))
+            if len(gaps) >= max_items:
+                break
         return gaps
 
     def read_context(self, gap: Gap, *, context_lines: int = 30) -> str:
@@ -477,12 +566,14 @@ class SelfEvolutionEngine:
             code_gaps = self._scanner.scan(max_gaps=20)
             roadmap_path = self.project_root / "ROADMAP.md"
             roadmap_gaps = self._scanner.scan_roadmap(roadmap_path, max_items=5)
-            all_gaps = code_gaps + roadmap_gaps
+            catalog_path = self.project_root / "memory" / "gap-catalog.json"
+            ref_gaps = self._scanner.scan_reference_gaps(catalog_path, max_items=5)
+            all_gaps = code_gaps + roadmap_gaps + ref_gaps
             record.gaps_found = len(all_gaps)
 
             bind_event("self_evolution").info(
-                "run={} gaps_found={} code={} roadmap={}",
-                run_id, len(all_gaps), len(code_gaps), len(roadmap_gaps),
+                "run={} gaps_found={} code={} roadmap={} ref={}",
+                run_id, len(all_gaps), len(code_gaps), len(roadmap_gaps), len(ref_gaps),
             )
 
             if not all_gaps:
@@ -501,10 +592,14 @@ class SelfEvolutionEngine:
                 self.log.append(record)
                 return self.status()
 
-            # 2. Pick the first actionable code gap (roadmap items are informational only)
+            # 2. Pick the first actionable code gap (roadmap and reference gaps are informational only)
             target_gap = code_gaps[0] if code_gaps else all_gaps[0]
-            if target_gap.kind == "roadmap":
-                # Log roadmap gap as notice, nothing to patch
+            if target_gap.kind in ("roadmap", "reference_gap"):
+                # Log non-patchable gap as notice, nothing to patch
+                bind_event("self_evolution").info(
+                    "run={} informational_gap kind={} text={}",
+                    run_id, target_gap.kind, target_gap.text[:120],
+                )
                 record.outcome = "no_gaps"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "no_gaps"
@@ -633,12 +728,33 @@ class SelfEvolutionEngine:
         return self.status()
 
     async def _restore_backups(self, backups: dict[str, str]) -> None:
+        restored: list[str] = []
         for rel, content in backups.items():
             path = self.source_root / rel
             try:
                 await asyncio.to_thread(path.write_text, content, "utf-8")
+                restored.append(str(path))
             except Exception as exc:
                 bind_event("self_evolution").error("restore backup failed file={} error={}", rel, exc)
+
+        # Also revert the git index so the restored files are not staged
+        if restored:
+            try:
+                import subprocess
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "checkout", "HEAD", "--"] + restored,
+                    cwd=str(self.project_root),
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    # git checkout failed (e.g. files were never committed) — files already restored via write_text above
+                    bind_event("self_evolution").debug(
+                        "git checkout rollback skipped (untracked files): {}", result.stderr.strip()
+                    )
+            except Exception as exc:
+                bind_event("self_evolution").warning("git rollback index failed: {}", exc)
 
     def status(self) -> dict[str, Any]:
         cooldown_remaining = max(

@@ -1,0 +1,107 @@
+{
+  "version": "1",
+  "description": "Reference gap catalog for ClawLite vs OpenClaw/nanobot/memU parity tracking",
+  "sources": ["openclaw", "nanobot", "memU"],
+  "gaps": [
+    {
+      "id": "ref-001",
+      "source": "openclaw",
+      "category": "memory",
+      "priority": "high",
+      "title": "Episodic memory with vector embeddings",
+      "description": "OpenClaw stores conversation episodes as vector embeddings for semantic retrieval. ClawLite uses keyword-count matching in session_memory.py instead of real embeddings.",
+      "reference_file": "clawlite/runtime/session_memory.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-002",
+      "source": "openclaw",
+      "category": "memory",
+      "priority": "high",
+      "title": "Memory consolidation and decay",
+      "description": "OpenClaw runs a nightly consolidation pass that merges short-term episodes into long-term summaries and applies exponential decay to stale entries. ClawLite has no consolidation loop.",
+      "reference_file": "clawlite/runtime/session_memory.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-003",
+      "source": "openclaw",
+      "category": "memory",
+      "priority": "medium",
+      "title": "Shared working memory between subagents",
+      "description": "OpenClaw exposes a shared in-process key/value working memory bus that subagents read and write during parallel runs. ClawLite subagents have no shared state except the SQLite DB.",
+      "reference_file": "clawlite/core/subagent.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-004",
+      "source": "openclaw",
+      "category": "channels",
+      "priority": "medium",
+      "title": "Telegram voice note transcription (STT)",
+      "description": "OpenClaw downloads voice notes and calls a Whisper/Groq STT endpoint before passing text to the agent. ClawLite receives the voice note file_id but does not transcribe it.",
+      "reference_file": "clawlite/channels/telegram.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-005",
+      "source": "openclaw",
+      "category": "channels",
+      "priority": "low",
+      "title": "Telegram inline keyboard action routing",
+      "description": "OpenClaw routes callback_query events from inline keyboards to registered action handlers. ClawLite ignores callback_query update types.",
+      "reference_file": "clawlite/channels/telegram.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-006",
+      "source": "nanobot",
+      "category": "runtime",
+      "priority": "high",
+      "title": "Provider health check with automatic failover",
+      "description": "nanobot probes each configured provider on startup and falls back to next in priority list when primary is unavailable. ClawLite tries once and raises an error.",
+      "reference_file": "clawlite/runtime/offline.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-007",
+      "source": "nanobot",
+      "category": "agents",
+      "priority": "medium",
+      "title": "Subagent task replay from persisted run log",
+      "description": "nanobot can replay a failed subagent run from its persisted message log without re-querying the LLM for already-completed steps. ClawLite has no replay mechanism.",
+      "reference_file": "clawlite/core/subagent.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-008",
+      "source": "openclaw",
+      "category": "gateway",
+      "priority": "medium",
+      "title": "WebSocket per-session auth token rotation",
+      "description": "OpenClaw rotates the dashboard WebSocket auth token on each reconnect and invalidates old tokens. ClawLite uses a single static token from config.",
+      "reference_file": "clawlite/gateway/server.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-009",
+      "source": "memU",
+      "category": "memory",
+      "priority": "medium",
+      "title": "Semantic memory graph with entity linking",
+      "description": "memU builds a graph of named entities extracted from conversations and links related entities across sessions. ClawLite has no entity extraction or graph memory.",
+      "reference_file": "clawlite/runtime/session_memory.py",
+      "status": "open"
+    },
+    {
+      "id": "ref-010",
+      "source": "openclaw",
+      "category": "evolution",
+      "priority": "low",
+      "title": "Self-evolution gap catalog auto-update",
+      "description": "OpenClaw's evolution engine rewrites gap-catalog.json after each successful fix to mark resolved items and add newly discovered ones. ClawLite gap-catalog.json is static.",
+      "reference_file": "clawlite/runtime/self_evolution.py",
+      "status": "open"
+    }
+  ]
+}
