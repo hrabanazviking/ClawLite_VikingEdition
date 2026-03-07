@@ -180,16 +180,19 @@ def test_load_config_web_tool_policy(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "tools": {
-                    "web": {
-                        "proxy": "http://127.0.0.1:7890",
-                        "timeout": 22,
-                        "searchTimeout": 9,
-                        "maxRedirects": 3,
-                        "maxChars": 4000,
-                        "blockPrivateAddresses": True,
-                        "allowlist": ["example.com", "*.docs.example.com"],
-                        "denylist": ["127.0.0.0/8"],
+                    "tools": {
+                        "web": {
+                            "proxy": "http://127.0.0.1:7890",
+                            "timeout": 22,
+                            "searchTimeout": 9,
+                            "braveApiKey": "brv-123",
+                            "braveBaseUrl": "https://brave.example/search",
+                            "searxngBaseUrl": "https://searx.example",
+                            "maxRedirects": 3,
+                            "maxChars": 4000,
+                            "blockPrivateAddresses": True,
+                            "allowlist": ["example.com", "*.docs.example.com"],
+                            "denylist": ["127.0.0.0/8"],
                     }
                 }
             }
@@ -201,6 +204,9 @@ def test_load_config_web_tool_policy(tmp_path: Path) -> None:
     assert cfg.tools.web.proxy == "http://127.0.0.1:7890"
     assert cfg.tools.web.timeout == 22
     assert cfg.tools.web.search_timeout == 9
+    assert cfg.tools.web.brave_api_key == "brv-123"
+    assert cfg.tools.web.brave_base_url == "https://brave.example/search"
+    assert cfg.tools.web.searxng_base_url == "https://searx.example"
     assert cfg.tools.web.max_redirects == 3
     assert cfg.tools.web.max_chars == 4000
     assert cfg.tools.web.block_private_addresses is True

@@ -40,7 +40,7 @@ class _FakeResponse:
 
 class _FakeClient:
     def __init__(self, responses: list[_FakeResponse], **_: Any) -> None:
-        self._responses = list(responses)
+        self._responses = responses
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -48,11 +48,12 @@ class _FakeClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
 
-    async def get(self, url: str, headers: dict[str, str] | None = None) -> _FakeResponse:
+    async def get(self, url: str, headers: dict[str, str] | None = None, params: dict[str, Any] | None = None) -> _FakeResponse:
         if not self._responses:
             raise RuntimeError("no fake response")
         response = self._responses.pop(0)
-        response.url = url
+        del headers
+        response.url = url if params is None else f"{url}?{json.dumps(params, sort_keys=True)}"
         return response
 
 
@@ -202,6 +203,75 @@ def test_web_search_tool_returns_structured_payload() -> None:
             assert payload["ok"] is True
             assert payload["result"]["count"] == 2
             assert payload["result"]["items"][0]["url"] == "https://a.test"
+
+    asyncio.run(_scenario())
+
+
+def test_web_search_tool_falls_back_to_brave_when_ddg_is_unavailable() -> None:
+    async def _scenario() -> None:
+        responses = [
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "web": {
+                            "results": [
+                                {"title": "Brave A", "url": "https://a.test", "description": "aa"},
+                                {"title": "Brave B", "url": "https://b.test", "description": "bb"},
+                            ]
+                        }
+                    }
+                ),
+                headers={"content-type": "application/json"},
+            )
+        ]
+        with patch.dict("sys.modules", {"duckduckgo_search": None}), patch(
+            "httpx.AsyncClient",
+            side_effect=lambda **kwargs: _FakeClient(responses, **kwargs),
+        ):
+            out = await WebSearchTool(brave_api_key="brv-key").run(
+                {"query": "clawlite", "limit": 2},
+                ToolContext(session_id="s"),
+            )
+            payload = json.loads(out)
+            assert payload["ok"] is True
+            assert payload["result"]["backend"] == "brave"
+            assert payload["result"]["items"][0]["url"] == "https://a.test"
+
+    asyncio.run(_scenario())
+
+
+def test_web_search_tool_falls_back_to_searxng_after_ddg_and_brave_errors() -> None:
+    async def _scenario() -> None:
+        responses = [
+            _FakeResponse("boom", status_code=500, headers={"content-type": "application/json"}),
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "results": [
+                            {"title": "SX", "url": "https://sx.test", "content": "snippet"},
+                        ]
+                    }
+                ),
+                headers={"content-type": "application/json"},
+            ),
+        ]
+        with patch.dict("sys.modules", {"duckduckgo_search": None}), patch(
+            "httpx.AsyncClient",
+            side_effect=lambda **kwargs: _FakeClient(responses, **kwargs),
+        ):
+            out = await WebSearchTool(
+                brave_api_key="brv-key",
+                searxng_base_url="https://searx.example",
+            ).run(
+                {"query": "clawlite", "limit": 2},
+                ToolContext(session_id="s"),
+            )
+            payload = json.loads(out)
+            assert payload["ok"] is True
+            assert payload["result"]["backend"] == "searxng"
+            assert payload["result"]["backends_attempted"][0]["backend"] == "ddg"
+            assert payload["result"]["backends_attempted"][1]["backend"] == "brave"
+            assert payload["result"]["items"][0]["url"] == "https://sx.test"
 
     asyncio.run(_scenario())
 

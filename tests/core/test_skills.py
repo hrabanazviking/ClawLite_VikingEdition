@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -158,6 +159,53 @@ def test_skills_loader_debounces_skill_file_refreshes(tmp_path: Path) -> None:
     assert refreshed.version != first_version
 
 
+def test_skills_loader_watcher_refreshes_pending_skill_changes(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        skill_dir = tmp_path / "alpha"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\nname: alpha\ndescription: first\n---\n\n# Alpha\n",
+            encoding="utf-8",
+        )
+
+        loader = SkillsLoader(
+            builtin_root=tmp_path,
+            state_path=tmp_path / "skills-state.json",
+            watch_debounce_ms=20,
+            watch_interval_s=0.01,
+        )
+        first = loader.get("alpha")
+        assert first is not None
+        first_version = first.version
+
+        await loader.start_watcher()
+        try:
+            skill_path.write_text(
+                "---\nname: alpha\ndescription: second\n---\n\n# Alpha 2\n",
+                encoding="utf-8",
+            )
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                updated = loader.get("alpha")
+                assert updated is not None
+                if updated.version != first_version:
+                    break
+            else:
+                raise AssertionError("watcher did not refresh changed skill")
+
+            watcher = loader.watcher_status()
+            assert watcher["running"] is True
+            assert int(watcher["ticks"]) >= 1
+            diagnostics = loader.diagnostics_report()
+            assert diagnostics["watcher"]["running"] is True
+        finally:
+            stopped = await loader.stop_watcher()
+            assert stopped["running"] is False
+
+    asyncio.run(_scenario())
+
+
 def test_skills_loader_marks_invalid_execution_contract(tmp_path: Path) -> None:
     skill_dir = tmp_path / "invalid-contract"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -302,10 +350,12 @@ def test_skills_loader_diagnostics_report_aggregates_deterministically(tmp_path:
         "summary",
         "execution_kinds",
         "sources",
+        "watcher",
         "missing_requirements",
         "contract_issues",
         "skills",
     }
+    assert report["watcher"]["enabled"] is True
 
     summary = report["summary"]
     assert summary == {

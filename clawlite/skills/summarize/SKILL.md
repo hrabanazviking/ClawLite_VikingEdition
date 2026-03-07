@@ -1,10 +1,10 @@
 ---
 name: summarize
-description: Summarize URLs, local files, and transcripts with the summarize CLI when available.
+description: Summarize URLs, local files, and transcripts with summarize CLI when available, with provider fallback.
 always: false
 homepage: https://summarize.sh
-metadata: {"clawlite":{"emoji":"🧾","requires":{"bins":["summarize"]}}}
-command: summarize
+metadata: {"clawlite":{"emoji":"🧾"}}
+script: summarize
 ---
 
 # Summarize

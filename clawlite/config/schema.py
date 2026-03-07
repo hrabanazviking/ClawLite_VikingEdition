@@ -857,6 +857,9 @@ class WebToolConfig:
     max_redirects: int = 5
     max_chars: int = 12000
     block_private_addresses: bool = True
+    brave_api_key: str = ""
+    brave_base_url: str = "https://api.search.brave.com/res/v1/web/search"
+    searxng_base_url: str = ""
     allowlist: list[str] = field(default_factory=list)
     denylist: list[str] = field(default_factory=list)
 
@@ -876,6 +879,12 @@ class WebToolConfig:
             max_redirects=max(0, int(data.get("maxRedirects", data.get("max_redirects", 5)) or 5)),
             max_chars=max(128, int(data.get("maxChars", data.get("max_chars", 12000)) or 12000)),
             block_private_addresses=bool(data.get("blockPrivateAddresses", data.get("block_private_addresses", True))),
+            brave_api_key=str(data.get("braveApiKey", data.get("brave_api_key", "")) or ""),
+            brave_base_url=str(
+                data.get("braveBaseUrl", data.get("brave_base_url", "https://api.search.brave.com/res/v1/web/search"))
+                or "https://api.search.brave.com/res/v1/web/search"
+            ),
+            searxng_base_url=str(data.get("searxngBaseUrl", data.get("searxng_base_url", "")) or ""),
             allowlist=cls._parse_list(data.get("allowlist", [])),
             denylist=cls._parse_list(data.get("denylist", [])),
         )

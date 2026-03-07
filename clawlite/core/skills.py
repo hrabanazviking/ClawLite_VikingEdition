@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -350,6 +351,7 @@ class SkillsLoader:
         *,
         state_path: str | Path | None = None,
         watch_debounce_ms: int = 250,
+        watch_interval_s: float | None = None,
         now_monotonic=None,
     ) -> None:
         default_builtin = Path(__file__).resolve().parents[1] / "skills"
@@ -364,12 +366,28 @@ class SkillsLoader:
             else (Path.home() / ".clawlite" / "state" / "skills-state.json")
         )
         self.watch_debounce_ms = max(0, int(watch_debounce_ms or 0))
+        default_watch_interval = max(0.1, float(self.watch_debounce_ms) / 1000.0) if self.watch_debounce_ms else 0.5
+        self.watch_interval_s = max(0.05, float(watch_interval_s or default_watch_interval))
         self._now_monotonic = now_monotonic or time.monotonic
         self._discovery_signature: tuple[tuple[str, bool, int], ...] | None = None
         self._discovered_specs: list[SkillSpec] | None = None
         self._name_index: dict[str, SkillSpec] | None = None
         self._last_refresh_monotonic = 0.0
         self._pending_signature: tuple[tuple[str, bool, int], ...] | None = None
+        self._watcher_task: asyncio.Task[None] | None = None
+        self._watcher_stop_event: asyncio.Event | None = None
+        self._watcher_state: dict[str, object] = {
+            "enabled": True,
+            "running": False,
+            "interval_s": self.watch_interval_s,
+            "ticks": 0,
+            "last_error": "",
+            "last_result": "",
+            "last_tick_monotonic": 0.0,
+            "last_refresh_monotonic": 0.0,
+            "debounced": False,
+            "pending": False,
+        }
 
     @staticmethod
     def _default_state_payload() -> dict[str, object]:
@@ -517,6 +535,99 @@ class SkillsLoader:
             return
         self._rebuild_discovery_cache(signature=signature)
 
+    def invalidate(self) -> None:
+        self._pending_signature = self._roots_signature()
+
+    def _watcher_done_callback(self, task: asyncio.Task[None]) -> None:
+        self._watcher_state["running"] = False
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            self._watcher_state["last_result"] = "cancelled"
+        except Exception as exc:
+            self._watcher_state["last_result"] = "failed"
+            self._watcher_state["last_error"] = str(exc)
+        else:
+            self._watcher_state["last_result"] = "stopped"
+
+    async def start_watcher(self) -> dict[str, object]:
+        task = self._watcher_task
+        if task is not None and not task.done():
+            self._watcher_state["running"] = True
+            return self.watcher_status()
+        if task is not None and task.done():
+            self._watcher_done_callback(task)
+
+        stop_event = asyncio.Event()
+        self._watcher_stop_event = stop_event
+        self._watcher_state["running"] = True
+        self._watcher_state["interval_s"] = self.watch_interval_s
+        self._watcher_state["last_error"] = ""
+        self._watcher_state["last_result"] = "starting"
+
+        async def _loop() -> None:
+            while not stop_event.is_set():
+                report = self.refresh(force=False)
+                self._watcher_state["ticks"] = int(self._watcher_state.get("ticks", 0) or 0) + 1
+                self._watcher_state["last_tick_monotonic"] = float(self._now_monotonic())
+                self._watcher_state["last_refresh_monotonic"] = float(report.get("refreshed_at_monotonic", 0.0) or 0.0)
+                self._watcher_state["debounced"] = bool(report.get("debounced", False))
+                self._watcher_state["pending"] = bool(report.get("pending", False))
+                self._watcher_state["last_result"] = "refreshed" if report.get("refreshed", False) else "idle"
+                await asyncio.sleep(self.watch_interval_s)
+
+        self._watcher_task = asyncio.create_task(_loop())
+        self._watcher_task.add_done_callback(self._watcher_done_callback)
+        return self.watcher_status()
+
+    async def stop_watcher(self) -> dict[str, object]:
+        stop_event = self._watcher_stop_event
+        task = self._watcher_task
+        if stop_event is not None:
+            stop_event.set()
+        self._watcher_state["running"] = False
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self._watcher_state["last_error"] = str(exc)
+                self._watcher_state["last_result"] = "failed"
+        self._watcher_task = None
+        self._watcher_stop_event = None
+        if not str(self._watcher_state.get("last_result", "") or "").strip():
+            self._watcher_state["last_result"] = "stopped"
+        return self.watcher_status()
+
+    def watcher_status(self) -> dict[str, object]:
+        task = self._watcher_task
+        task_state = "stopped"
+        if task is not None:
+            if not task.done():
+                task_state = "running"
+            elif task.cancelled():
+                task_state = "cancelled"
+            elif task.exception() is not None:
+                task_state = "failed"
+            else:
+                task_state = "done"
+        return {
+            "enabled": True,
+            "running": bool(task is not None and not task.done() and self._watcher_state.get("running", False)),
+            "task_state": task_state,
+            "interval_s": self.watch_interval_s,
+            "watch_debounce_ms": self.watch_debounce_ms,
+            "ticks": int(self._watcher_state.get("ticks", 0) or 0),
+            "last_error": str(self._watcher_state.get("last_error", "") or ""),
+            "last_result": str(self._watcher_state.get("last_result", "") or ""),
+            "last_tick_monotonic": float(self._watcher_state.get("last_tick_monotonic", 0.0) or 0.0),
+            "last_refresh_monotonic": float(self._watcher_state.get("last_refresh_monotonic", 0.0) or 0.0),
+            "pending": bool(self._watcher_state.get("pending", False)),
+            "debounced": bool(self._watcher_state.get("debounced", False)),
+        }
+
     @staticmethod
     def _source_label(root: Path, index: int) -> str:
         if index == 0:
@@ -590,7 +701,7 @@ class SkillsLoader:
         before = self._discovery_signature
         before_refresh_at = self._last_refresh_monotonic
         self._ensure_discovery_cache(force=force)
-        return {
+        report = {
             "refreshed": bool(force or before != self._discovery_signature),
             "debounced": bool(not force and self._pending_signature is not None),
             "pending": self._pending_signature is not None,
@@ -598,6 +709,10 @@ class SkillsLoader:
             "refreshed_at_monotonic": self._last_refresh_monotonic,
             "previous_refresh_at_monotonic": before_refresh_at,
         }
+        self._watcher_state["last_refresh_monotonic"] = float(report["refreshed_at_monotonic"] or 0.0)
+        self._watcher_state["debounced"] = bool(report["debounced"])
+        self._watcher_state["pending"] = bool(report["pending"])
+        return report
 
     def set_enabled(self, name: str, enabled: bool) -> SkillSpec | None:
         spec = self.get(name)
@@ -750,6 +865,7 @@ class SkillsLoader:
             },
             "execution_kinds": execution_kinds,
             "sources": source_counts,
+            "watcher": self.watcher_status(),
             "missing_requirements": missing_groups,
             "contract_issues": {
                 "total": contract_total,

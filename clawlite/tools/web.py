@@ -175,9 +175,20 @@ class WebSearchTool(Tool):
     name = "web_search"
     description = "Search the web and return snippets."
 
-    def __init__(self, *, proxy: str = "", timeout: float = 10) -> None:
+    def __init__(
+        self,
+        *,
+        proxy: str = "",
+        timeout: float = 10,
+        brave_api_key: str = "",
+        brave_base_url: str = "https://api.search.brave.com/res/v1/web/search",
+        searxng_base_url: str = "",
+    ) -> None:
         self.proxy = proxy.strip()
         self.timeout = max(1.0, float(timeout))
+        self.brave_api_key = str(brave_api_key or "").strip()
+        self.brave_base_url = str(brave_base_url or "https://api.search.brave.com/res/v1/web/search").strip()
+        self.searxng_base_url = str(searxng_base_url or "").strip().rstrip("/")
 
     def args_schema(self) -> dict:
         return {
@@ -197,33 +208,82 @@ class WebSearchTool(Tool):
             return _error_payload(self.name, "invalid_arguments", "query is required")
         limit = max(1, min(10, int(arguments.get("limit", 5) or 5)))
         timeout = max(1.0, float(arguments.get("timeout", self.timeout) or self.timeout))
-        try:
-            from duckduckgo_search import DDGS
-        except Exception as exc:  # pragma: no cover
-            return _error_payload(self.name, "dependency_error", str(exc))
+        attempts: list[dict[str, Any]] = []
+        backends: list[tuple[str, Any]] = [("ddg", self._search_ddg)]
+        if self.brave_api_key:
+            backends.append(("brave", self._search_brave))
+        if self.searxng_base_url:
+            backends.append(("searxng", self._search_searxng))
 
-        try:
-            rows = await asyncio.to_thread(
-                _search_ddgs_sync,
-                DDGS,
-                query,
-                limit,
-                self.proxy,
-                timeout,
-            )
+        for backend_name, backend in backends:
+            try:
+                rows = await backend(query=query, limit=limit, timeout=timeout)
+            except httpx.ProxyError as exc:
+                attempts.append({"backend": backend_name, "status": "error", "error": str(exc)})
+                continue
+            except Exception as exc:
+                attempts.append({"backend": backend_name, "status": "error", "error": str(exc)})
+                continue
+            if not rows:
+                attempts.append({"backend": backend_name, "status": "empty"})
+                continue
+            attempts.append({"backend": backend_name, "status": "ok", "count": len(rows)})
             text_lines = [f"- {item['title']}\n  {item['url']}\n  {item['snippet']}" for item in rows]
             payload = {
                 "query": query,
+                "backend": backend_name,
+                "backends_attempted": attempts,
                 "count": len(rows),
                 "items": rows,
                 "text": "\n".join(text_lines),
             }
-            log.info("search query={} results={}", query, len(rows))
+            log.info("search query={} backend={} results={}", query, backend_name, len(rows))
             return _ok_payload(self.name, payload)
-        except httpx.ProxyError as exc:
-            return _error_payload(self.name, "proxy_error", str(exc), query=query)
-        except Exception as exc:
-            return _error_payload(self.name, "search_error", str(exc), query=query)
+
+        error_code = "search_error"
+        if attempts and all(item.get("error") for item in attempts):
+            if all("proxy" in str(item.get("error", "")).lower() for item in attempts):
+                error_code = "proxy_error"
+        detail = "; ".join(
+            f"{item.get('backend')}:{item.get('status')}:{item.get('error', '')}".rstrip(":")
+            for item in attempts
+        )
+        return _error_payload(self.name, error_code, detail or "all search backends failed", query=query, attempts=attempts)
+
+    async def _search_ddg(self, *, query: str, limit: int, timeout: float) -> list[dict[str, str]]:
+        try:
+            from duckduckgo_search import DDGS
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(str(exc)) from exc
+        return await asyncio.to_thread(
+            _search_ddgs_sync,
+            DDGS,
+            query,
+            limit,
+            self.proxy,
+            timeout,
+        )
+
+    async def _search_brave(self, *, query: str, limit: int, timeout: float) -> list[dict[str, str]]:
+        headers = {
+            "Accept": "application/json",
+            "X-Subscription-Token": self.brave_api_key,
+        }
+        params = {"q": query, "count": limit}
+        async with _build_client(timeout=timeout, proxy=self.proxy) as client:
+            response = await client.get(self.brave_base_url, params=params, headers=headers)
+            response.raise_for_status()
+        payload = response.json()
+        return _normalize_brave_results(payload, limit=limit)
+
+    async def _search_searxng(self, *, query: str, limit: int, timeout: float) -> list[dict[str, str]]:
+        endpoint = f"{self.searxng_base_url}/search"
+        params = {"q": query, "format": "json"}
+        async with _build_client(timeout=timeout, proxy=self.proxy) as client:
+            response = await client.get(endpoint, params=params)
+            response.raise_for_status()
+        payload = response.json()
+        return _normalize_searxng_results(payload, limit=limit)
 
 
 def _ok_payload(tool: str, result: dict[str, Any]) -> str:
@@ -453,3 +513,39 @@ def _search_ddgs_sync(
             body = str(item.get("body", "")).strip()
             rows.append({"title": title, "url": href, "snippet": body})
     return rows
+
+
+def _normalize_brave_results(payload: Any, *, limit: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    results = payload.get("web", {}).get("results", []) if isinstance(payload, dict) else []
+    if not isinstance(results, list):
+        return rows
+    for item in results[:limit]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "snippet": str(item.get("description", item.get("snippet", "")) or "").strip(),
+            }
+        )
+    return [row for row in rows if row["url"]]
+
+
+def _normalize_searxng_results(payload: Any, *, limit: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    if not isinstance(results, list):
+        return rows
+    for item in results[:limit]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "snippet": str(item.get("content", item.get("snippet", "")) or "").strip(),
+            }
+        )
+    return [row for row in rows if row["url"]]

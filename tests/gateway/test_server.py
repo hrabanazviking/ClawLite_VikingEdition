@@ -1030,6 +1030,60 @@ def test_gateway_diagnostics_exposes_memory_monitor_telemetry_when_enabled(tmp_p
     app.state.runtime.autonomy_wake.submit.assert_awaited()
 
 
+def test_gateway_skills_watcher_tracks_hot_reload_and_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    workspace_skill_dir = tmp_path / ".clawlite" / "workspace" / "skills" / "dynamic"
+    workspace_skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = workspace_skill_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\nname: dynamic\ndescription: first\nscript: web_search\n---\n",
+        encoding="utf-8",
+    )
+
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}, "diagnostics": {"enabled": True, "require_auth": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.skills_loader.watch_interval_s = 0.01
+    app.state.runtime.skills_loader.watch_debounce_ms = 20
+
+    with TestClient(app) as client:
+        first = client.get("/v1/diagnostics").json()
+        first_version = next(
+            item["version"]
+            for item in first["engine"]["skills"]["skills"]
+            if item["name"] == "dynamic"
+        )
+        assert first["control_plane"]["components"]["skills_watcher"]["running"] is True
+
+        skill_path.write_text(
+            "---\nname: dynamic\ndescription: second\nscript: web_search\n---\n",
+            encoding="utf-8",
+        )
+
+        refreshed_version = first_version
+        for _ in range(40):
+            time.sleep(0.02)
+            payload = client.get("/v1/diagnostics").json()
+            refreshed_version = next(
+                item["version"]
+                for item in payload["engine"]["skills"]["skills"]
+                if item["name"] == "dynamic"
+            )
+            if refreshed_version != first_version:
+                assert payload["engine"]["skills"]["watcher"]["running"] is True
+                assert int(payload["engine"]["skills"]["watcher"]["ticks"]) >= 1
+                break
+        else:
+            raise AssertionError("skills watcher did not reload updated skill")
+
+        assert refreshed_version != first_version
+
+
 def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

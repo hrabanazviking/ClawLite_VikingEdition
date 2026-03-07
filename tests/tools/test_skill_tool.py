@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from unittest.mock import patch
 
+from clawlite.providers.base import LLMResult
 from clawlite.config.schema import ToolSafetyPolicyConfig
 from clawlite.core.skills import SkillsLoader
 from clawlite.tools.base import Tool, ToolContext
@@ -30,6 +33,59 @@ class FakeExecTool(Tool):
 
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
         return f"exec:{arguments.get('command', '')}:{ctx.channel}:{ctx.user_id}"
+
+
+class FakeExecStatusTool(Tool):
+    name = "exec"
+    description = "fake exec with explicit status"
+
+    def __init__(self, responses: dict[str, str]) -> None:
+        self.responses = responses
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"command": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        command = str(arguments.get("command", "") or "")
+        return self.responses.get(command, f"exit=0\nstdout={command}\nstderr=")
+
+
+class FakeWebFetchPayloadTool(Tool):
+    name = "web_fetch"
+    description = "fake web fetch"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"url": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        url = str(arguments.get("url", "") or "")
+        return json.dumps(
+            {
+                "ok": True,
+                "tool": "web_fetch",
+                "result": {"text": f"Fetched content from {url}"},
+            }
+        )
+
+
+class FakeReadTool(Tool):
+    name = "read"
+    description = "fake read"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return f"Local content from {arguments.get('path', '')}"
+
+
+class FakeProvider:
+    async def complete(self, *, messages, tools, max_tokens=None, temperature=None, reasoning_effort=None):
+        del tools, max_tokens, temperature, reasoning_effort
+        return LLMResult(model="fake/summary", text=f"summary::{messages[-1]['content'].splitlines()[1]}")
 
 
 class FakeMemory:
@@ -381,5 +437,123 @@ def test_run_skill_blocks_execution_when_memory_policy_errors(tmp_path: Path) ->
             ToolContext(session_id="s10"),
         )
         assert out == "skill_blocked:echo-skill:memory_policy:policy_exception:runtimeerror"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_precheck_blocks_when_auth_is_missing(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github\ncommand: gh issue",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=1\nstdout=\nstderr=not logged into any GitHub hosts",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "github", "args": ["list"]},
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        assert out == "skill_auth_required:github:gh:not logged into any GitHub hosts"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_summarize_falls_back_to_provider_for_urls(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "summarize",
+        "name: summarize\ndescription: summarize\nscript: summarize",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeWebFetchPayloadTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+        out = await tool.run(
+            {"name": "summarize", "input": "https://example.com"},
+            ToolContext(session_id="cli:summarize", channel="cli", user_id="42"),
+        )
+        assert out.startswith("summary::Source: https://example.com")
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_summarize_falls_back_to_provider_for_local_files(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "summarize",
+        "name: summarize\ndescription: summarize\nscript: summarize",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeReadTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+        out = await tool.run(
+            {"name": "summarize", "input": "/tmp/demo.txt"},
+            ToolContext(session_id="cli:summarize", channel="cli", user_id="42"),
+        )
+        assert out.startswith("summary::Source: /tmp/demo.txt")
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_weather_falls_back_to_open_meteo(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "weather",
+        "name: weather\ndescription: weather\nscript: weather",
+    )
+
+    class _Response:
+        def __init__(self, text: str, *, status_code: int = 200) -> None:
+            self.text = text
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"status={self.status_code}")
+
+        def json(self):
+            return json.loads(self.text)
+
+    class _Client:
+        def __init__(self, responses: list[_Response], **_: object) -> None:
+            self._responses = responses
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, params=None):
+            del url, params
+            if not self._responses:
+                raise RuntimeError("no response")
+            return self._responses.pop(0)
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        responses = [
+            _Response("wttr unavailable", status_code=503),
+            _Response(json.dumps({"results": [{"name": "Lisbon", "country": "Portugal", "latitude": 38.72, "longitude": -9.13}]})),
+            _Response(json.dumps({"current_weather": {"temperature": 19.5, "windspeed": 12.0, "weathercode": 2}})),
+        ]
+        with patch("httpx.AsyncClient", side_effect=lambda **kwargs: _Client(responses, **kwargs)):
+            out = await tool.run({"name": "weather", "location": "Lisbon"}, ToolContext(session_id="cli:weather"))
+            assert out == "Lisbon, Portugal: 19.5°C, partly cloudy, wind 12.0 km/h"
 
     asyncio.run(_scenario())

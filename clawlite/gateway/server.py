@@ -603,6 +603,7 @@ class RuntimeContainer:
     heartbeat: HeartbeatService
     autonomy_wake: AutonomyWakeCoordinator
     workspace: WorkspaceLoader
+    skills_loader: SkillsLoader
     memory_monitor: MemoryMonitor | None = None
     supervisor: RuntimeSupervisor | None = None
 
@@ -621,6 +622,7 @@ class GatewayLifecycleState:
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
                 "supervisor": {"enabled": True, "running": False, "last_error": ""},
+                "skills_watcher": {"enabled": True, "running": False, "last_error": ""},
                 "proactive_monitor": {"enabled": False, "running": False, "last_error": ""},
                 "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
@@ -953,7 +955,15 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
             block_private_addresses=config.tools.web.block_private_addresses,
         )
     )
-    tools.register(WebSearchTool(proxy=config.tools.web.proxy, timeout=config.tools.web.search_timeout))
+    tools.register(
+        WebSearchTool(
+            proxy=config.tools.web.proxy,
+            timeout=config.tools.web.search_timeout,
+            brave_api_key=config.tools.web.brave_api_key,
+            brave_base_url=config.tools.web.brave_base_url,
+            searxng_base_url=config.tools.web.searxng_base_url,
+        )
+    )
     tools.register(CronTool(_CronAPI(cron)))
     tools.register(MCPTool(config.tools.mcp))
     skills = SkillsLoader(state_path=Path(config.state_path) / "skills-state.json")
@@ -987,7 +997,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         memory_backend_name=str(config.agents.defaults.memory.backend or "sqlite"),
         memory_backend_url=str(config.agents.defaults.memory.pgvector_url or ""),
     )
-    tools.register(SkillTool(loader=skills, registry=tools, memory=memory))
+    tools.register(SkillTool(loader=skills, registry=tools, memory=memory, provider=provider))
     memory_monitor = (
         MemoryMonitor(
             memory,
@@ -1071,6 +1081,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         heartbeat=heartbeat,
         autonomy_wake=autonomy_wake,
         workspace=workspace,
+        skills_loader=skills,
         memory_monitor=memory_monitor,
     )
 
@@ -1389,6 +1400,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     started_monotonic = time.monotonic()
     lifecycle.components["heartbeat"]["enabled"] = bool(cfg.gateway.heartbeat.enabled)
     lifecycle.components["supervisor"]["enabled"] = bool(cfg.gateway.supervisor.enabled)
+    lifecycle.components["skills_watcher"]["enabled"] = True
     lifecycle.components["proactive_monitor"]["enabled"] = bool(runtime.memory_monitor is not None)
     lifecycle.components["memory_quality_tuning"]["enabled"] = bool(cfg.gateway.autonomy.tuning_loop_enabled)
     proactive_interval_seconds = max(5, int(cfg.gateway.heartbeat.interval_s or 1800))
@@ -1533,6 +1545,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "autonomy_wake",
             running=bool(autonomy_wake_status.get("running", False)),
             error=str(autonomy_wake_status.get("last_error", "") or ""),
+        )
+
+        skills_watcher_status = runtime.skills_loader.watcher_status()
+        lifecycle.mark_component(
+            "skills_watcher",
+            running=bool(skills_watcher_status.get("running", False)),
+            error=str(skills_watcher_status.get("last_error", "") or ""),
         )
 
         proactive_state, proactive_error = _background_task_snapshot(
@@ -2210,6 +2229,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             worker_state = str(autonomy_wake_status.get("worker_state", "stopped") or "stopped")
             incidents.append(SupervisorIncident(component="autonomy_wake", reason=f"autonomy_wake_{worker_state}"))
 
+        skills_watcher_status = runtime.skills_loader.watcher_status()
+        if not skills_watcher_status.get("running", False):
+            watcher_state = str(skills_watcher_status.get("task_state", "stopped") or "stopped")
+            incidents.append(SupervisorIncident(component="skills_watcher", reason=f"skills_watcher_{watcher_state}"))
+
         if runtime.memory_monitor is not None:
             proactive_state, _proactive_error = _background_task_snapshot(
                 proactive_task,
@@ -2246,6 +2270,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             await runtime.autonomy_wake.start(_dispatch_autonomy_wake)
             _refresh_runtime_components()
             return bool(runtime.autonomy_wake.status().get("running", False))
+        if component == "skills_watcher":
+            await runtime.skills_loader.start_watcher()
+            _refresh_runtime_components()
+            return bool(runtime.skills_loader.watcher_status().get("running", False))
         if component == "proactive_monitor":
             await _start_proactive_monitor()
             _refresh_runtime_components()
@@ -2349,6 +2377,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _start_subsystems() -> None:
         started: list[tuple[str, Any]] = []
         steps: list[tuple[str, Any, Any, bool]] = [
+            ("skills_watcher", runtime.skills_loader.start_watcher, runtime.skills_loader.stop_watcher, True),
             ("channels", runtime.channels.start, runtime.channels.stop, True),
             ("autonomy_wake", runtime.autonomy_wake.start, runtime.autonomy_wake.stop, True),
             ("cron", runtime.cron.start, runtime.cron.stop, True),
@@ -2382,6 +2411,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":
                     await start_fn(_submit_cron_wake)
+                elif name == "skills_watcher":
+                    await start_fn()
                 elif name == "proactive_monitor":
                     await start_fn()
                 elif name == "memory_quality_tuning":
@@ -2432,6 +2463,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("cron", runtime.cron.stop, True),
             ("autonomy_wake", runtime.autonomy_wake.stop, True),
             ("channels", runtime.channels.stop, True),
+            ("skills_watcher", runtime.skills_loader.stop_watcher, True),
         ]
         for name, stop_fn, enabled in steps:
             if not enabled:
@@ -2604,6 +2636,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         engine_payload: dict[str, Any] = {
             "retrieval_metrics": retrieval_metrics_snapshot,
             "turn_metrics": turn_metrics_snapshot,
+            "skills": runtime.skills_loader.diagnostics_report(),
         }
         memory_payload: dict[str, Any]
         memory_store = getattr(runtime.engine, "memory", None)
