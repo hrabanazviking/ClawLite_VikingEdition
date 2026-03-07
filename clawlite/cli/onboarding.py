@@ -415,25 +415,207 @@ def probe_telegram(token: str, *, timeout_s: float = 8.0) -> dict[str, Any]:
         }
 
 
-def _step_header(console: Console, step: int, total: int, title: str) -> None:
-    bar = "".join("[green]■[/]" if i < step else "[dim]□[/]" for i in range(total))
-    console.print(f"\n{bar}  [bold]Step {step}/{total}[/] — {title}\n")
+# Provider API key pages — shown before prompting for the key
+_PROVIDER_KEY_URLS: dict[str, str] = {
+    "anthropic": "https://console.anthropic.com/settings/keys",
+    "openai": "https://platform.openai.com/api-keys",
+    "groq": "https://console.groq.com/keys",
+    "gemini": "https://aistudio.google.com/app/apikey",
+    "openrouter": "https://openrouter.ai/keys",
+    "together": "https://api.together.xyz/settings/api-keys",
+    "mistral": "https://console.mistral.ai/api-keys/",
+    "deepseek": "https://platform.deepseek.com/api_keys",
+    "xai": "https://console.x.ai/",
+    "huggingface": "https://huggingface.co/settings/tokens",
+    "nvidia": "https://build.nvidia.com/",
+    "moonshot": "https://platform.moonshot.ai/console/api-keys",
+    "kilocode": "https://app.kilo.ai/settings",
+    "minimax": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+}
+
+_FOX_BANNER = """\
+[bold yellow]  ╔═══════════════════════════════════════╗[/]
+[bold yellow]  ║[/]  [bold white]🦊  ClawLite[/]  [dim]— Autonomous AI Agent[/]  [bold yellow]║[/]
+[bold yellow]  ╚═══════════════════════════════════════╝[/]"""
+
+_SECTIONS = [
+    ("model",     "Model / Provider",  "Pick AI provider + API key"),
+    ("gateway",   "Gateway",           "Host, port, auth token"),
+    ("channels",  "Channels",          "Telegram, WhatsApp, etc."),
+    ("workspace", "Workspace",         "Files + templates"),
+    ("done",      "Done",              "Save config and exit"),
+]
 
 
-def _probe_summary(console: Console, probe: dict[str, Any], *, label: str) -> None:
+def _print_banner(console: Console) -> None:
+    console.print("")
+    console.print(_FOX_BANNER)
+    console.print("")
+
+
+def _section_menu(console: Console, done_label: str = "Done") -> str:
+    """Show a numbered section menu and return the chosen section key."""
+    console.print("  [bold]What do you want to configure?[/]\n")
+    for i, (key, label, hint) in enumerate(_SECTIONS, 1):
+        lbl = done_label if key == "done" else label
+        if key == "done":
+            console.print(f"  [dim]{i}.[/]  [bold]{lbl}[/]")
+        else:
+            console.print(f"  [dim]{i}.[/]  [bold]{label}[/]  [dim]— {hint}[/]")
+    console.print("")
+    valid = {str(i): key for i, (key, _, _) in enumerate(_SECTIONS, 1)}
+    valid.update({key: key for key, _, _ in _SECTIONS})
+    while True:
+        raw = Prompt.ask("  Choose", default="1").strip().lower()
+        if raw in valid:
+            return valid[raw]
+        console.print(f"  [red]Invalid choice:[/] {raw!r}  (enter a number 1-{len(_SECTIONS)})")
+
+
+def _probe_result(console: Console, probe: dict[str, Any], *, label: str) -> None:
     ok = bool(probe.get("ok", False))
-    status = "[green]OK[/]" if ok else "[red]FAILED[/]"
-    console.print(f"  {label} probe: {status}")
+    icon = "[green]✓[/]" if ok else "[red]✗[/]"
+    console.print(f"  {icon} {label} probe: {'[green]OK[/]' if ok else '[red]FAILED[/]'}")
     if not ok:
         error = str(probe.get("error", "") or "")
         detail = str(probe.get("error_detail", "") or "")
         if error:
-            console.print(f"  [yellow]Error:[/] {error}")
+            console.print(f"    [yellow]Error:[/] {error}")
         if detail:
-            console.print(f"  [yellow]Detail:[/] {detail[:200]}")
-        hints = list(probe.get("hints", []) or [])
-        for hint in hints[:3]:
-            console.print(f"  [dim]→ {hint}[/]")
+            console.print(f"    [yellow]Detail:[/] {detail[:200]}")
+        for hint in list(probe.get("hints", []) or [])[:3]:
+            console.print(f"    [dim]→ {hint}[/]")
+
+
+def _section_header(console: Console, title: str, hint: str = "") -> None:
+    sep = "─" * 42
+    console.print(f"\n  [bold cyan]{sep}[/]")
+    console.print(f"  [bold cyan]{title}[/]" + (f"  [dim]{hint}[/]" if hint else ""))
+    console.print(f"  [bold cyan]{sep}[/]\n")
+
+
+def _configure_model(console: Console, config: AppConfig) -> tuple[str, str, str, str, dict[str, Any]]:
+    """Interactive model section. Returns (provider, api_key, base_url, model, probe)."""
+    _section_header(console, "Model / Provider", "pick your AI backend")
+
+    # Show provider table
+    console.print("  [bold]Available providers:[/]\n")
+    rows: list[tuple[str, str]] = []
+    for pid in SUPPORTED_PROVIDERS:
+        url = _PROVIDER_KEY_URLS.get(pid, "")
+        rows.append((pid, url))
+    for pid, url in rows:
+        url_part = f"  [dim]{url}[/]" if url else ""
+        console.print(f"    [cyan]{pid:<18}[/]{url_part}")
+    console.print("")
+
+    current_provider = str(config.provider.litellm_api_key and "openai" or "openai")
+    provider = Prompt.ask(
+        "  Provider",
+        choices=list(SUPPORTED_PROVIDERS),
+        default=current_provider,
+    )
+    provider_spec = _provider_spec(provider)
+    provider_key = provider_spec.name if provider_spec is not None else provider
+
+    # Show key URL if available
+    key_url = _PROVIDER_KEY_URLS.get(provider_key, "")
+    if key_url and provider_key not in {"ollama", "vllm"}:
+        console.print(f"\n  [dim]Get your API key at:[/] [underline]{key_url}[/]\n")
+
+    provider_default_base = DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
+    current_base = str(config.provider.litellm_base_url or "").strip()
+    base_url = current_base or provider_default_base
+
+    current_model = str(config.provider.model or "").strip()
+    model_default = current_model or default_provider_model(provider_key)
+
+    api_key = ""
+    if provider_key not in {"ollama", "vllm"}:
+        api_key = Prompt.ask(f"  {provider} API key", password=True)
+    else:
+        base_url = Prompt.ask(f"  {provider} base URL", default=base_url)
+
+    selected_model = Prompt.ask(f"  Model", default=model_default)
+
+    console.print("\n  [dim]Probing provider...[/]")
+    probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
+    _probe_result(console, probe, label=provider)
+
+    if not bool(probe.get("ok", False)):
+        if not Confirm.ask("\n  Probe failed — continue anyway?", default=False):
+            raise KeyboardInterrupt
+    return provider, api_key, base_url, selected_model, probe
+
+
+def _configure_gateway(console: Console, config: AppConfig) -> None:
+    _section_header(console, "Gateway", "host, port, auth")
+
+    current_host = str(config.gateway.host or "127.0.0.1").strip()
+    current_port = int(config.gateway.port or 8787)
+    current_auth = str(config.gateway.auth.mode or "off").strip().lower()
+    if current_auth not in {"off", "optional", "required"}:
+        current_auth = "off"
+
+    host = Prompt.ask("  Host", default=current_host)
+    port_raw = Prompt.ask("  Port", default=str(current_port))
+    auth_mode = Prompt.ask(
+        "  Auth mode",
+        choices=["off", "optional", "required"],
+        default=current_auth,
+    )
+
+    try:
+        port = int(port_raw)
+    except Exception:
+        port = 8787
+
+    config.gateway.host = host.strip() or "127.0.0.1"
+    config.gateway.port = max(1, port)
+    config.gateway.auth.mode = auth_mode
+
+    # Always ensure token exists
+    token = ensure_gateway_token(config)
+    console.print(f"\n  [dim]Gateway token:[/] {_mask_secret(token, keep=8)}")
+    console.print(f"  [dim]Gateway URL:[/]   http://{config.gateway.host}:{config.gateway.port}\n")
+
+
+def _configure_channels(console: Console, config: AppConfig) -> dict[str, Any]:
+    _section_header(console, "Channels", "messaging integrations")
+
+    telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
+    telegram_enabled = Confirm.ask("  Enable Telegram bot?", default=bool(config.channels.telegram.enabled))
+
+    if telegram_enabled:
+        console.print("\n  [dim]Create a bot at:[/] [underline]https://t.me/BotFather[/]")
+        console.print("  [dim]Send[/] /newbot [dim]and copy the token.\n[/]")
+        telegram_token = Prompt.ask("  Telegram bot token", password=True)
+        console.print("\n  [dim]Probing Telegram...[/]")
+        telegram_probe = probe_telegram(telegram_token)
+        _probe_result(console, telegram_probe, label="Telegram")
+        if not bool(telegram_probe.get("ok", False)):
+            if not Confirm.ask("\n  Probe failed — continue anyway?", default=False):
+                raise KeyboardInterrupt
+        config.channels.telegram.enabled = True
+        config.channels.telegram.token = str(telegram_token or "").strip()
+    else:
+        config.channels.telegram.enabled = False
+
+    return telegram_probe
+
+
+def _configure_workspace(console: Console, config: AppConfig, *, overwrite: bool, variables: dict[str, str]) -> list[Any]:
+    _section_header(console, "Workspace", "files + templates")
+    console.print(f"  [dim]Current path:[/] {config.workspace_path}\n")
+    loader = WorkspaceLoader(workspace_path=config.workspace_path)
+    generated_files = loader.bootstrap(overwrite=bool(overwrite), variables=variables)
+    if generated_files:
+        console.print(f"  [green]✓[/] Created {len(generated_files)} file(s)")
+        for f in generated_files[:5]:
+            console.print(f"    [dim]{f}[/]")
+    else:
+        console.print(f"  [dim]Workspace already exists — no files changed.[/]")
+    return generated_files
 
 
 def run_onboarding_wizard(
@@ -444,176 +626,104 @@ def run_onboarding_wizard(
     variables: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     console = Console(stderr=True, soft_wrap=True)
-    payload: dict[str, Any] = {
-        "ok": False,
-        "mode": "wizard",
-        "steps": [],
-    }
 
-    TOTAL_STEPS = 5
+    # Accumulated state
+    provider_key: str = ""
+    provider_probe: dict[str, Any] = {}
+    telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
+    generated_files: list[Any] = []
+    provider_persisted: dict[str, Any] = {}
+
+    # Track which sections were visited
+    visited: set[str] = set()
 
     try:
+        _print_banner(console)
         console.print(
             Panel(
-                "[bold cyan]ClawLite[/] — Setup Wizard\n"
-                "[dim]Configure your AI agent in 5 steps. Press Ctrl+C to cancel.[/]",
-                title="clawlite onboard --wizard",
+                "[bold]Welcome to ClawLite![/]  This wizard helps you configure your agent.\n"
+                "[dim]Navigate sections below. Press Ctrl+C at any time to cancel.[/]",
                 border_style="cyan",
+                padding=(0, 2),
             )
         )
 
-        _step_header(console, 1, TOTAL_STEPS, "Setup mode")
-        console.print("  [bold]quickstart[/] — sensible defaults, fastest path")
-        console.print("  [bold]advanced[/]    — full control over host, port and auth\n")
-        step_1_mode = Prompt.ask("Mode", choices=["quickstart", "advanced"], default="quickstart")
-        payload["steps"].append({"step": 1, "name": "mode", "choice": step_1_mode})
+        while True:
+            console.print("")
+            choice = _section_menu(console)
 
-        if step_1_mode == "advanced":
-            host = Prompt.ask("Gateway host", default=str(config.gateway.host or "127.0.0.1").strip())
-            port_raw = Prompt.ask("Gateway port", default=str(int(config.gateway.port or 8787)))
-            auth_mode = Prompt.ask(
-                "Gateway auth mode",
-                choices=["off", "optional", "required"],
-                default=str(config.gateway.auth.mode or "off").strip().lower() or "off",
-            )
-            try:
-                port = int(port_raw)
-            except Exception:
-                port = 8787
-            config.gateway.host = host.strip() or "127.0.0.1"
-            config.gateway.port = max(1, port)
-            config.gateway.auth.mode = auth_mode
-        else:
-            config.gateway.host = str(config.gateway.host or "127.0.0.1").strip() or "127.0.0.1"
-            config.gateway.port = max(1, int(config.gateway.port or 8787))
-            if str(config.gateway.auth.mode or "").strip().lower() not in {"off", "optional", "required"}:
-                config.gateway.auth.mode = "off"
+            if choice == "done":
+                if not visited:
+                    console.print("  [yellow]No sections configured yet.[/]")
+                    if not Confirm.ask("  Exit without saving?", default=False):
+                        continue
+                break
 
-        _step_header(console, 2, TOTAL_STEPS, "AI provider")
-        console.print(f"  Supported: {', '.join(SUPPORTED_PROVIDERS)}\n")
-        provider = Prompt.ask("Provider", choices=list(SUPPORTED_PROVIDERS), default="openai")
-        provider_spec = _provider_spec(provider)
-        provider_key = provider_spec.name if provider_spec is not None else provider
-        provider_default_base = DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
-        current_base = str(config.provider.litellm_base_url or "").strip()
-        base_default = current_base or provider_default_base
-        base_url = base_default
-        selected_model = ""
-        if step_1_mode == "advanced":
-            base_url = Prompt.ask(f"{provider} base URL", default=base_default)
-            current_model = str(config.provider.model or "").strip()
-            model_default = current_model or default_provider_model(provider_key)
-            selected_model = Prompt.ask(f"{provider} model", default=model_default)
-        api_key = ""
-        if provider_key not in {"ollama", "vllm"}:
-            api_key = Prompt.ask(f"{provider} API key", password=True)
-        provider_probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
-        persisted_model = str(selected_model or "").strip() or default_provider_model(provider_key)
-        payload["steps"].append(
-            {
-                "step": 2,
-                "name": "provider",
-                "provider": provider,
-                "model": persisted_model,
-                "family": str(provider_probe.get("family", "") or ""),
-                "recommended_model": str(provider_probe.get("recommended_model", "") or ""),
-                "recommended_models": list(provider_probe.get("recommended_models", []) or []),
-                "onboarding_hint": str(provider_probe.get("onboarding_hint", "") or ""),
-                "probe_ok": bool(provider_probe.get("ok", False)),
-                "base_url": str(provider_probe.get("base_url", "") or ""),
-                "api_key_masked": str(provider_probe.get("api_key_masked", "") or ""),
-                "probe_error": str(provider_probe.get("error", "") or ""),
-                "probe_hints": list(provider_probe.get("hints", []) or []),
-                "transport": str(provider_probe.get("transport", "") or ""),
-            }
-        )
-        _probe_summary(console, provider_probe, label=provider)
-        if (not bool(provider_probe.get("ok", False))) and (not Confirm.ask("\n  Provider probe failed — continue anyway?", default=False)):
-            return {
-                "ok": False,
-                "mode": "wizard",
-                "error": "provider_probe_failed",
-                "steps": payload["steps"],
-            }
+            elif choice == "model":
+                try:
+                    prov, api_key, base_url, sel_model, probe = _configure_model(console, config)
+                    provider_key = prov
+                    provider_probe = probe
+                    provider_persisted = apply_provider_selection(
+                        config,
+                        provider=prov,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=sel_model,
+                    )
+                    visited.add("model")
+                    console.print("  [green]✓[/] Model section saved.\n")
+                except KeyboardInterrupt:
+                    console.print("  [yellow]Model section cancelled.[/]")
 
-        provider_persisted = apply_provider_selection(
-            config,
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=selected_model,
-        )
+            elif choice == "gateway":
+                _configure_gateway(console, config)
+                visited.add("gateway")
+                console.print("  [green]✓[/] Gateway section saved.\n")
 
-        _step_header(console, 3, TOTAL_STEPS, "Telegram channel")
-        telegram_enabled = Confirm.ask("  Enable Telegram bot?", default=False)
-        telegram_probe: dict[str, Any] = {
-            "ok": True,
-            "status_code": 0,
-            "token_masked": "",
-            "error": "",
-        }
-        if telegram_enabled:
-            telegram_token = Prompt.ask("Telegram bot token", password=True)
-            telegram_probe = probe_telegram(telegram_token)
-            _probe_summary(console, telegram_probe, label="Telegram")
-            if (not bool(telegram_probe.get("ok", False))) and (not Confirm.ask("\n  Telegram probe failed — continue anyway?", default=False)):
-                return {
-                    "ok": False,
-                    "mode": "wizard",
-                    "error": "telegram_probe_failed",
-                    "steps": payload["steps"],
-                }
-            config.channels.telegram.enabled = True
-            config.channels.telegram.token = str(telegram_token or "").strip()
-        else:
-            config.channels.telegram.enabled = False
-        payload["steps"].append(
-            {
-                "step": 3,
-                "name": "telegram",
-                "enabled": telegram_enabled,
-                "probe_ok": bool(telegram_probe.get("ok", False)),
-                "token_masked": str(telegram_probe.get("token_masked", "") or ""),
-                "probe_error": str(telegram_probe.get("error", "") or ""),
-            }
-        )
+            elif choice == "channels":
+                try:
+                    telegram_probe = _configure_channels(console, config)
+                    visited.add("channels")
+                    console.print("  [green]✓[/] Channels section saved.\n")
+                except KeyboardInterrupt:
+                    console.print("  [yellow]Channels section cancelled.[/]")
 
+            elif choice == "workspace":
+                generated_files = _configure_workspace(
+                    console, config,
+                    overwrite=overwrite,
+                    variables=variables or {},
+                )
+                visited.add("workspace")
+                console.print("  [green]✓[/] Workspace section saved.\n")
+
+        # Ensure gateway token always exists
         generated_token = ensure_gateway_token(config)
-
-        _step_header(console, 4, TOTAL_STEPS, "Workspace files")
-        loader = WorkspaceLoader(workspace_path=config.workspace_path)
-        generated_files = loader.bootstrap(overwrite=bool(overwrite), variables=variables or {})
-        if generated_files:
-            console.print(f"  Created {len(generated_files)} file(s) in {config.workspace_path}")
-        else:
-            console.print(f"  Workspace already exists at {config.workspace_path}")
-        payload["steps"].append(
-            {
-                "step": 4,
-                "name": "workspace",
-                "workspace": str(config.workspace_path),
-                "created_files": [str(path) for path in generated_files],
-            }
-        )
-
         saved_path = save_config(config, path=config_path)
         gateway_url = f"http://{config.gateway.host}:{config.gateway.port}"
-        payload["steps"].append({"step": 5, "name": "final", "gateway_url": gateway_url})
 
-        _step_header(console, 5, TOTAL_STEPS, "Done")
-        token_display = _mask_secret(generated_token, keep=8)
         tg_status = "[green]enabled[/]" if config.channels.telegram.enabled else "[dim]disabled[/]"
+        token_display = _mask_secret(generated_token, keep=8)
+        provider_display = provider_key or str(config.provider.litellm_api_key and "configured" or "not set")
+        model_display = str(config.provider.model or "default")
+
+        sections_done = ", ".join(sorted(visited)) if visited else "none"
+
         console.print(
             Panel(
-                f"[bold green]ClawLite is ready![/]\n\n"
+                f"[bold green]🦊 ClawLite is ready![/]\n\n"
                 f"  [bold]Gateway URL:[/]   {gateway_url}\n"
                 f"  [bold]Token:[/]         {token_display}\n"
-                f"  [bold]Provider:[/]      {provider} / {config.provider.model or 'default'}\n"
+                f"  [bold]Provider:[/]      {provider_display} / {model_display}\n"
                 f"  [bold]Telegram:[/]      {tg_status}\n"
+                f"  [bold]Sections:[/]      {sections_done}\n"
                 f"  [bold]Config saved:[/]  {saved_path}\n\n"
-                f"[dim]Start the agent:[/]  [bold cyan]clawlite start[/]",
+                f"[dim]Start the agent:[/]  [bold cyan]clawlite start[/]\n"
+                f"[dim]Dashboard:[/]        [bold cyan]{gateway_url}[/]",
                 title="[green]Setup complete[/]",
                 border_style="green",
+                padding=(1, 2),
             )
         )
 
@@ -621,6 +731,7 @@ def run_onboarding_wizard(
             "ok": True,
             "mode": "wizard",
             "saved_path": str(saved_path),
+            "visited_sections": sorted(visited),
             "persisted": {
                 "provider": provider_persisted,
                 "gateway": {
@@ -659,12 +770,11 @@ def run_onboarding_wizard(
                 "gateway_url": gateway_url,
                 "gateway_token": generated_token,
             },
-            "steps": payload["steps"],
         }
     except KeyboardInterrupt:
+        console.print("\n  [yellow]Wizard cancelled.[/]")
         return {
             "ok": False,
             "mode": "wizard",
             "error": "cancelled",
-            "steps": payload["steps"],
         }

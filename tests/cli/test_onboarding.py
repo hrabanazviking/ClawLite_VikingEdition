@@ -263,6 +263,7 @@ def test_probe_provider_minimax_uses_anthropic_messages_transport(monkeypatch) -
 
 
 def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkeypatch, tmp_path) -> None:
+    """Section-menu wizard: visit model + gateway sections then done."""
     cfg = AppConfig.from_dict(
         {
             "workspace_path": str(tmp_path / "workspace"),
@@ -271,19 +272,22 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
         }
     )
 
-    prompt_answers = iter(
-        [
-            "advanced",
-            "0.0.0.0",
-            "19090",
-            "required",
-            "openai",
-            "https://api.openai.com/v1",
-            "openai/gpt-4.1-mini",
-            "sk-openai-123456",
-        ]
-    )
-    confirm_answers = iter([False])
+    # New section-menu flow:
+    # Menu → "1" (model), then provider/key/model prompts
+    # Menu → "2" (gateway), then host/port/auth prompts
+    # Menu → "5" (done)
+    prompt_answers = iter([
+        "1",                      # section menu: model
+        "openai",                 # provider
+        "sk-openai-123456",       # api key
+        "openai/gpt-4.1-mini",   # model
+        "2",                      # section menu: gateway
+        "0.0.0.0",               # host
+        "19090",                  # port
+        "required",              # auth mode
+        "5",                      # section menu: done
+    ])
+    confirm_answers = iter([])
 
     def _fake_prompt_ask(*args, **kwargs):
         return next(prompt_answers)
@@ -306,15 +310,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
             "base_url": base_url,
             "api_key_masked": "********3456",
             "error": "",
-        },
-    )
-    monkeypatch.setattr(
-        "clawlite.cli.onboarding.probe_telegram",
-        lambda token, *, timeout_s=8.0: {
-            "ok": True,
-            "status_code": 200,
-            "token_masked": "",
-            "error": "",
+            "hints": [],
         },
     )
 
@@ -335,13 +331,8 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     )
 
     assert payload["ok"] is True
-    assert payload["steps"][1]["step"] == 2
-    assert payload["steps"][1]["provider"] == "openai"
-    assert payload["steps"][1]["model"] == "openai/gpt-4.1-mini"
-    assert payload["steps"][1]["family"] == "openai_compatible"
-    assert payload["steps"][1]["recommended_model"] == "openai/gpt-4o-mini"
-    assert payload["steps"][1]["recommended_models"] == ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
-    assert "billing" in payload["steps"][1]["onboarding_hint"].lower()
+    assert "model" in payload["visited_sections"]
+    assert "gateway" in payload["visited_sections"]
     assert payload["persisted"]["provider"]["model"] == "openai/gpt-4.1-mini"
     assert payload["persisted"]["gateway"]["host"] == "0.0.0.0"
     assert payload["persisted"]["gateway"]["port"] == 19090
@@ -351,6 +342,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
 
 
 def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(monkeypatch, tmp_path) -> None:
+    """Section-menu wizard: visit channels section and decline Telegram."""
     cfg = AppConfig.from_dict(
         {
             "workspace_path": str(tmp_path / "workspace"),
@@ -364,15 +356,14 @@ def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(mon
         }
     )
 
-    prompt_answers = iter(
-        [
-            "basic",
-            "openai",
-            "https://api.openai.com/v1",
-            "sk-openai-123456",
-        ]
-    )
-    confirm_answers = iter([False])
+    # New section-menu flow:
+    # Menu → "3" (channels), Confirm "Enable Telegram?" → False
+    # Menu → "5" (done)
+    prompt_answers = iter([
+        "3",   # section menu: channels
+        "5",   # section menu: done
+    ])
+    confirm_answers = iter([False])  # "Enable Telegram bot?" → False
 
     def _fake_prompt_ask(*args, **kwargs):
         return next(prompt_answers)
@@ -382,21 +373,6 @@ def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(mon
 
     monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
     monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
-    monkeypatch.setattr(
-        "clawlite.cli.onboarding.probe_provider",
-        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
-            "ok": True,
-            "status_code": 200,
-            "provider": provider,
-            "family": "openai_compatible",
-            "recommended_model": "openai/gpt-4o-mini",
-            "recommended_models": ["openai/gpt-4o-mini"],
-            "onboarding_hint": "",
-            "base_url": base_url,
-            "api_key_masked": "********3456",
-            "error": "",
-        },
-    )
 
     class _FakeWorkspaceLoader:
         def __init__(self, workspace_path):
@@ -415,7 +391,8 @@ def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(mon
     )
 
     assert payload["ok"] is True
-    assert payload["steps"][2]["enabled"] is False
+    assert "channels" in payload["visited_sections"]
     assert payload["persisted"]["telegram"]["enabled"] is False
     assert cfg.channels.telegram.enabled is False
+    # token preserved — user only disabled, didn't clear it
     assert cfg.channels.telegram.token == "123:ABC"
