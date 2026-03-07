@@ -2789,6 +2789,12 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
             "overdue_run_count",
         }
         assert "heartbeat" in payload
+        assert set(payload["heartbeat"].keys()) >= {
+            "wake_backpressure_count",
+            "wake_pressure_by_reason",
+            "last_pressure_reason",
+            "last_pressure_at",
+        }
         assert "bootstrap" in payload
         assert "pending" in payload["bootstrap"]
         assert "workspace" in payload
@@ -4271,6 +4277,10 @@ def test_gateway_heartbeat_trigger_reports_quota_pressure_and_notices_on_repeat(
         assert metadata["pressure_class"] == "quota"
         assert metadata["pressure_streak"] == 2
         assert "heartbeat wakes throttled by quota backpressure" in str(send_kwargs["text"])
+        state = json.loads(Path(app.state.runtime.heartbeat.state_path).read_text(encoding="utf-8"))
+        assert state["wake_backpressure_count"] >= 2
+        assert state["wake_pressure_by_reason"]["wake_quota_backpressure"] >= 2
+        assert state["last_pressure_reason"] == "wake_quota_backpressure"
 
 
 def test_gateway_diagnostics_exposes_proactive_wake_policy_delay(tmp_path: Path) -> None:

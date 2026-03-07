@@ -109,6 +109,10 @@ class HeartbeatService:
             "run_count": 0,
             "skip_count": 0,
             "error_count": 0,
+            "wake_backpressure_count": 0,
+            "wake_pressure_by_reason": {},
+            "last_pressure_reason": "",
+            "last_pressure_at": "",
         }
         self._load_state()
 
@@ -193,6 +197,18 @@ class HeartbeatService:
             state["last_actionable_excerpt"] = self._bound_excerpt(excerpt)
         elif "last_actionable_excerpt" in state:
             state.pop("last_actionable_excerpt", None)
+        wake_pressure_by_reason = state.get("wake_pressure_by_reason")
+        if isinstance(wake_pressure_by_reason, dict):
+            state["wake_pressure_by_reason"] = {
+                str(key or ""): int(value or 0)
+                for key, value in wake_pressure_by_reason.items()
+                if str(key or "").strip()
+            }
+        else:
+            state["wake_pressure_by_reason"] = {}
+        state["wake_backpressure_count"] = int(state.get("wake_backpressure_count", 0) or 0)
+        state["last_pressure_reason"] = str(state.get("last_pressure_reason", "") or "")
+        state["last_pressure_at"] = str(state.get("last_pressure_at", "") or "")
         return state
 
     def _bound_excerpt(self, text: str) -> str:
@@ -266,6 +282,16 @@ class HeartbeatService:
             self._state["last_check_iso"] = now_iso
             self._state["last_action"] = decision.action
             self._state["last_reason"] = decision.reason
+            normalized_reason = str(decision.reason or "").strip().lower()
+            if normalized_reason.startswith("wake_") and normalized_reason.endswith("backpressure"):
+                self._state["wake_backpressure_count"] = int(self._state.get("wake_backpressure_count", 0) or 0) + 1
+                pressure_by_reason = self._state.get("wake_pressure_by_reason")
+                if not isinstance(pressure_by_reason, dict):
+                    pressure_by_reason = {}
+                    self._state["wake_pressure_by_reason"] = pressure_by_reason
+                pressure_by_reason[normalized_reason] = int(pressure_by_reason.get(normalized_reason, 0) or 0) + 1
+                self._state["last_pressure_reason"] = normalized_reason
+                self._state["last_pressure_at"] = now_iso
             if decision.reason == "heartbeat_ok":
                 self._state["last_ok_iso"] = now_iso
             if decision.action == "run":
@@ -382,5 +408,9 @@ class HeartbeatService:
             "run_count": int(self._state.get("run_count", 0) or 0),
             "skip_count": int(self._state.get("skip_count", 0) or 0),
             "error_count": int(self._state.get("error_count", 0) or 0),
+            "wake_backpressure_count": int(self._state.get("wake_backpressure_count", 0) or 0),
+            "wake_pressure_by_reason": dict(self._state.get("wake_pressure_by_reason", {}) or {}),
+            "last_pressure_reason": str(self._state.get("last_pressure_reason", "") or ""),
+            "last_pressure_at": str(self._state.get("last_pressure_at", "") or ""),
             "last_error": last_error,
         }

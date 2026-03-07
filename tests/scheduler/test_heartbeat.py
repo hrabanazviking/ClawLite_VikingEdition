@@ -77,6 +77,30 @@ def test_heartbeat_service_trigger_now() -> None:
     asyncio.run(_scenario())
 
 
+def test_heartbeat_service_tracks_wake_pressure_reasons(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        hb = HeartbeatService(interval_seconds=9999, state_path=tmp_path / "heartbeat-state.json")
+
+        async def _tick():
+            return {"action": "skip", "reason": "wake_quota_backpressure"}
+
+        decision = await hb.trigger_now(_tick)
+        payload = json.loads((tmp_path / "heartbeat-state.json").read_text(encoding="utf-8"))
+        status = hb.status()
+
+        assert decision.reason == "wake_quota_backpressure"
+        assert payload["wake_backpressure_count"] == 1
+        assert payload["wake_pressure_by_reason"]["wake_quota_backpressure"] == 1
+        assert payload["last_pressure_reason"] == "wake_quota_backpressure"
+        assert payload["last_pressure_at"]
+        assert status["wake_backpressure_count"] == 1
+        assert status["wake_pressure_by_reason"]["wake_quota_backpressure"] == 1
+        assert status["last_pressure_reason"] == "wake_quota_backpressure"
+        assert status["last_pressure_at"]
+
+    asyncio.run(_scenario())
+
+
 def test_heartbeat_ok_token_semantics() -> None:
     assert HeartbeatDecision.from_result("HEARTBEAT_OK").action == "skip"
     assert HeartbeatDecision.from_result("HEARTBEAT_OK all good").action == "skip"
