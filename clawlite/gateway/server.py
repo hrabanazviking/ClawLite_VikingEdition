@@ -2229,7 +2229,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "running": False,
                 "last_error": "",
                 "replayed": 0,
+                "replayed_groups": 0,
                 "failed": 0,
+                "failed_groups": 0,
+                "last_group_ids": [],
                 "last_run_iso": "",
             },
         )
@@ -2240,11 +2243,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if not callable(resume_factory):
             component["running"] = False
             component["last_error"] = "resume_runner_factory_missing"
-            return {"replayed": 0, "failed": 0}
+            return {"replayed": 0, "replayed_groups": 0, "failed": 0, "failed_groups": 0}
         rows = runtime.engine.subagents.list_resumable_runs(reason="manager_restart", limit=64)
         replayed = 0
         failed: list[dict[str, str]] = []
+        grouped_run_ids: dict[str, set[str]] = {}
+        failed_group_ids: set[str] = set()
         for run in rows:
+            metadata = dict(getattr(run, "metadata", {}) or {})
+            group_id = str(metadata.get("parallel_group_id", "") or "").strip()
+            group_key = group_id or str(getattr(run, "run_id", "") or "").strip()
             try:
                 await runtime.engine.subagents.resume(
                     run_id=str(getattr(run, "run_id", "") or ""),
@@ -2254,15 +2262,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 failed.append(
                     {
                         "run_id": str(getattr(run, "run_id", "") or "").strip(),
+                        "group_id": group_id,
                         "error": str(exc),
                     }
                 )
+                failed_group_ids.add(group_key)
                 continue
             replayed += 1
+            grouped_run_ids.setdefault(group_key, set()).add(str(getattr(run, "run_id", "") or "").strip())
         await asyncio.sleep(0)
         component["running"] = False
         component["replayed"] = replayed
+        component["replayed_groups"] = len(grouped_run_ids)
         component["failed"] = len(failed)
+        component["failed_groups"] = len(failed_group_ids)
+        component["last_group_ids"] = sorted(grouped_run_ids.keys())[-8:]
         component["last_failed_runs"] = failed[-8:]
         component["last_run_iso"] = dt.datetime.now(dt.timezone.utc).isoformat()
         if failed:

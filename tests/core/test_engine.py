@@ -1066,10 +1066,40 @@ def test_engine_subagent_digest_mentions_parallel_group_metadata() -> None:
 
         out = await engine.run(session_id="cli:owner", user_text="hello")
         assert out.text.count("[Subagent Digest]") == 1
+        assert "parallel grp123456789 [2/2 branches]" in out.text
         assert "session=cli:owner:subagent:1" in out.text
         assert "session=cli:owner:subagent:2" in out.text
         assert "group=grp123456789#1/2" in out.text
         assert "group=grp123456789#2/2" in out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_persists_parallel_group_summary_in_subagent_digest_memory() -> None:
+    async def _scenario() -> None:
+        subagents = FakeSubagentManagerForParallelDigest()
+        memory = FakeMemoryWithSubagentDigestPersistence()
+        engine = AgentEngine(
+            provider=FakePromptCaptureProvider(),
+            tools=FakeTools(),
+            memory=memory,
+            subagents=subagents,
+            synthesizer=SubagentSynthesizer(),
+        )
+
+        out = await engine.run(session_id="cli:owner", user_text="hello")
+        assert out.text.count("[Subagent Digest]") == 1
+        digest_rows = [row for row in memory.memorize_calls if row["source"] == "subagent-digest:cli:owner"]
+        assert len(digest_rows) == 1
+        digest_row = digest_rows[0]
+        assert "Parallel group grp123456789: 2/2 sessions" in str(digest_row["text"])
+        assert digest_row["metadata"]["subagent_parallel_group_count"] == 1
+        assert digest_row["metadata"]["subagent_parallel_groups"][0]["group_id"] == "grp123456789"
+        assert digest_row["metadata"]["subagent_parallel_groups"][0]["group_size"] == 2
+        assert digest_row["metadata"]["subagent_parallel_groups"][0]["target_sessions"] == [
+            "cli:owner:subagent:1",
+            "cli:owner:subagent:2",
+        ]
 
     asyncio.run(_scenario())
 

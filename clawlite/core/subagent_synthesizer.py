@@ -58,12 +58,56 @@ class SubagentSynthesizer:
             return result
         return "(no output)"
 
+    @classmethod
+    def _parallel_group_lines(cls, runs: list[Any]) -> list[str]:
+        groups: dict[str, dict[str, Any]] = {}
+        for run in runs:
+            metadata = dict(getattr(run, "metadata", {}) or {})
+            group_id = cls._compact(metadata.get("parallel_group_id", ""), 12)
+            if not group_id:
+                continue
+            row = groups.get(group_id)
+            if row is None:
+                row = {
+                    "group_id": group_id,
+                    "sessions": [],
+                    "status_counts": {},
+                    "expected": max(0, int(metadata.get("parallel_group_size", 0) or 0)),
+                }
+                groups[group_id] = row
+            session_id = cls._compact(metadata.get("target_session_id", ""), cls._MAX_SESSION_CHARS)
+            if session_id and session_id not in row["sessions"]:
+                row["sessions"].append(session_id)
+            status = cls._compact(getattr(run, "status", "unknown"), 24) or "unknown"
+            row["status_counts"][status] = row["status_counts"].get(status, 0) + 1
+
+        lines: list[str] = []
+        for group_id in sorted(groups.keys()):
+            row = groups[group_id]
+            sessions = ", ".join(row["sessions"][:3])
+            expected = max(int(row["expected"] or 0), len(row["sessions"]))
+            statuses = ", ".join(
+                f"{status}={count}" for status, count in sorted(row["status_counts"].items())
+            )
+            line = f"- parallel {group_id} [{len(row['sessions'])}/{expected} branches]"
+            if sessions:
+                line = f"{line} | sessions={sessions}"
+            if statuses:
+                line = f"{line} | statuses={statuses}"
+            lines.append(cls._compact(line, cls._MAX_TOTAL_CHARS))
+        return lines
+
     def summarize(self, runs: list[Any]) -> str:
         if not runs:
             return ""
 
         lines: list[str] = []
         total_chars = 0
+        for line in self._parallel_group_lines(runs):
+            if total_chars + len(line) > self._MAX_TOTAL_CHARS:
+                break
+            lines.append(line)
+            total_chars += len(line) + 1
         for run in sorted(runs, key=self._run_sort_key)[: self._MAX_RUNS]:
             run_id = str(getattr(run, "run_id", "") or "").strip()
             if not run_id:

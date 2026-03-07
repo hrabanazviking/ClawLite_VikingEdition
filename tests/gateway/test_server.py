@@ -802,8 +802,95 @@ def test_gateway_startup_replays_resumable_subagents_after_restart(tmp_path: Pat
                 assert rows[0].metadata["retry_budget_remaining"] == 1
                 replay_component = client.app.state.lifecycle.components["subagent_replay"]
                 assert replay_component["replayed"] == 1
+                assert replay_component["replayed_groups"] == 1
                 assert replay_component["failed"] == 0
+                assert replay_component["failed_groups"] == 0
+                assert replay_component["last_group_ids"] == ["run-replay-1"]
                 assert provider.calls >= 1
+
+
+def test_gateway_startup_replays_parallel_subagent_group_after_restart(tmp_path: Path) -> None:
+    state_root = tmp_path / "state" / "subagents"
+    manager = SubagentManager(state_path=state_root)
+    group_id = "grp-replay-1"
+    manager._runs["run-replay-a"] = SubagentRun(
+        run_id="run-replay-a",
+        session_id="cli:owner",
+        task="retry task a",
+        status="running",
+        started_at="2026-03-06T10:00:00+00:00",
+        updated_at="2026-03-06T10:00:00+00:00",
+        metadata={
+            "target_session_id": "cli:owner:subagent:1",
+            "parallel_group_id": group_id,
+            "parallel_group_index": 1,
+            "parallel_group_size": 2,
+            "run_version": 1,
+            "resume_attempts": 0,
+            "resume_attempts_max": 2,
+            "retry_budget_remaining": 2,
+            "resume_token": "tok-a",
+            "resumable": False,
+            "last_status_reason": "spawned",
+            "last_status_at": "2026-03-06T10:00:00+00:00",
+        },
+    )
+    manager._runs["run-replay-b"] = SubagentRun(
+        run_id="run-replay-b",
+        session_id="cli:owner",
+        task="retry task b",
+        status="running",
+        started_at="2026-03-06T10:00:00+00:00",
+        updated_at="2026-03-06T10:00:00+00:00",
+        metadata={
+            "target_session_id": "cli:owner:subagent:2",
+            "parallel_group_id": group_id,
+            "parallel_group_index": 2,
+            "parallel_group_size": 2,
+            "run_version": 1,
+            "resume_attempts": 0,
+            "resume_attempts_max": 2,
+            "retry_budget_remaining": 2,
+            "resume_token": "tok-b",
+            "resumable": False,
+            "last_status_reason": "spawned",
+            "last_status_at": "2026-03-06T10:00:00+00:00",
+        },
+    )
+    manager._save_state()
+
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    provider = ReplayProvider()
+    with patch.object(gateway_server, "build_provider", return_value=provider):
+        with patch.object(
+            gateway_server,
+            "probe_local_provider_runtime",
+            return_value={"checked": False, "ok": True},
+        ):
+            app = create_app(cfg)
+            with TestClient(app) as client:
+                deadline = time.time() + 1.0
+                rows = client.app.state.runtime.engine.subagents.list_runs(session_id="cli:owner")
+                while time.time() < deadline:
+                    rows = client.app.state.runtime.engine.subagents.list_runs(session_id="cli:owner")
+                    if rows and all(row.status == "done" for row in rows):
+                        break
+                    time.sleep(0.01)
+
+                assert len(rows) == 2
+                assert {row.status for row in rows} == {"done"}
+                replay_component = client.app.state.lifecycle.components["subagent_replay"]
+                assert replay_component["replayed"] == 2
+                assert replay_component["replayed_groups"] == 1
+                assert replay_component["failed"] == 0
+                assert replay_component["failed_groups"] == 0
+                assert replay_component["last_group_ids"] == [group_id]
+                assert provider.calls >= 2
 
 
 def test_run_heartbeat_skips_suggestions_when_memory_monitor_missing() -> None:

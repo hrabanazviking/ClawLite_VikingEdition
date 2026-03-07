@@ -793,6 +793,82 @@ def test_subagents_resume_restarts_resumable_runs(tmp_path) -> None:
     asyncio.run(_scenario())
 
 
+def test_subagents_resume_restarts_parallel_group_by_group_id(tmp_path) -> None:
+    async def _scenario() -> None:
+        calls: list[tuple[str, str]] = []
+        manager = SubagentManager(state_path=tmp_path / "subagents", max_concurrent_runs=1, max_resume_attempts=2)
+        group_id = "grp-resume-1"
+        manager._runs["run-resume-a"] = SubagentRun(
+            run_id="run-resume-a",
+            session_id="cli:owner",
+            task="retry task a",
+            status="interrupted",
+            updated_at="2026-03-05T10:00:00+00:00",
+            metadata={
+                "target_session_id": "cli:owner:subagent:1",
+                "parallel_group_id": group_id,
+                "parallel_group_index": 1,
+                "parallel_group_size": 2,
+                "resume_attempts": 0,
+                "resume_attempts_max": 2,
+                "retry_budget_remaining": 2,
+                "resumable": True,
+                "last_status_reason": "manager_restart",
+            },
+        )
+        manager._runs["run-resume-b"] = SubagentRun(
+            run_id="run-resume-b",
+            session_id="cli:owner",
+            task="retry task b",
+            status="interrupted",
+            updated_at="2026-03-05T10:00:01+00:00",
+            metadata={
+                "target_session_id": "cli:owner:subagent:2",
+                "parallel_group_id": group_id,
+                "parallel_group_index": 2,
+                "parallel_group_size": 2,
+                "resume_attempts": 0,
+                "resume_attempts_max": 2,
+                "retry_budget_remaining": 2,
+                "resumable": True,
+                "last_status_reason": "manager_restart",
+            },
+        )
+        manager._save_state()
+
+        def _resume_runner_factory(row: SubagentRun):
+            async def _runner(_owner_session_id: str, task: str):
+                calls.append((str(row.metadata.get("target_session_id", "") or row.session_id), task))
+                return f"done:{task}"
+
+            return _runner
+
+        tool = SubagentsTool(manager, resume_runner_factory=_resume_runner_factory)
+        listed = json.loads(await tool.run({"action": "list"}, ToolContext(session_id="cli:owner")))
+        assert listed["resumable_parallel_group_count"] == 1
+        assert listed["resumable_parallel_groups"][0]["group_id"] == group_id
+
+        payload = json.loads(
+            await tool.run(
+                {"action": "resume", "group_id": group_id},
+                ToolContext(session_id="cli:owner"),
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert payload["status"] == "ok"
+        assert payload["group_id"] == group_id
+        assert payload["requested"] == 2
+        assert payload["resumed"] == 2
+        assert payload["failed"] == []
+        assert {row["run_id"] for row in payload["runs"]} == {"run-resume-a", "run-resume-b"}
+        assert {row["parallel_group_id"] for row in payload["runs"]} == {group_id}
+        assert {call[0] for call in calls} == {"cli:owner:subagent:1", "cli:owner:subagent:2"}
+
+    asyncio.run(_scenario())
+
+
 def test_session_status_fields(tmp_path) -> None:
     async def _scenario() -> None:
         sessions = SessionStore(root=tmp_path / "sessions")

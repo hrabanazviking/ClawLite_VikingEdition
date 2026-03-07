@@ -1303,6 +1303,62 @@ class AgentEngine:
         return "\n".join(part for part in parts if part).strip()
 
     @staticmethod
+    def _subagent_parallel_group_metadata(runs: list[Any]) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        for run in runs:
+            metadata = dict(getattr(run, "metadata", {}) or {})
+            group_id = str(metadata.get("parallel_group_id", "") or "").strip()
+            if not group_id:
+                continue
+            try:
+                group_size = int(metadata.get("parallel_group_size", 0) or 0)
+            except Exception:
+                group_size = 0
+            row = groups.get(group_id)
+            if row is None:
+                row = {
+                    "group_id": group_id,
+                    "group_size": max(0, group_size),
+                    "run_ids": [],
+                    "target_sessions": [],
+                    "status_counts": {},
+                }
+                groups[group_id] = row
+            run_id = str(getattr(run, "run_id", "") or "").strip()
+            if run_id:
+                row["run_ids"].append(run_id)
+            target_session_id = str(metadata.get("target_session_id", "") or "").strip()
+            if target_session_id and target_session_id not in row["target_sessions"]:
+                row["target_sessions"].append(target_session_id)
+            status = str(getattr(run, "status", "") or "").strip()
+            if status:
+                row["status_counts"][status] = row["status_counts"].get(status, 0) + 1
+        return sorted(groups.values(), key=lambda row: str(row.get("group_id", "") or ""))
+
+    @classmethod
+    def _subagent_parallel_group_text(cls, groups: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for row in groups:
+            group_id = str(row.get("group_id", "") or "").strip()
+            if not group_id:
+                continue
+            sessions = [str(item or "").strip() for item in row.get("target_sessions", []) if str(item or "").strip()]
+            status_counts = row.get("status_counts", {})
+            status_text = ", ".join(
+                f"{status}={count}"
+                for status, count in sorted(status_counts.items())
+                if str(status or "").strip()
+            )
+            expected = max(int(row.get("group_size", 0) or 0), len(sessions))
+            line = f"Parallel group {group_id}: {len(sessions)}/{expected} sessions"
+            if sessions:
+                line = f"{line} ({', '.join(sessions[:4])})"
+            if status_text:
+                line = f"{line}; statuses {status_text}"
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    @staticmethod
     def _subagent_digest_happened_at(runs: list[Any]) -> str:
         latest = ""
         for run in runs:
@@ -1338,9 +1394,17 @@ class AgentEngine:
 
         target_session_ids = self._subagent_target_session_ids(runs)
         target_user_ids = self._subagent_target_user_ids(runs)
+        parallel_groups = self._subagent_parallel_group_metadata(runs)
         text = self._subagent_digest_memory_text(
             session_id=session_id,
-            digest=clean_digest,
+            digest="\n".join(
+                part
+                for part in (
+                    self._subagent_parallel_group_text(parallel_groups),
+                    clean_digest,
+                )
+                if str(part or "").strip()
+            ),
             target_session_ids=target_session_ids,
         )
         if not text:
@@ -1360,6 +1424,9 @@ class AgentEngine:
             ],
             "skip_profile_sync": True,
         }
+        if parallel_groups:
+            metadata["subagent_parallel_groups"] = parallel_groups
+            metadata["subagent_parallel_group_count"] = len(parallel_groups)
         if channel:
             metadata["channel"] = channel
         share_scopes = sorted(

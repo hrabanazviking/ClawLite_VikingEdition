@@ -379,6 +379,10 @@ def _parallel_group_summaries(
     return ordered[: max(1, int(limit or 1))]
 
 
+def _parallel_group_id(run: SubagentRun) -> str:
+    return str(dict(getattr(run, "metadata", {}) or {}).get("parallel_group_id", "") or "").strip()
+
+
 def _default_target_session_ids(
     owner_session_id: str,
     *,
@@ -947,6 +951,8 @@ class SubagentsTool(Tool):
                 "session_id": {"type": "string"},
                 "sessionId": {"type": "string"},
                 "sessionKey": {"type": "string"},
+                "group_id": {"type": "string"},
+                "groupId": {"type": "string"},
                 "run_id": {"type": "string"},
                 "runId": {"type": "string"},
                 "all": {"type": "boolean"},
@@ -961,6 +967,7 @@ class SubagentsTool(Tool):
         if action == "list":
             maintenance = await self.manager.sweep_async()
             rows = self.manager.list_runs(session_id=session_id)
+            resumable_rows = [run for run in rows if bool(dict(getattr(run, "metadata", {}) or {}).get("resumable", False))]
             return _json(
                 {
                     "status": "ok",
@@ -970,6 +977,8 @@ class SubagentsTool(Tool):
                     "count": len(rows),
                     "parallel_group_count": len(_parallel_group_summaries(rows)),
                     "parallel_groups": _parallel_group_summaries(rows),
+                    "resumable_parallel_group_count": len(_parallel_group_summaries(resumable_rows)),
+                    "resumable_parallel_groups": _parallel_group_summaries(resumable_rows),
                     "runs": [_run_to_payload(run) for run in rows],
                 }
             )
@@ -995,6 +1004,7 @@ class SubagentsTool(Tool):
                     }
                 )
             run_id = str(arguments.get("run_id") or arguments.get("runId") or "").strip()
+            group_id = str(arguments.get("group_id") or arguments.get("groupId") or "").strip()
             resume_all = _coerce_bool(arguments.get("all"), default=False)
             limit = _coerce_limit(arguments.get("limit"), default=20, minimum=1, maximum=200)
             target_runs: list[SubagentRun] = []
@@ -1010,6 +1020,24 @@ class SubagentsTool(Tool):
                         }
                     )
                 target_runs = [run]
+            elif group_id:
+                rows = self.manager.list_runs(session_id=session_id, active_only=False)
+                target_runs = [
+                    run
+                    for run in rows
+                    if bool(dict(getattr(run, "metadata", {}) or {}).get("resumable", False))
+                    and _parallel_group_id(run) == group_id
+                ][:limit]
+                if not target_runs:
+                    return _json(
+                        {
+                            "status": "failed",
+                            "action": "resume",
+                            "session_id": session_id,
+                            "group_id": group_id,
+                            "error": "parallel_group_not_found",
+                        }
+                    )
             elif resume_all:
                 target_runs = self.manager.list_resumable_runs(session_id=session_id, limit=limit)
             else:
@@ -1039,6 +1067,7 @@ class SubagentsTool(Tool):
                     "status": status,
                     "action": "resume",
                     "session_id": session_id,
+                    "group_id": group_id,
                     "requested": len(target_runs),
                     "resumed": len(resumed),
                     "failed": failed,
