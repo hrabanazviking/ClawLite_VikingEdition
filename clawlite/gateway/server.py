@@ -316,6 +316,7 @@ class DiagnosticsResponse(BaseModel):
     environment: dict[str, Any] = {}
     http: dict[str, Any] = {}
     ws: dict[str, Any] = {}
+    self_evolution: dict[str, Any] = {}
 
 
 @dataclass(slots=True)
@@ -614,6 +615,7 @@ class RuntimeContainer:
     skills_loader: SkillsLoader
     memory_monitor: MemoryMonitor | None = None
     supervisor: RuntimeSupervisor | None = None
+    self_evolution: Any | None = None
 
 
 @dataclass(slots=True)
@@ -633,6 +635,7 @@ class GatewayLifecycleState:
                 "skills_watcher": {"enabled": True, "running": False, "last_error": ""},
                 "proactive_monitor": {"enabled": False, "running": False, "last_error": ""},
                 "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
+                "self_evolution": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
                 "wake_pressure": {
                     "enabled": True,
@@ -1061,6 +1064,22 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     autonomy_log = AutonomyLog(path=Path(config.state_path) / "autonomy-events.json")
     tools.register(MessageTool(_MessageAPI(channels)))
 
+    # Phase 7 – Self-Evolution Engine
+    from clawlite.runtime.self_evolution import SelfEvolutionEngine
+
+    async def _evo_run_llm(prompt: str) -> str:
+        result = await engine.run(session_id="self_evolution:system", user_text=prompt)
+        return result.text
+
+    _evo_project_root = Path(__file__).resolve().parent.parent.parent
+    self_evolution = SelfEvolutionEngine(
+        project_root=_evo_project_root,
+        run_llm=_evo_run_llm,
+        cooldown_s=float(config.gateway.autonomy.self_evolution_cooldown_s),
+        enabled=bool(config.gateway.autonomy.self_evolution_enabled),
+        log_path=Path(config.state_path) / "evolution-log.json",
+    )
+
     bind_event("gateway.runtime").info("runtime ready provider_model={} tools={}", config.agents.defaults.model, len(tools.schema()))
     return RuntimeContainer(
         config=config,
@@ -1074,6 +1093,7 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         workspace=workspace,
         skills_loader=skills,
         memory_monitor=memory_monitor,
+        self_evolution=self_evolution,
     )
 
 
@@ -2707,6 +2727,29 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         proactive_task = None
         bind_event("proactive.lifecycle").info("proactive monitor stopped")
 
+    async def _start_self_evolution() -> None:
+        if runtime.self_evolution is None:
+            return
+        bind_event("self_evolution.lifecycle").info("self_evolution loop starting")
+
+        async def _evo_loop() -> None:
+            cooldown = float(getattr(runtime.self_evolution, "cooldown_s", 3600.0))
+            while True:
+                try:
+                    await runtime.self_evolution.run_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    bind_event("self_evolution.lifecycle").error("self_evolution tick failed error={}", exc)
+                await asyncio.sleep(cooldown)
+
+        _evo_task = asyncio.create_task(_evo_loop())
+        lifecycle.mark_component("self_evolution", running=True)
+        bind_event("self_evolution.lifecycle").info("self_evolution loop started")
+
+    async def _stop_self_evolution() -> None:
+        lifecycle.mark_component("self_evolution", running=False)
+
     async def _supervisor_incident_checks() -> list[SupervisorIncident]:
         incidents: list[SupervisorIncident] = []
 
@@ -2995,6 +3038,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("proactive_monitor", _start_proactive_monitor, _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
             ("memory_quality_tuning", _start_memory_quality_tuning, _stop_memory_quality_tuning, bool(cfg.gateway.autonomy.tuning_loop_enabled)),
+            ("self_evolution", _start_self_evolution, _stop_self_evolution, bool(cfg.gateway.autonomy.self_evolution_enabled and runtime.self_evolution is not None)),
             ("supervisor", runtime.supervisor.start, runtime.supervisor.stop, bool(cfg.gateway.supervisor.enabled)),
         ]
 
@@ -3175,6 +3219,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("proactive_monitor", _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
             ("memory_quality_tuning", _stop_memory_quality_tuning, bool(cfg.gateway.autonomy.tuning_loop_enabled)),
+            ("self_evolution", _stop_self_evolution, bool(cfg.gateway.autonomy.self_evolution_enabled and runtime.self_evolution is not None)),
             ("cron", runtime.cron.stop, True),
             ("autonomy_wake", runtime.autonomy_wake.stop, True),
             ("channels", runtime.channels.stop, True),
@@ -3699,6 +3744,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             environment=environment,
             http=await http_telemetry.snapshot(),
             ws=await ws_telemetry.snapshot(),
+            self_evolution=runtime.self_evolution.status() if runtime.self_evolution is not None else {},
         )
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
@@ -3723,6 +3769,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "text": decision.text,
             },
         }
+
+    @app.get("/v1/self-evolution/status")
+    async def self_evolution_status(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        evo = runtime.self_evolution
+        if evo is None:
+            return {"enabled": False, "status": {}, "recent": []}
+        recent = evo.log.recent(10)
+        return {"enabled": evo.enabled, "status": evo.status(), "recent": recent}
+
+    @app.post("/v1/self-evolution/trigger")
+    async def self_evolution_trigger(request: Request) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        evo = runtime.self_evolution
+        if evo is None:
+            raise HTTPException(status_code=404, detail="self_evolution_not_configured")
+        status = await evo.run_once(force=True)
+        return {"ok": True, "status": status}
 
     async def _chat_handler(req: ChatRequest, request: Request) -> ChatResponse:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)

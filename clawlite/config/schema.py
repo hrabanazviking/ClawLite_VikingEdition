@@ -116,6 +116,8 @@ class GatewayAutonomyConfig:
     tuning_degrading_streak_threshold: int = 2
     tuning_recent_actions_limit: int = 20
     tuning_error_backoff_s: int = 900
+    self_evolution_enabled: bool = False
+    self_evolution_cooldown_s: int = 3600
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
@@ -231,6 +233,8 @@ class GatewayAutonomyConfig:
         )
         tuning_recent_actions_limit_raw = _raw_with_alias("tuning_recent_actions_limit", "tuningRecentActionsLimit", 20)
         tuning_error_backoff_raw = _raw_with_alias("tuning_error_backoff_s", "tuningErrorBackoffS", 900)
+        self_evolution_enabled_raw = _raw_with_alias("self_evolution_enabled", "selfEvolutionEnabled", False)
+        self_evolution_cooldown_raw = _raw_with_alias("self_evolution_cooldown_s", "selfEvolutionCooldownS", 3600)
 
         action_cooldown_s = max(0.0, float(action_cooldown_raw or 120.0))
         action_rate_limit_per_hour = max(1, int(action_rate_limit_raw or 20))
@@ -267,6 +271,8 @@ class GatewayAutonomyConfig:
             tuning_degrading_streak_threshold=max(1, int(tuning_degrading_streak_threshold_raw or 2)),
             tuning_recent_actions_limit=max(1, int(tuning_recent_actions_limit_raw or 20)),
             tuning_error_backoff_s=max(1, int(tuning_error_backoff_raw or 900)),
+            self_evolution_enabled=bool(self_evolution_enabled_raw),
+            self_evolution_cooldown_s=max(60, int(self_evolution_cooldown_raw or 3600)),
         )
 
 
