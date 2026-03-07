@@ -29,6 +29,7 @@ from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
+from clawlite.providers.catalog import default_provider_model, provider_profile
 from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.providers.hints import provider_telemetry_summary
 from clawlite.providers.reliability import is_quota_429_error
@@ -2517,8 +2518,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             parts.append(f"{label} ({remaining_s:.1f}s)")
         return ", ".join(parts[:4])
 
+    def _active_provider_context() -> tuple[str, str]:
+        provider_obj = getattr(runtime.engine, "provider", None)
+        active_model = str(
+            getattr(provider_obj, "model", "") or getattr(runtime.engine, "provider_model", "") or cfg.agents.defaults.model or cfg.provider.model
+        ).strip()
+        active_provider = str(getattr(provider_obj, "provider_name", "") or "").strip().lower().replace("-", "_")
+        if not active_provider:
+            active_provider = detect_provider_name(active_model)
+        if active_provider == "failover" and active_model:
+            active_provider = detect_provider_name(active_model)
+        return active_provider, active_model
+
+    def _provider_guidance_tail(provider_name: str, active_model: str) -> str:
+        normalized_provider = str(provider_name or "").strip().lower().replace("-", "_")
+        profile = provider_profile(normalized_provider)
+        recommended_model = default_provider_model(normalized_provider)
+        tail_parts: list[str] = []
+        if recommended_model and recommended_model != active_model:
+            tail_parts.append(f"Modelo recomendado: {recommended_model}.")
+        if profile.onboarding_hint:
+            tail_parts.append(f"Dica: {profile.onboarding_hint}")
+        if not tail_parts:
+            return ""
+        return " " + " ".join(tail_parts)
+
     def _provider_error_payload(exc: RuntimeError) -> tuple[int, str]:
         message = str(exc)
+        active_provider, active_model = _active_provider_context()
         if message == "engine_run_timeout":
             return (504, "engine_run_timeout")
         provider_http_code = None
@@ -2533,22 +2560,44 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             provider = message.rsplit(":", 1)[-1]
             return (
                 400,
-                f"Chave de API ausente para o provedor '{provider}'. Defina CLAWLITE_LITELLM_API_KEY ou a chave especifica do provedor.",
+                f"Chave de API ausente para o provedor '{provider}'. Defina CLAWLITE_LITELLM_API_KEY ou a chave especifica do provedor."
+                + _provider_guidance_tail(provider, active_model),
             )
         if message.startswith("provider_auth_error:"):
             provider = message.rsplit(":", 1)[-1]
             return (
                 502,
-                f"Falha de autenticacao no provedor '{provider}'. Verifique a chave configurada e refaça a autenticacao se necessario.",
+                f"Falha de autenticacao no provedor '{provider}'. Verifique a chave configurada e refaça a autenticacao se necessario."
+                + _provider_guidance_tail(provider, active_model),
             )
         if message.startswith("provider_config_error:missing_base_url:"):
             provider = message.rsplit(":", 1)[-1]
             return (
                 400,
-                f"Base URL ausente para o provedor '{provider}'. Configure CLAWLITE_LITELLM_BASE_URL.",
+                f"Base URL ausente para o provedor '{provider}'. Configure CLAWLITE_LITELLM_BASE_URL."
+                + _provider_guidance_tail(provider, active_model),
             )
+        if message.startswith("provider_config_error:ollama_unreachable:"):
+            base_url = message.partition("provider_config_error:ollama_unreachable:")[2].strip()
+            suffix = f" em {base_url}" if base_url else ""
+            return (503, f"Runtime local Ollama indisponivel{suffix}. Inicie 'ollama serve' e confirme a porta 11434.")
+        if message.startswith("provider_config_error:ollama_model_missing:"):
+            model_name = message.partition("provider_config_error:ollama_model_missing:")[2].strip() or active_model
+            return (400, f"Modelo local '{model_name}' nao esta carregado no Ollama. Execute 'ollama pull {model_name}'.")
+        if message.startswith("provider_config_error:vllm_unreachable:"):
+            base_url = message.partition("provider_config_error:vllm_unreachable:")[2].strip()
+            suffix = f" em {base_url}" if base_url else ""
+            return (503, f"Runtime local vLLM indisponivel{suffix}. Inicie o servidor e confirme a base URL configurada.")
+        if message.startswith("provider_config_error:vllm_model_missing:"):
+            model_name = message.partition("provider_config_error:vllm_model_missing:")[2].strip() or active_model
+            return (400, f"Modelo '{model_name}' nao foi encontrado no vLLM. Suba o modelo no servidor ou ajuste a configuracao.")
         if message.startswith("provider_config_error:"):
-            return (400, "Configuracao invalida do provedor. Revise modelo, base URL e chave de API.")
+            provider_label = active_provider or "ativo"
+            return (
+                400,
+                f"Configuracao invalida do provedor '{provider_label}'. Revise modelo, base URL e chave de API."
+                + _provider_guidance_tail(provider_label, active_model),
+            )
         if message.startswith("provider_failover_cooldown:all_candidates_cooling_down:"):
             detail = message.partition("provider_failover_cooldown:all_candidates_cooling_down:")[2]
             formatted = _parse_failover_cooling_down(detail)
@@ -2565,27 +2614,52 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 cooldown_hint = ""
             return (
                 503,
-                f"Provider '{provider_name}' entrou em modo de protecao apos falhas consecutivas.{cooldown_hint}",
+                f"Provider '{provider_name}' entrou em modo de protecao apos falhas consecutivas.{cooldown_hint}"
+                + _provider_guidance_tail(provider_name, active_model),
             )
         if provider_http_code == "400":
+            provider_label = active_provider or "remoto"
             hint = provider_http_detail or "Verifique modelo, chave de API e base URL do provedor."
-            return (400, f"Requisicao invalida ao provedor (400). {hint}")
+            return (
+                400,
+                f"Requisicao invalida ao provedor '{provider_label}' (400). {hint}" + _provider_guidance_tail(provider_label, active_model),
+            )
         if provider_http_code in {"401", "403"}:
+            provider_label = active_provider or "remoto"
             return (
                 502,
-                f"Falha de autenticacao no provedor (HTTP {provider_http_code}). Verifique CLAWLITE_MODEL e CLAWLITE_LITELLM_API_KEY."
-                + (f" Detalhe: {provider_http_detail}" if provider_http_detail else ""),
+                f"Falha de autenticacao no provedor '{provider_label}' (HTTP {provider_http_code}). Verifique CLAWLITE_MODEL e CLAWLITE_LITELLM_API_KEY."
+                + (f" Detalhe: {provider_http_detail}" if provider_http_detail else "")
+                + _provider_guidance_tail(provider_label, active_model),
             )
         if provider_http_code == "429" or message == "provider_429_exhausted":
+            provider_label = active_provider or "remoto"
             if is_quota_429_error(message):
                 detail = f" Detalhe: {provider_http_detail}" if provider_http_detail else ""
-                return (429, f"Quota ou limite de billing esgotado no provedor.{detail}")
-            return (429, "Limite de requisicoes no provedor. Tente novamente em instantes.")
+                return (
+                    429,
+                    f"Quota ou limite de billing esgotado no provedor '{provider_label}'.{detail}"
+                    + _provider_guidance_tail(provider_label, active_model),
+                )
+            return (
+                429,
+                f"Limite de requisicoes no provedor '{provider_label}'. Tente novamente em instantes."
+                + _provider_guidance_tail(provider_label, active_model),
+            )
         if provider_http_code:
+            provider_label = active_provider or "remoto"
             detail = f" Detalhe: {provider_http_detail}" if provider_http_detail else ""
-            return (502, f"Falha no provedor remoto (HTTP {provider_http_code}).{detail}")
+            return (
+                502,
+                f"Falha no provedor '{provider_label}' (HTTP {provider_http_code}).{detail}"
+                + _provider_guidance_tail(provider_label, active_model),
+            )
         if message.startswith("provider_network_error:"):
-            return (503, "Provedor remoto indisponivel no momento (erro de rede).")
+            provider_label = active_provider or "remoto"
+            return (
+                503,
+                f"Provedor '{provider_label}' indisponivel no momento (erro de rede)." + _provider_guidance_tail(provider_label, active_model),
+            )
         if message.startswith("codex_http_error:401"):
             return (502, "Falha de autenticacao no Codex (401). Refaça login OAuth do provedor Codex.")
         if message == "codex_auth_error:missing_access_token":

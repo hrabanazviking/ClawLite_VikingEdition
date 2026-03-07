@@ -1433,6 +1433,57 @@ def test_gateway_provider_error_payload_quota_429_is_specific(tmp_path: Path) ->
         assert "billing" in text
 
 
+def test_gateway_provider_error_payload_http_401_includes_provider_guidance(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        provider={"model": "openai/gpt-4.1-mini"},
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = SimpleNamespace(provider_name="openai", model="openai/gpt-4.1-mini")
+
+    async def _raise_provider(*, session_id: str, user_text: str):
+        raise RuntimeError("provider_http_error:401")
+
+    app.state.runtime.engine.run = _raise_provider
+
+    with TestClient(app) as client:
+        chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert chat.status_code == 502
+        payload = chat.json()
+        text = str(payload.get("error", "")).lower()
+        assert "openai" in text
+        assert "gpt-4o-mini" in text
+        assert "billing" in text
+
+
+def test_gateway_provider_error_payload_ollama_model_missing_is_actionable(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        provider={"model": "openai/llama3.2"},
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = SimpleNamespace(provider_name="ollama", model="openai/llama3.2")
+
+    async def _raise_provider(*, session_id: str, user_text: str):
+        raise RuntimeError("provider_config_error:ollama_model_missing:llama3.2")
+
+    app.state.runtime.engine.run = _raise_provider
+
+    with TestClient(app) as client:
+        chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert chat.status_code == 400
+        payload = chat.json()
+        text = str(payload.get("error", "")).lower()
+        assert "ollama" in text
+        assert "ollama pull llama3.2" in text
+
+
 def test_run_heartbeat_contract_skips_on_heartbeat_ok() -> None:
     class _Engine:
         async def run(self, *, session_id: str, user_text: str):
