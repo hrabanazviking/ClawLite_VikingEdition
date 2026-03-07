@@ -18,6 +18,7 @@ from clawlite.core.memory_monitor import MemoryMonitor
 from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_status_hints, provider_transport_name
+from clawlite.providers.model_probe import evaluate_remote_model_check, model_check_hints
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.providers.reliability import classify_provider_error
 from clawlite.workspace.loader import TEMPLATE_FILES
@@ -735,6 +736,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     probe_method = "GET"
     default_base_url = str(getattr(spec, "default_base_url", "") or "")
     key_envs = list(getattr(spec, "key_envs", ()) or [])
+    model_check: dict[str, Any] = {"checked": False, "ok": True, "enforced": False}
 
     if provider == "ollama":
         endpoint = "/api/tags"
@@ -941,13 +943,25 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
         error = "" if ok else f"http_status:{status_code}"
         if not ok:
             error_detail = _response_error_detail(response)
+        elif provider not in {"ollama", "vllm"} and payload is None:
+            try:
+                response_payload = response.json()
+            except Exception:
+                response_payload = None
+            if spec is not None:
+                model_check = evaluate_remote_model_check(
+                    provider=provider,
+                    model=model,
+                    aliases=spec.aliases,
+                    payload=response_payload,
+                    is_gateway=bool(spec.is_gateway),
+                )
     except Exception as exc:
         status_code = 0
         ok = False
         error = str(exc)
         error_detail = ""
 
-    model_check: dict[str, Any] = {"checked": False, "ok": True}
     if ok and provider in {"ollama", "vllm"}:
         model_check = probe_local_provider_runtime(
             model=model,
@@ -969,6 +983,22 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     else:
         error_class = ""
 
+    hints = provider_probe_hints(
+        provider=provider,
+        error=error,
+        error_detail=error_detail,
+        status_code=status_code,
+        auth_mode=auth_mode,
+        transport=transport,
+        endpoint=endpoint,
+        default_base_url=default_base_url,
+        key_envs=key_envs,
+        model=model,
+    )
+    for hint in model_check_hints(model_check, model=model):
+        if hint not in hints:
+            hints.append(hint)
+
     return {
         "ok": ok,
         "provider": provider,
@@ -988,18 +1018,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
         "default_base_url": default_base_url,
         "key_envs": key_envs,
         "model_check": model_check,
-        "hints": provider_probe_hints(
-            provider=provider,
-            error=error,
-            error_detail=error_detail,
-            status_code=status_code,
-            auth_mode=auth_mode,
-            transport=transport,
-            endpoint=endpoint,
-            default_base_url=default_base_url,
-            key_envs=key_envs,
-            model=model,
-        ),
+        "hints": hints,
     }
 
 

@@ -12,8 +12,9 @@ from rich.prompt import Prompt
 
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
-from clawlite.providers.discovery import normalize_local_runtime_base_url
+from clawlite.providers.discovery import normalize_local_runtime_base_url, probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_transport_name
+from clawlite.providers.model_probe import evaluate_remote_model_check, model_check_hints
 from clawlite.providers.registry import SPECS
 from clawlite.workspace.loader import WorkspaceLoader
 
@@ -181,6 +182,7 @@ def probe_provider(
 ) -> dict[str, Any]:
     spec = _provider_spec(provider)
     provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
+    selected_model = str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
     if spec is None:
         return {
             "ok": False,
@@ -190,6 +192,10 @@ def probe_provider(
             "base_url": str(base_url or "").strip(),
             "transport": "native",
             "probe_method": "",
+            "error_detail": "",
+            "default_base_url": "",
+            "key_envs": [],
+            "model_check": {"checked": False, "ok": True, "enforced": False},
             "hints": [],
         }
 
@@ -202,6 +208,9 @@ def probe_provider(
     payload: dict[str, Any] | None = None
     probe_method = "GET"
     transport = provider_transport_name(provider=provider_key, spec=spec, auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key")
+    default_base_url = str(spec.default_base_url or "")
+    key_envs = list(spec.key_envs)
+    model_check: dict[str, Any] = {"checked": False, "ok": True, "enforced": False}
 
     if provider_key == "ollama":
         url = _join_base(resolved_base, "/api/tags")
@@ -214,7 +223,7 @@ def probe_provider(
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
     elif spec.native_transport == "anthropic":
         resolved_model = _probe_model_name(
-            str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, ""),
+            selected_model,
             provider_key,
             spec.aliases,
         )
@@ -238,13 +247,21 @@ def probe_provider(
             "base_url": resolved_base,
             "transport": transport,
             "probe_method": probe_method,
+            "error_detail": "",
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
             "hints": provider_probe_hints(
                 provider=provider_key,
                 error=f"unsupported_provider:{provider_key}",
+                error_detail="",
                 status_code=0,
                 auth_mode="api_key",
                 transport=transport,
                 endpoint="",
+                default_base_url=default_base_url,
+                key_envs=key_envs,
+                model=selected_model,
             ),
         }
 
@@ -261,13 +278,21 @@ def probe_provider(
             "body": "",
             "transport": transport,
             "probe_method": probe_method,
+            "error_detail": "",
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
             "hints": provider_probe_hints(
                 provider=provider_key,
                 error=error,
+                error_detail="",
                 status_code=0,
                 auth_mode="api_key",
                 transport=transport,
                 endpoint=url,
+                default_base_url=default_base_url,
+                key_envs=key_envs,
+                model=selected_model,
             ),
         }
 
@@ -283,8 +308,52 @@ def probe_provider(
         except Exception:
             body = response.text
         error = "" if response.is_success else f"http_status:{response.status_code}"
+        error_detail = ""
+        if not response.is_success:
+            if isinstance(body, dict):
+                error_obj = body.get("error")
+                if isinstance(error_obj, dict):
+                    error_detail = str(error_obj.get("message", "") or error_obj.get("detail", "") or "").strip()
+                elif isinstance(error_obj, str):
+                    error_detail = error_obj.strip()
+                if not error_detail:
+                    error_detail = str(body.get("message", "") or body.get("detail", "") or "").strip()
+            elif isinstance(body, str):
+                error_detail = body.strip()
+        elif provider_key in {"ollama", "vllm"}:
+            model_check = probe_local_provider_runtime(
+                model=selected_model,
+                base_url=resolved_base,
+                timeout_s=max(0.5, float(timeout_s)),
+            )
+        elif payload is None:
+            model_check = evaluate_remote_model_check(
+                provider=provider_key,
+                model=selected_model,
+                aliases=spec.aliases,
+                payload=body,
+                is_gateway=bool(spec.is_gateway),
+            )
+        hints = provider_probe_hints(
+            provider=provider_key,
+            error=error,
+            error_detail=error_detail,
+            status_code=int(response.status_code),
+            auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
+            transport=transport,
+            endpoint=url,
+            default_base_url=default_base_url,
+            key_envs=key_envs,
+            model=selected_model,
+        )
+        for hint in model_check_hints(model_check, model=selected_model):
+            if hint not in hints:
+                hints.append(hint)
+        ok = bool(response.is_success)
+        if provider_key in {"ollama", "vllm"}:
+            ok = ok and bool(model_check.get("ok", True))
         return {
-            "ok": bool(response.is_success),
+            "ok": ok,
             "provider": provider_key,
             "status_code": int(response.status_code),
             "url": url,
@@ -294,17 +363,26 @@ def probe_provider(
             "body": body if response.is_success else "",
             "transport": transport,
             "probe_method": probe_method,
-            "hints": provider_probe_hints(
-                provider=provider_key,
-                error=error,
-                status_code=int(response.status_code),
-                auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
-                transport=transport,
-                endpoint=url,
-            ),
+            "error_detail": error_detail,
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
+            "hints": hints,
         }
     except Exception as exc:
         error = str(exc)
+        hints = provider_probe_hints(
+            provider=provider_key,
+            error=error,
+            error_detail="",
+            status_code=0,
+            auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
+            transport=transport,
+            endpoint=url,
+            default_base_url=default_base_url,
+            key_envs=key_envs,
+            model=selected_model,
+        )
         return {
             "ok": False,
             "provider": provider_key,
@@ -316,14 +394,11 @@ def probe_provider(
             "body": "",
             "transport": transport,
             "probe_method": probe_method,
-            "hints": provider_probe_hints(
-                provider=provider_key,
-                error=error,
-                status_code=0,
-                auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
-                transport=transport,
-                endpoint=url,
-            ),
+            "error_detail": "",
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
+            "hints": hints,
         }
 
 

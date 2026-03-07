@@ -1530,6 +1530,58 @@ def test_provider_live_probe_ollama_success_detects_missing_model(tmp_path: Path
     assert any("ollama pull llama3.2" in row for row in payload["hints"])
 
 
+def test_provider_live_probe_openai_model_not_listed_returns_soft_warning(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-1234")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4.1-mini"},
+                "agents": {"defaults": {"model": "openai/gpt-4.1-mini"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Response:
+        status_code = 200
+        is_success = True
+        text = "ok"
+
+        @staticmethod
+        def json() -> dict[str, list[dict[str, str]]]:
+            return {"data": [{"id": "gpt-4o-mini"}]}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            assert url.endswith("/models")
+            assert str(headers.get("Authorization", "")).startswith("Bearer sk-")
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _Client)
+
+    from clawlite.config.loader import load_config
+
+    payload = provider_live_probe(load_config(config_path), timeout=0.1)
+    assert payload["ok"] is True
+    assert payload["provider"] == "openai"
+    assert payload["model_check"]["checked"] is True
+    assert payload["model_check"]["ok"] is False
+    assert payload["model_check"]["detail"] == "model_not_listed"
+    assert any("nao apareceu na lista remota" in row.lower() for row in payload["hints"])
+
+
 def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

@@ -96,6 +96,8 @@ def test_probe_provider_openai_success(monkeypatch) -> None:
     assert payload["status_code"] == 200
     assert payload["api_key_masked"].endswith("3456")
     assert payload["transport"] == "openai_compatible"
+    assert payload["model_check"]["checked"] is True
+    assert payload["model_check"]["ok"] is True
     assert any("OpenAI-compatible" in row for row in payload["hints"])
 
 
@@ -146,11 +148,62 @@ def test_probe_provider_ollama_accepts_runtime_base_url_with_v1(monkeypatch) -> 
             return _Response()
 
     monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_local_provider_runtime",
+        lambda **kwargs: {
+            "checked": True,
+            "ok": True,
+            "runtime": "ollama",
+            "base_url": kwargs["base_url"],
+            "model": "llama3.2",
+            "error": "",
+            "detail": "",
+            "available_models": ["llama3.2:latest"],
+        },
+    )
     payload = probe_provider("ollama", api_key="", base_url="http://127.0.0.1:11434/v1")
     assert payload["ok"] is True
     assert payload["status_code"] == 200
     assert payload["transport"] == "local_runtime"
     assert any("Ollama respondeu" in row for row in payload["hints"])
+
+
+def test_probe_provider_openai_model_not_listed_returns_soft_warning(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        is_success = True
+        text = "ok"
+
+        @staticmethod
+        def json() -> dict[str, list[dict[str, str]]]:
+            return {"data": [{"id": "gpt-4o-mini"}]}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            assert url.endswith("/models")
+            assert str(headers.get("Authorization", "")).startswith("Bearer sk-")
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    payload = probe_provider(
+        "openai",
+        api_key="sk-openai-123456",
+        base_url="https://api.openai.com/v1",
+        model="openai/gpt-4.1-mini",
+    )
+    assert payload["ok"] is True
+    assert payload["model_check"]["checked"] is True
+    assert payload["model_check"]["ok"] is False
+    assert any("nao apareceu na lista remota" in row.lower() for row in payload["hints"])
 
 
 def test_probe_provider_openai_missing_api_key_returns_actionable_hint() -> None:
