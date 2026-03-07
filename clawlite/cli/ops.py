@@ -1093,6 +1093,10 @@ def provider_use_model(
     provider_norm = str(provider or "").strip().lower().replace("_", "-")
     model_norm = str(model or "").strip()
     fallback_norm = str(fallback_model or "").strip()
+    guidance = _provider_profile_payload(provider_norm)
+    provider_spec = _provider_spec(provider_norm)
+    auth_mode = "oauth" if provider_norm == "openai-codex" else ("none" if provider_norm in {"ollama", "vllm"} else "api_key")
+    transport = provider_transport_name(provider=provider_norm, spec=provider_spec, auth_mode=auth_mode)
 
     if not provider_norm:
         return {
@@ -1132,6 +1136,8 @@ def provider_use_model(
                 "provider": provider_norm,
                 "model": model_norm,
                 "expected": "openai-codex/*",
+                "transport": transport,
+                **guidance,
             }
     else:
         expected_provider = provider_norm.replace("-", "_")
@@ -1143,7 +1149,40 @@ def provider_use_model(
                 "provider": provider_norm,
                 "model": model_norm,
                 "detected_provider": detected_provider,
+                "expected": f"{provider_norm}/*",
+                "transport": transport,
+                **guidance,
             }
+
+    if fallback_norm:
+        if provider_norm == "openai-codex":
+            fallback_lower = fallback_norm.lower()
+            if not (fallback_lower.startswith("openai-codex/") or fallback_lower.startswith("openai_codex/")):
+                return {
+                    "ok": False,
+                    "error": "fallback_provider_model_mismatch",
+                    "provider": provider_norm,
+                    "model": model_norm,
+                    "fallback_model": fallback_norm,
+                    "expected": "openai-codex/*",
+                    "transport": transport,
+                    **guidance,
+                }
+        else:
+            expected_provider = provider_norm.replace("-", "_")
+            fallback_detected_provider = detect_provider_name(fallback_norm)
+            if fallback_detected_provider != expected_provider:
+                return {
+                    "ok": False,
+                    "error": "fallback_provider_model_mismatch",
+                    "provider": provider_norm,
+                    "model": model_norm,
+                    "fallback_model": fallback_norm,
+                    "detected_provider": fallback_detected_provider,
+                    "expected": f"{provider_norm}/*",
+                    "transport": transport,
+                    **guidance,
+                }
 
     config.provider.model = model_norm
     config.agents.defaults.model = model_norm
@@ -1159,6 +1198,8 @@ def provider_use_model(
         "provider": provider_norm,
         "model": str(config.provider.model),
         "fallback_model": str(config.provider.fallback_model or ""),
+        "transport": transport,
+        **guidance,
     }
 
 
@@ -1207,6 +1248,9 @@ def provider_validation(config: AppConfig) -> dict[str, Any]:
     warnings: list[str] = []
 
     oauth = bool(spec.is_oauth) if spec is not None else False
+    auth_mode = "oauth" if oauth else ("none" if provider_name in {"ollama", "vllm"} else "api_key")
+    transport = provider_transport_name(provider=provider_name, spec=spec, auth_mode=auth_mode)
+    guidance = _provider_profile_payload(provider_name)
     checks.append({"name": "provider_detected", "status": "ok", "detail": provider_name})
 
     if oauth:
@@ -1325,12 +1369,14 @@ def provider_validation(config: AppConfig) -> dict[str, Any]:
         "ok": not errors,
         "model": model,
         "provider": provider_name,
+        "transport": transport,
         "oauth": oauth,
         "api_key_masked": _mask_secret(resolved_api_key),
         "oauth_token_masked": resolve_codex_auth(config)["token_masked"] if provider_name == "openai_codex" else "",
         "oauth_source": resolve_codex_auth(config)["source"] if provider_name == "openai_codex" else "",
         "base_url": resolved_base_url,
         "env_key_present": env_hits,
+        **guidance,
         "checks": checks,
         "errors": errors,
         "warnings": warnings,

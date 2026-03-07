@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from clawlite.providers.catalog import default_provider_model, provider_profile
+
 
 def provider_transport_name(*, provider: str, spec: Any | None = None, auth_mode: str = "") -> str:
     provider_name = str(provider or "").strip().lower().replace("-", "_")
@@ -191,10 +193,20 @@ def provider_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
     counters_raw = payload.get("counters")
     counters = counters_raw if isinstance(counters_raw, dict) else {}
     provider_name = str(payload.get("provider_name", payload.get("provider", "")) or "").strip().lower()
+    profile_name = provider_name.replace("-", "_")
+    if profile_name == "failover":
+        model_name = str(payload.get("model", "") or "").strip()
+        if "/" in model_name:
+            profile_name = model_name.split("/", 1)[0].strip().lower().replace("-", "_")
     transport = str(payload.get("transport", "") or "").strip()
+    profile = provider_profile(profile_name)
     summary: dict[str, Any] = {
         "state": "healthy",
         "transport": transport,
+        "family": profile.family,
+        "recommended_model": default_provider_model(profile_name),
+        "recommended_models": list(profile.recommended_models),
+        "onboarding_hint": profile.onboarding_hint,
         "hints": [],
     }
     hints: list[str] = []
@@ -248,6 +260,9 @@ def provider_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "retry_exhausted": "O provider esgotou tentativas de retry antes de responder com sucesso.",
         }
         _append_hint(hints, messages[last_error_class])
+
+    if profile.onboarding_hint:
+        _append_hint(hints, profile.onboarding_hint)
 
     summary["hints"] = hints
     return summary

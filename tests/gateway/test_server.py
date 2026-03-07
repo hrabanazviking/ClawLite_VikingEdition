@@ -3527,6 +3527,10 @@ def test_gateway_diagnostics_provider_summary_surfaces_failover_state(tmp_path: 
 
         assert summary["state"] == "cooldown"
         assert summary["transport"] == "openai_compatible"
+        assert summary["family"] == "openai_compatible"
+        assert summary["recommended_model"] == "openai/gpt-4o-mini"
+        assert "openai/gpt-4o-mini" in summary["recommended_models"]
+        assert "billing" in summary["onboarding_hint"].lower()
         assert summary["cooling_candidates"][0]["model"] == "openai/gpt-4o-mini"
         assert any("cooldown" in row.lower() for row in summary["hints"])
         assert any("rate limit" in row.lower() for row in summary["hints"])

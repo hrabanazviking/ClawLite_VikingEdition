@@ -1676,6 +1676,11 @@ def test_cli_provider_use_success_updates_config_and_returns_rc0(tmp_path: Path,
     assert payload["provider"] == "openai"
     assert payload["model"] == "openai/gpt-4.1-mini"
     assert payload["fallback_model"] == "openai/gpt-4o-mini"
+    assert payload["transport"] == "openai_compatible"
+    assert payload["family"] == "openai_compatible"
+    assert payload["recommended_model"] == "openai/gpt-4o-mini"
+    assert "openai/gpt-4o-mini" in payload["recommended_models"]
+    assert "billing" in payload["onboarding_hint"].lower()
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["provider"]["model"] == "openai/gpt-4.1-mini"
@@ -1742,6 +1747,79 @@ def test_cli_provider_use_provider_model_mismatch_returns_rc2(tmp_path: Path, ca
     assert payload["ok"] is False
     assert payload["error"] == "provider_model_mismatch"
     assert payload["provider"] == "gemini"
+    assert payload["expected"] == "gemini/*"
+    assert payload["transport"] == "openai_compatible"
+    assert payload["recommended_model"] == "gemini/gemini-2.5-flash"
+    assert "gemini/gemini-2.5-flash" in payload["recommended_models"]
+    assert "google generative language" in payload["onboarding_hint"].lower()
+
+
+def test_cli_provider_use_fallback_model_mismatch_returns_rc2(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_use = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "use",
+            "openai",
+            "--model",
+            "openai/gpt-4.1-mini",
+            "--fallback-model",
+            "groq/llama-3.1-8b-instant",
+        ]
+    )
+    assert rc_use == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "fallback_provider_model_mismatch"
+    assert payload["provider"] == "openai"
+    assert payload["fallback_model"] == "groq/llama-3.1-8b-instant"
+    assert payload["detected_provider"] == "groq"
+    assert payload["expected"] == "openai/*"
+    assert payload["recommended_model"] == "openai/gpt-4o-mini"
+    assert "billing" in payload["onboarding_hint"].lower()
+
+
+def test_cli_validate_provider_surfaces_guidance_fields(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MINIMAX_API_KEY", "mini-key-1234")
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "minimax/MiniMax-M2.5"},
+                "providers": {"minimax": {"api_base": "https://api.minimax.io/anthropic"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(["--config", str(config_path), "validate", "provider"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["provider"] == "minimax"
+    assert payload["transport"] == "anthropic"
+    assert payload["family"] == "anthropic_compatible"
+    assert payload["recommended_model"] == "minimax/MiniMax-M2.5"
+    assert "minimax/MiniMax-M2.5" in payload["recommended_models"]
+    assert "/anthropic" in payload["onboarding_hint"]
 
 
 def test_cli_provider_use_clear_fallback_clears_config(tmp_path: Path, capsys) -> None:
