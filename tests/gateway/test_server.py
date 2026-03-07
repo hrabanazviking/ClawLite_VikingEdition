@@ -1390,6 +1390,65 @@ def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -
         )
 
 
+def test_gateway_startup_inbound_replay_sends_autonomy_notice(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.channels.start = AsyncMock(return_value=None)
+    app.state.runtime.channels.stop = AsyncMock(return_value=None)
+    app.state.runtime.channels.send = AsyncMock(return_value="ok")
+    app.state.runtime.channels.startup_replay_status = lambda: {
+        "enabled": True,
+        "running": False,
+        "last_error": "",
+        "restored": 0,
+        "replayed": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    app.state.runtime.channels.startup_inbound_replay_status = lambda: {
+        "enabled": True,
+        "running": False,
+        "last_error": "",
+        "restored": 1,
+        "replayed": 1,
+        "remaining": 0,
+        "replayed_by_channel": {"telegram": 1},
+    }
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        payload: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            payload = client.get("/v1/diagnostics").json()
+            if app.state.runtime.channels.send.await_count >= 1:
+                break
+            time.sleep(0.05)
+
+        send_kwargs = app.state.runtime.channels.send.await_args.kwargs
+        metadata = dict(send_kwargs["metadata"])
+        assert metadata["source"] == "inbound_replay"
+        assert metadata["autonomy_notice"] is True
+        assert metadata["autonomy_action"] == "startup_inbound_replay"
+        assert metadata["replayed"] == 1
+        assert metadata["remaining"] == 0
+        assert "startup inbound replay replayed=1 remaining=0" in str(send_kwargs["text"])
+        autonomy_recent = payload["autonomy_log"]["recent"]
+        assert any(
+            str(row.get("action", "")) == "startup_inbound_replay_notice"
+            and str(row.get("status", "")) == "sent"
+            for row in autonomy_recent
+        )
+
+
 def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -2626,14 +2685,19 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "control_plane" in payload
         assert payload["control_plane"]["contract_version"] == "2026-03-04"
         assert "delivery_replay" in payload["control_plane"]["components"]
+        assert "inbound_replay" in payload["control_plane"]["components"]
         assert "queue" in payload
         assert "dead_letter_recent" in payload["queue"]
         assert isinstance(payload["queue"]["dead_letter_recent"], list)
         assert "channels" in payload
         assert "channels_delivery" in payload
+        assert "channels_inbound" in payload
         channels_delivery = payload["channels_delivery"]
+        channels_inbound = payload["channels_inbound"]
         assert set(channels_delivery.keys()) >= {"total", "per_channel", "recent"}
         assert "persistence" in channels_delivery
+        assert set(channels_inbound.keys()) >= {"persistence"}
+        assert "startup_replay" in channels_inbound["persistence"]
         assert isinstance(channels_delivery["recent"], list)
         assert set(channels_delivery["total"].keys()) >= {
             "attempts",

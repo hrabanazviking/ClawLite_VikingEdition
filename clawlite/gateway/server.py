@@ -302,6 +302,7 @@ class DiagnosticsResponse(BaseModel):
     queue: dict[str, Any]
     channels: dict[str, Any]
     channels_delivery: dict[str, Any] = {}
+    channels_inbound: dict[str, Any] = {}
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
     supervisor: dict[str, Any] = {}
@@ -635,6 +636,7 @@ class GatewayLifecycleState:
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
                 "subagent_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0},
                 "delivery_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0, "skipped": 0},
+                "inbound_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "remaining": 0},
                 "bootstrap": {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
             }
@@ -2679,6 +2681,40 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                                 **dict(replay_summary),
                             },
                         )
+                    inbound_component = lifecycle.components.setdefault(
+                        "inbound_replay",
+                        {"enabled": True, "running": False, "last_error": "", "replayed": 0, "remaining": 0},
+                    )
+                    inbound_summary = runtime.channels.startup_inbound_replay_status()
+                    inbound_component["enabled"] = bool(inbound_summary.get("enabled", True))
+                    inbound_component["running"] = bool(inbound_summary.get("running", False))
+                    inbound_component["last_error"] = str(inbound_summary.get("last_error", "") or "")
+                    inbound_component["replayed"] = int(inbound_summary.get("replayed", 0) or 0)
+                    inbound_component["remaining"] = int(inbound_summary.get("remaining", 0) or 0)
+                    _record_autonomy_event(
+                        "channels",
+                        "startup_inbound_replay",
+                        "ok" if not inbound_component["last_error"] else "failed",
+                        summary=(
+                            f"startup inbound replay replayed={inbound_component['replayed']} "
+                            f"remaining={inbound_component['remaining']}"
+                        ),
+                        metadata=dict(inbound_summary),
+                    )
+                    if inbound_component["replayed"] > 0 or bool(inbound_component["last_error"]):
+                        await _send_autonomy_notice(
+                            "channels",
+                            "startup_inbound_replay",
+                            "ok" if not inbound_component["last_error"] else "failed",
+                            text=(
+                                "Autonomy notice: startup inbound replay "
+                                f"replayed={inbound_component['replayed']} remaining={inbound_component['remaining']}."
+                            ),
+                            metadata={
+                                "source": "inbound_replay",
+                                **dict(inbound_summary),
+                            },
+                        )
                 elif name == "autonomy_wake":
                     await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":
@@ -3247,6 +3283,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             queue=runtime.bus.stats(),
             channels=runtime.channels.status(),
             channels_delivery=runtime.channels.delivery_diagnostics(),
+            channels_inbound=runtime.channels.inbound_diagnostics(),
             cron=runtime.cron.status(),
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},

@@ -876,6 +876,56 @@ def test_channel_manager_startup_replays_persisted_dead_letters_after_restart(tm
     asyncio.run(_scenario())
 
 
+def test_channel_manager_startup_replays_persisted_inbound_after_restart(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        state_path = tmp_path / "state"
+
+        first_bus = MessageQueue()
+        blocking_engine = BlockingEngine()
+        first_mgr = ChannelManager(bus=first_bus, engine=blocking_engine)
+        first_mgr.register("fake", FakeChannel)
+        await first_mgr.start({"state_path": str(state_path), "channels": {"fake": {"enabled": True}}})
+
+        first_fake = first_mgr._channels["fake"]
+        await first_fake.emit(
+            session_id="fake:restart-inbound",
+            user_id="u1",
+            text="recover-inbound",
+            metadata={"channel": "fake", "chat_id": "restart-inbound"},
+        )
+        await asyncio.wait_for(blocking_engine.started.wait(), timeout=1.0)
+        await first_mgr.stop()
+
+        inbound_path = state_path / "channels" / "inbound-pending.json"
+        assert inbound_path.exists()
+
+        second_bus = MessageQueue()
+        second_mgr = ChannelManager(bus=second_bus, engine=FakeEngine())
+        second_mgr.register("fake", FakeChannel)
+        await second_mgr.start({"state_path": str(state_path), "channels": {"fake": {"enabled": True}}})
+
+        second_fake = second_mgr._channels["fake"]
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if second_fake.sent:
+                break
+            await asyncio.sleep(0.01)
+
+        assert second_fake.sent
+        assert second_fake.sent[0][0] == "restart-inbound"
+        assert second_fake.sent[0][1] == "reply:fake:restart-inbound:recover-inbound"
+        diagnostics = second_mgr.inbound_diagnostics()
+        assert diagnostics["persistence"]["pending"] == 0
+        assert diagnostics["persistence"]["startup_replay"]["restored"] == 1
+        assert diagnostics["persistence"]["startup_replay"]["replayed"] == 1
+        assert diagnostics["persistence"]["startup_replay"]["replayed_by_channel"] == {"fake": 1}
+        assert second_bus.stats()["inbound_published"] >= 1
+
+        await second_mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_recovers_failed_channel_worker_and_notifies() -> None:
     async def _scenario() -> None:
         RecoveringChannel.starts = 0

@@ -135,6 +135,21 @@ class ChannelManager:
             "failed_by_channel": {},
             "skipped_by_channel": {},
         }
+        self._inbound_persistence_path: Path | None = None
+        self._inbound_replay_on_startup = True
+        self._inbound_replay_limit = 100
+        self._inbound_persistence_lock = asyncio.Lock()
+        self._inbound_persistence_pending = 0
+        self._inbound_startup_replay: dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "path": "",
+            "restored": 0,
+            "replayed": 0,
+            "remaining": 0,
+            "last_error": "",
+            "replayed_by_channel": {},
+        }
         self._recovery_enabled = True
         self._recovery_interval_s = 15.0
         self._recovery_cooldown_s = 30.0
@@ -314,6 +329,36 @@ class ChannelManager:
             return explicit
         return self._derive_delivery_idempotency_key(event)
 
+    @staticmethod
+    def _serialize_inbound_event(event: InboundEvent) -> dict[str, Any]:
+        payload = {
+            "channel": str(event.channel),
+            "session_id": str(event.session_id),
+            "user_id": str(event.user_id),
+            "text": str(event.text),
+            "metadata": dict(event.metadata) if isinstance(event.metadata, dict) else {},
+            "created_at": str(getattr(event, "created_at", "") or ""),
+        }
+        return json.loads(json.dumps(payload, ensure_ascii=True, default=str))
+
+    @staticmethod
+    def _inbound_record_key(event: InboundEvent) -> str:
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        explicit = str(metadata.get("_inbound_idempotency_key", "") or "").strip()
+        if explicit:
+            return explicit
+        payload = "\n".join(
+            [
+                str(event.channel),
+                str(event.session_id),
+                str(event.user_id),
+                str(event.text),
+                json.dumps(metadata, ensure_ascii=True, sort_keys=True, default=str),
+                str(getattr(event, "created_at", "") or ""),
+            ]
+        )
+        return f"inb:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
     def _load_delivery_persistence_locked(self) -> list[OutboundEvent]:
         path = self._delivery_persistence_path
         if path is None or not path.exists():
@@ -459,6 +504,141 @@ class ChannelManager:
 
     def startup_replay_status(self) -> dict[str, Any]:
         return dict(self._delivery_startup_replay)
+
+    def _load_inbound_persistence_locked(self) -> list[InboundEvent]:
+        path = self._inbound_persistence_path
+        if path is None or not path.exists():
+            self._inbound_persistence_pending = 0
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            bind_event("channel.inbound").warning("inbound journal read failed path={} error={}", path, exc)
+            self._inbound_persistence_pending = 0
+            return []
+
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        events: list[InboundEvent] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            metadata_raw = item.get("metadata", {})
+            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+            event = InboundEvent(
+                channel=str(item.get("channel", "") or "").strip(),
+                session_id=str(item.get("session_id", "") or "").strip(),
+                user_id=str(item.get("user_id", "") or "").strip(),
+                text=str(item.get("text", "") or ""),
+                metadata=metadata,
+                created_at=str(item.get("created_at", "") or ""),
+            )
+            if not event.channel or not event.session_id or not event.user_id:
+                continue
+            events.append(event)
+        events.sort(key=lambda row: str(getattr(row, "created_at", "") or ""))
+        self._inbound_persistence_pending = len(events)
+        return events
+
+    def _write_inbound_persistence_locked(self, events: list[InboundEvent]) -> None:
+        path = self._inbound_persistence_path
+        if path is None:
+            self._inbound_persistence_pending = 0
+            return
+        self._inbound_persistence_pending = len(events)
+        if not events:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "items": [self._serialize_inbound_event(event) for event in events],
+        }
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+
+    async def _persist_pending_inbound(self, event: InboundEvent) -> None:
+        if self._inbound_persistence_path is None:
+            return
+        key = self._inbound_record_key(event)
+        async with self._inbound_persistence_lock:
+            events = self._load_inbound_persistence_locked()
+            kept = [row for row in events if self._inbound_record_key(row) != key]
+            kept.append(event)
+            kept.sort(key=lambda row: str(getattr(row, "created_at", "") or ""))
+            self._write_inbound_persistence_locked(kept)
+
+    async def _clear_persisted_inbound(self, event: InboundEvent) -> None:
+        if self._inbound_persistence_path is None:
+            return
+        key = self._inbound_record_key(event)
+        async with self._inbound_persistence_lock:
+            events = self._load_inbound_persistence_locked()
+            kept = [row for row in events if self._inbound_record_key(row) != key]
+            self._write_inbound_persistence_locked(kept)
+
+    async def _restore_persisted_inbound(self) -> tuple[int, dict[str, int]]:
+        if self._inbound_persistence_path is None:
+            self._inbound_persistence_pending = 0
+            return (0, {})
+        if int(self.bus.stats().get("inbound_size", 0) or 0) > 0:
+            async with self._inbound_persistence_lock:
+                self._load_inbound_persistence_locked()
+            return (0, {})
+        async with self._inbound_persistence_lock:
+            events = self._load_inbound_persistence_locked()
+        if not events:
+            return (0, {})
+        replay_budget = max(0, int(self._inbound_replay_limit or 0))
+        if replay_budget <= 0:
+            return (0, {})
+        restored = 0
+        replayed_by_channel: dict[str, int] = {}
+        for event in events[:replay_budget]:
+            await self.bus.publish_inbound(event)
+            restored += 1
+            replayed_by_channel[event.channel] = replayed_by_channel.get(event.channel, 0) + 1
+        bind_event("channel.inbound").info(
+            "inbound journal restored path={} restored={}",
+            self._inbound_persistence_path,
+            restored,
+        )
+        return (restored, dict(sorted(replayed_by_channel.items())))
+
+    async def _run_startup_inbound_replay(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "enabled": bool(self._inbound_replay_on_startup),
+            "running": True,
+            "path": str(self._inbound_persistence_path) if self._inbound_persistence_path is not None else "",
+            "restored": 0,
+            "replayed": 0,
+            "remaining": 0,
+            "last_error": "",
+            "replayed_by_channel": {},
+        }
+        self._inbound_startup_replay = dict(summary)
+        try:
+            if self._inbound_replay_on_startup:
+                restored, replayed_by_channel = await self._restore_persisted_inbound()
+                summary["restored"] = restored
+                summary["replayed"] = restored
+                summary["replayed_by_channel"] = replayed_by_channel
+            async with self._inbound_persistence_lock:
+                self._load_inbound_persistence_locked()
+            summary["remaining"] = int(self._inbound_persistence_pending)
+        except Exception as exc:
+            summary["last_error"] = str(exc)
+            bind_event("channel.inbound").warning("startup inbound replay failed error={}", exc)
+        summary["running"] = False
+        self._inbound_startup_replay = dict(summary)
+        return dict(summary)
+
+    def startup_inbound_replay_status(self) -> dict[str, Any]:
+        return dict(self._inbound_startup_replay)
 
     def set_recovery_notifier(self, notifier: Callable[[dict[str, Any]], Awaitable[Any]] | None) -> None:
         self._recovery_notifier = notifier
@@ -616,16 +796,16 @@ class ChannelManager:
 
     async def _on_channel_message(self, session_id: str, user_id: str, text: str, metadata: dict[str, Any]) -> None:
         channel = str(metadata.get("channel", "")).strip() or session_id.split(":", 1)[0]
-        bind_event("channel.inbound", session=session_id, channel=channel).debug("inbound message queued user={} chars={}", user_id, len(text))
-        await self.bus.publish_inbound(
-            InboundEvent(
-                channel=channel,
-                session_id=session_id,
-                user_id=user_id,
-                text=text,
-                metadata=metadata,
-            )
+        event = InboundEvent(
+            channel=channel,
+            session_id=session_id,
+            user_id=user_id,
+            text=text,
+            metadata=metadata,
         )
+        await self._persist_pending_inbound(event)
+        bind_event("channel.inbound", session=session_id, channel=channel).debug("inbound message queued user={} chars={}", user_id, len(text))
+        await self.bus.publish_inbound(event)
 
     @staticmethod
     def _is_stop_command(text: str) -> bool:
@@ -1018,6 +1198,16 @@ class ChannelManager:
             },
         }
 
+    def inbound_diagnostics(self) -> dict[str, Any]:
+        return {
+            "persistence": {
+                "enabled": self._inbound_persistence_path is not None,
+                "path": str(self._inbound_persistence_path) if self._inbound_persistence_path is not None else "",
+                "pending": int(self._inbound_persistence_pending),
+                "startup_replay": dict(self._inbound_startup_replay),
+            }
+        }
+
     async def _handle_stop(self, event: InboundEvent) -> None:
         session_id = event.session_id
         self.bus.request_stop(session_id)
@@ -1158,15 +1348,20 @@ class ChannelManager:
                 event = await self.bus.next_inbound()
                 if self._is_stop_command(event.text):
                     await self._handle_stop(event)
+                    await self._clear_persisted_inbound(event)
                     continue
 
                 async def _dispatch_worker(current: InboundEvent) -> None:
                     acquired = False
+                    completed = False
                     try:
                         await self._acquire_dispatch_slot(current.session_id)
                         acquired = True
                         await self._dispatch_event(current)
+                        completed = True
                     finally:
+                        if completed:
+                            await self._clear_persisted_inbound(current)
                         if acquired:
                             self._release_dispatch_slot(current.session_id)
 
@@ -1261,6 +1456,29 @@ class ChannelManager:
                 self._delivery_persistence_path = state_root / "channels" / "delivery-dead-letters.json"
             else:
                 self._delivery_persistence_path = None
+        inbound_replay_on_startup_raw = channels_cfg.get(
+            "replay_inbound_on_startup",
+            channels_cfg.get("replayInboundOnStartup", True),
+        )
+        self._inbound_replay_on_startup = bool(inbound_replay_on_startup_raw)
+        inbound_replay_limit_raw = channels_cfg.get("replay_inbound_limit", channels_cfg.get("replayInboundLimit", 100))
+        try:
+            self._inbound_replay_limit = max(0, int(inbound_replay_limit_raw or 100))
+        except (TypeError, ValueError):
+            self._inbound_replay_limit = 100
+        inbound_persistence_path_raw = channels_cfg.get(
+            "inbound_persistence_path",
+            channels_cfg.get("inboundPersistencePath", ""),
+        )
+        if inbound_persistence_path_raw:
+            self._inbound_persistence_path = Path(str(inbound_persistence_path_raw)).expanduser()
+        else:
+            state_path_raw = str(config.get("state_path", "") or "").strip()
+            if state_path_raw:
+                state_root = Path(state_path_raw).expanduser()
+                self._inbound_persistence_path = state_root / "channels" / "inbound-pending.json"
+            else:
+                self._inbound_persistence_path = None
         self._recovery_enabled = bool(channels_cfg.get("recovery_enabled", channels_cfg.get("recoveryEnabled", True)))
         self._recovery_interval_s = max(
             0.1,
@@ -1286,8 +1504,20 @@ class ChannelManager:
             "failed_by_channel": {},
             "skipped_by_channel": {},
         }
+        self._inbound_startup_replay = {
+            "enabled": bool(self._inbound_replay_on_startup),
+            "running": False,
+            "path": str(self._inbound_persistence_path) if self._inbound_persistence_path is not None else "",
+            "restored": 0,
+            "replayed": 0,
+            "remaining": 0,
+            "last_error": "",
+            "replayed_by_channel": {},
+        }
         async with self._delivery_persistence_lock:
             self._load_delivery_persistence_locked()
+        async with self._inbound_persistence_lock:
+            self._load_inbound_persistence_locked()
 
         for name, row in channels_cfg.items():
             if not isinstance(row, dict):
@@ -1317,6 +1547,7 @@ class ChannelManager:
             )
 
         await self._run_startup_delivery_replay()
+        await self._run_startup_inbound_replay()
 
     async def stop(self) -> None:
         for session_id, tasks in list(self._active_tasks.items()):
