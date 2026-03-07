@@ -1111,19 +1111,24 @@ def _default_heartbeat_route() -> tuple[str, str]:
     return "cli", "profile"
 
 
-_LATEST_MEMORY_ROUTE_CACHE: dict[int, tuple[float, tuple[str, str]]] = {}
+_LATEST_MEMORY_ROUTE_CACHE: dict[tuple[int, str], tuple[float, tuple[str, str]]] = {}
 
 
-def _latest_source_from_history_tail(memory_store: Any, *, tail_bytes: int = LATEST_MEMORY_ROUTE_TAIL_BYTES) -> str:
+def _latest_route_from_history_tail(
+    memory_store: Any,
+    *,
+    tail_bytes: int = LATEST_MEMORY_ROUTE_TAIL_BYTES,
+    preferred_channel: str = "",
+) -> tuple[str, str]:
     history_path = getattr(memory_store, "history_path", None)
     if history_path is None:
-        return ""
+        return _default_heartbeat_route()
     try:
         path = Path(history_path)
     except Exception:
-        return ""
+        return _default_heartbeat_route()
     if not path.exists() or not path.is_file():
-        return ""
+        return _default_heartbeat_route()
 
     try:
         with path.open("rb") as fh:
@@ -1133,12 +1138,14 @@ def _latest_source_from_history_tail(memory_store: Any, *, tail_bytes: int = LAT
             fh.seek(start)
             chunk = fh.read()
     except Exception:
-        return ""
+        return _default_heartbeat_route()
 
     if not chunk:
-        return ""
+        return _default_heartbeat_route()
     raw_text = chunk.decode("utf-8", errors="ignore")
     lines = raw_text.splitlines()
+    latest_route: tuple[str, str] | None = None
+    preferred = str(preferred_channel or "").strip().lower()
     for raw_line in reversed(lines):
         line = str(raw_line or "").strip()
         if not line:
@@ -1150,17 +1157,23 @@ def _latest_source_from_history_tail(memory_store: Any, *, tail_bytes: int = LAT
         if not isinstance(payload, dict):
             continue
         source = str(payload.get("source", "") or "").strip()
-        if source:
-            return source
-    return ""
+        if not source:
+            continue
+        route = MemoryMonitor._delivery_route_from_source(source)
+        if latest_route is None:
+            latest_route = route
+        if preferred and route[0] == preferred:
+            return route
+    return latest_route or _default_heartbeat_route()
 
 
-async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
+async def _latest_memory_route(memory_store: Any, *, preferred_channel: str = "") -> tuple[str, str]:
     channel, target = _default_heartbeat_route()
     if memory_store is None:
         return channel, target
 
-    cache_key = id(memory_store)
+    normalized_preference = str(preferred_channel or "").strip().lower()
+    cache_key = (id(memory_store), normalized_preference)
     now = time.monotonic()
     cached = _LATEST_MEMORY_ROUTE_CACHE.get(cache_key)
     if cached is not None:
@@ -1168,13 +1181,17 @@ async def _latest_memory_route(memory_store: Any) -> tuple[str, str]:
         if (now - cached_at) <= LATEST_MEMORY_ROUTE_CACHE_TTL_S:
             return cached_route
 
-    source = ""
     try:
-        source = await asyncio.to_thread(_latest_source_from_history_tail, memory_store)
+        resolved_route = await asyncio.to_thread(
+            _latest_route_from_history_tail,
+            memory_store,
+            preferred_channel=normalized_preference,
+        )
     except Exception:
         return channel, target
 
-    resolved_route = MemoryMonitor._delivery_route_from_source(source) if source else (channel, target)
+    if not isinstance(resolved_route, tuple) or len(resolved_route) != 2:
+        resolved_route = (channel, target)
     _LATEST_MEMORY_ROUTE_CACHE[cache_key] = (now, resolved_route)
     return resolved_route
 
@@ -1749,7 +1766,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if not notice_text:
             return False
         memory_store = getattr(runtime.engine, "memory", None)
-        channel_name, target = await _latest_memory_route(memory_store)
+        channel_name, target = await _latest_memory_route(memory_store, preferred_channel="telegram")
         if not channel_name or not target:
             return False
 

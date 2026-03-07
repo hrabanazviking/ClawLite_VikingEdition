@@ -348,6 +348,31 @@ def test_latest_memory_route_caches_default_route_without_full_scan(tmp_path: Pa
     assert memory.calls == 0
 
 
+def test_latest_memory_route_prefers_telegram_when_requested(tmp_path: Path) -> None:
+    _LATEST_MEMORY_ROUTE_CACHE.clear()
+    history_path = tmp_path / "memory.jsonl"
+    history_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"source": "session:telegram:chat42", "created_at": "2026-03-01T00:00:00+00:00"}),
+                json.dumps({"source": "session:cli:profile", "created_at": "2026-03-02T00:00:00+00:00"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class _Memory:
+        def __init__(self, path: Path) -> None:
+            self.history_path = path
+
+    default_route = asyncio.run(_latest_memory_route(_Memory(history_path)))
+    preferred_route = asyncio.run(_latest_memory_route(_Memory(history_path), preferred_channel="telegram"))
+
+    assert default_route == ("cli", "profile")
+    assert preferred_route == ("telegram", "chat42")
+
+
 def test_normalize_background_task_treats_done_and_running_tasks_correctly() -> None:
     async def _scenario() -> None:
         done_task = asyncio.create_task(asyncio.sleep(0))
