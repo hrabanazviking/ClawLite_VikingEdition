@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -37,11 +38,29 @@ class MessageQueue:
         self._outbound_enqueued = 0
         self._outbound_dropped = 0
         self._dead_letter_enqueued = 0
+        self._dead_letter_restored = 0
         self._dead_letter_replayed = 0
         self._dead_letter_replay_attempts = 0
         self._dead_letter_replay_skipped = 0
         self._dead_letter_replay_dropped = 0
         self._dead_letter_reason_counts: dict[str, int] = defaultdict(int)
+
+    @staticmethod
+    def _dead_letter_idempotency_key(event: OutboundEvent) -> str:
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        explicit = str(metadata.get("_delivery_idempotency_key", "") or "").strip()
+        if explicit:
+            return explicit
+        payload = "\n".join(
+            [
+                str(event.channel),
+                str(event.session_id),
+                str(event.target),
+                str(event.text),
+                str(event.created_at),
+            ]
+        )
+        return f"dlv:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
     @staticmethod
     def _oldest_age_seconds(snapshot: list[str]) -> float | None:
@@ -123,11 +142,22 @@ class MessageQueue:
         await self._dead_letter.put(event)
         self._dead_letter_events.append(event)
 
+    async def restore_dead_letters(self, events: list[OutboundEvent]) -> int:
+        restored = 0
+        for event in events:
+            await self._enqueue_dead_letter(event)
+            restored += 1
+        self._dead_letter_restored += restored
+        return restored
+
     def _dequeue_dead_letter_nowait(self) -> OutboundEvent:
         event = self._dead_letter.get_nowait()
         if self._dead_letter_events:
             self._dead_letter_events.popleft()
         return event
+
+    def dead_letter_snapshot(self) -> list[OutboundEvent]:
+        return list(self._dead_letter_events)
 
     @staticmethod
     def _dead_letter_matches(
@@ -136,6 +166,7 @@ class MessageQueue:
         channel: str,
         reason: str,
         session_id: str,
+        idempotency_key: str = "",
     ) -> bool:
         if channel and event.channel != channel:
             return False
@@ -143,7 +174,52 @@ class MessageQueue:
             return False
         if session_id and event.session_id != session_id:
             return False
+        if idempotency_key:
+            event_key = MessageQueue._dead_letter_idempotency_key(event)
+            if event_key != idempotency_key:
+                return False
         return True
+
+    async def drain_dead_letters(
+        self,
+        *,
+        limit: int = 100,
+        channel: str = "",
+        reason: str = "",
+        session_id: str = "",
+        idempotency_key: str = "",
+    ) -> list[OutboundEvent]:
+        bounded_limit = max(0, int(limit or 0))
+        if bounded_limit <= 0:
+            return []
+
+        channel_filter = str(channel or "").strip()
+        reason_filter = str(reason or "").strip()
+        session_filter = str(session_id or "").strip()
+        key_filter = str(idempotency_key or "").strip()
+
+        selected: list[OutboundEvent] = []
+        to_keep: list[OutboundEvent] = []
+        size = self._dead_letter.qsize()
+        for _ in range(size):
+            try:
+                dead = self._dequeue_dead_letter_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if len(selected) < bounded_limit and self._dead_letter_matches(
+                dead,
+                channel=channel_filter,
+                reason=reason_filter,
+                session_id=session_filter,
+                idempotency_key=key_filter,
+            ):
+                selected.append(dead)
+                continue
+            to_keep.append(dead)
+
+        for dead in to_keep:
+            await self._enqueue_dead_letter(dead)
+        return selected
 
     async def replay_dead_letters(
         self,
@@ -152,6 +228,7 @@ class MessageQueue:
         channel: str = "",
         reason: str = "",
         session_id: str = "",
+        idempotency_key: str = "",
         dry_run: bool = False,
     ) -> dict[str, Any]:
         bounded_limit = max(0, int(limit or 0))
@@ -180,6 +257,7 @@ class MessageQueue:
                 channel=channel_filter,
                 reason=reason_filter,
                 session_id=session_filter,
+                idempotency_key=idempotency_key,
             ):
                 to_keep.append(dead)
                 kept += 1
@@ -298,6 +376,7 @@ class MessageQueue:
             "outbound_dropped": self._outbound_dropped,
             "dead_letter_size": self._dead_letter.qsize(),
             "dead_letter_enqueued": self._dead_letter_enqueued,
+            "dead_letter_restored": self._dead_letter_restored,
             "dead_letter_replayed": self._dead_letter_replayed,
             "dead_letter_replay_attempts": self._dead_letter_replay_attempts,
             "dead_letter_replay_skipped": self._dead_letter_replay_skipped,

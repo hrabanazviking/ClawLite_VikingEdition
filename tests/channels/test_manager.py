@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -737,6 +738,8 @@ def test_channel_manager_replay_dead_letters_updates_replay_counters() -> None:
     async def _scenario() -> None:
         bus = MessageQueue()
         mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start({"state_path": "/tmp", "channels": {"fake": {"enabled": True}}})
 
         await bus.publish_dead_letter(
             OutboundEvent(
@@ -762,12 +765,83 @@ def test_channel_manager_replay_dead_letters_updates_replay_counters() -> None:
         summary = await mgr.replay_dead_letters(limit=5, channel="fake", reason="send_failed", session_id="s1", dry_run=False)
         assert summary["matched"] == 1
         assert summary["replayed"] == 1
+        assert summary["failed"] == 0
+        assert summary["skipped"] == 0
         assert summary["replayed_by_channel"] == {"fake": 1}
 
         diagnostics = mgr.delivery_diagnostics()
         assert diagnostics["total"]["replayed"] == 1
         assert diagnostics["per_channel"]["fake"]["replayed"] == 1
         assert "telegram" not in diagnostics["per_channel"]
+        fake = mgr._channels["fake"]
+        assert len(fake.sent) == 1
+        assert fake.sent[0][0] == "u1"
+        assert fake.sent[0][1] == "dead"
+        assert fake.sent[0][2]["_replayed_from_dead_letter"] is True
+        assert fake.sent[0][2]["_delivery_idempotency_key"]
+        assert bus.stats()["dead_letter_size"] == 1
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_startup_replays_persisted_dead_letters_after_restart(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        state_path = tmp_path / "state"
+
+        first_bus = MessageQueue()
+        first_mgr = ChannelManager(bus=first_bus, engine=FakeEngine())
+        first_mgr.register("fake", FakeChannel)
+        await first_mgr.start(
+            {
+                "state_path": str(state_path),
+                "channels": {
+                    "send_max_attempts": 1,
+                    "fake": {"enabled": True, "fail_first_n": 10},
+                },
+            }
+        )
+
+        await first_mgr._publish_and_send(
+            event=OutboundEvent(
+                channel="fake",
+                session_id="fake:restart",
+                target="restart",
+                text="recover-me",
+            )
+        )
+        assert first_bus.stats()["dead_letter_size"] == 1
+        await first_mgr.stop()
+
+        second_bus = MessageQueue()
+        second_mgr = ChannelManager(bus=second_bus, engine=FakeEngine())
+        second_mgr.register("fake", FakeChannel)
+        await second_mgr.start(
+            {
+                "state_path": str(state_path),
+                "channels": {
+                    "send_max_attempts": 1,
+                    "fake": {"enabled": True},
+                },
+            }
+        )
+
+        fake = second_mgr._channels["fake"]
+        assert fake.sent
+        assert fake.sent[0][0] == "restart"
+        assert fake.sent[0][1] == "recover-me"
+        assert fake.sent[0][2]["_replayed_from_dead_letter"] is True
+
+        diagnostics = second_mgr.delivery_diagnostics()
+        assert diagnostics["total"]["replayed"] == 1
+        assert diagnostics["persistence"]["pending"] == 0
+        assert diagnostics["persistence"]["startup_replay"]["restored"] == 1
+        assert diagnostics["persistence"]["startup_replay"]["replayed"] == 1
+        assert second_bus.stats()["dead_letter_size"] == 0
+        assert second_bus.stats()["dead_letter_restored"] == 1
+
+        await second_mgr.stop()
 
     asyncio.run(_scenario())
 

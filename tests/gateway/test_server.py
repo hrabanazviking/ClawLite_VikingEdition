@@ -2116,6 +2116,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert payload["uptime_s"] >= 0
         assert "control_plane" in payload
         assert payload["control_plane"]["contract_version"] == "2026-03-04"
+        assert "delivery_replay" in payload["control_plane"]["components"]
         assert "queue" in payload
         assert "dead_letter_recent" in payload["queue"]
         assert isinstance(payload["queue"]["dead_letter_recent"], list)
@@ -2123,6 +2124,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert "channels_delivery" in payload
         channels_delivery = payload["channels_delivery"]
         assert set(channels_delivery.keys()) >= {"total", "per_channel", "recent"}
+        assert "persistence" in channels_delivery
         assert isinstance(channels_delivery["recent"], list)
         assert set(channels_delivery["total"].keys()) >= {
             "attempts",

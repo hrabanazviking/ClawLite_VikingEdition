@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import contextvars
+import json
 import time
 from collections import deque
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from clawlite.bus.events import InboundEvent, OutboundEvent
@@ -112,6 +115,26 @@ class ChannelManager:
             "idempotency_suppressed": 0,
         }
         self._delivery_per_channel: dict[str, dict[str, int]] = {}
+        self._delivery_persistence_path: Path | None = None
+        self._delivery_replay_on_startup = True
+        self._delivery_replay_limit = 50
+        self._delivery_replay_reasons: tuple[str, ...] = ("send_failed", "channel_unavailable")
+        self._delivery_persistence_lock = asyncio.Lock()
+        self._delivery_persistence_pending = 0
+        self._delivery_startup_replay: dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "path": "",
+            "restored": 0,
+            "replayed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "remaining": 0,
+            "last_error": "",
+            "replayed_by_channel": {},
+            "failed_by_channel": {},
+            "skipped_by_channel": {},
+        }
 
     def _ensure_delivery_channel(self, channel: str) -> dict[str, int]:
         name = str(channel or "").strip() or "unknown"
@@ -253,6 +276,177 @@ class ChannelManager:
         self._delivery_idempotency_cache[key] = expiry
         self._delivery_idempotency_order.append((key, expiry))
         self._prune_delivery_idempotency_cache(now=current)
+
+    @staticmethod
+    def _serialize_delivery_event(event: OutboundEvent) -> dict[str, Any]:
+        payload = {
+            "channel": str(event.channel),
+            "session_id": str(event.session_id),
+            "target": str(event.target),
+            "text": str(event.text),
+            "metadata": dict(event.metadata) if isinstance(event.metadata, dict) else {},
+            "attempt": int(getattr(event, "attempt", 0) or 0),
+            "max_attempts": int(getattr(event, "max_attempts", 0) or 0),
+            "retryable": bool(getattr(event, "retryable", False)),
+            "dead_lettered": bool(getattr(event, "dead_lettered", False)),
+            "dead_letter_reason": str(getattr(event, "dead_letter_reason", "") or ""),
+            "last_error": str(getattr(event, "last_error", "") or ""),
+            "created_at": str(getattr(event, "created_at", "") or ""),
+        }
+        return json.loads(json.dumps(payload, ensure_ascii=True, default=str))
+
+    def _delivery_record_key(self, event: OutboundEvent) -> str:
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        explicit = str(metadata.get("_delivery_idempotency_key", "") or "").strip()
+        if explicit:
+            return explicit
+        return self._derive_delivery_idempotency_key(event)
+
+    def _load_delivery_persistence_locked(self) -> list[OutboundEvent]:
+        path = self._delivery_persistence_path
+        if path is None or not path.exists():
+            self._delivery_persistence_pending = 0
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            bind_event("channel.delivery").warning("delivery journal read failed path={} error={}", path, exc)
+            self._delivery_persistence_pending = 0
+            return []
+
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        events: list[OutboundEvent] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            metadata_raw = item.get("metadata", {})
+            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+            event = OutboundEvent(
+                channel=str(item.get("channel", "") or "").strip(),
+                session_id=str(item.get("session_id", "") or "").strip(),
+                target=str(item.get("target", "") or ""),
+                text=str(item.get("text", "") or ""),
+                metadata=metadata,
+                attempt=max(1, int(item.get("attempt", 1) or 1)),
+                max_attempts=max(1, int(item.get("max_attempts", 1) or 1)),
+                retryable=bool(item.get("retryable", True)),
+                dead_lettered=bool(item.get("dead_lettered", True)),
+                dead_letter_reason=str(item.get("dead_letter_reason", "") or ""),
+                last_error=str(item.get("last_error", "") or ""),
+                created_at=str(item.get("created_at", "") or ""),
+            )
+            if not event.channel or not event.session_id:
+                continue
+            event, _ = self._ensure_delivery_idempotency_key(event)
+            events.append(event)
+        self._delivery_persistence_pending = len(events)
+        return events
+
+    def _write_delivery_persistence_locked(self, events: list[OutboundEvent]) -> None:
+        path = self._delivery_persistence_path
+        if path is None:
+            self._delivery_persistence_pending = 0
+            return
+        self._delivery_persistence_pending = len(events)
+        if not events:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "items": [self._serialize_delivery_event(event) for event in events],
+        }
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+
+    async def _persist_dead_letter(self, event: OutboundEvent) -> None:
+        if self._delivery_persistence_path is None:
+            return
+        pending_event, _ = self._ensure_delivery_idempotency_key(event)
+        key = self._delivery_record_key(pending_event)
+        async with self._delivery_persistence_lock:
+            events = self._load_delivery_persistence_locked()
+            kept = [row for row in events if self._delivery_record_key(row) != key]
+            kept.append(pending_event)
+            kept.sort(key=lambda row: str(getattr(row, "created_at", "") or ""))
+            self._write_delivery_persistence_locked(kept)
+
+    async def _clear_persisted_dead_letter(self, event: OutboundEvent) -> None:
+        if self._delivery_persistence_path is None:
+            return
+        key = self._delivery_record_key(event)
+        async with self._delivery_persistence_lock:
+            events = self._load_delivery_persistence_locked()
+            kept = [row for row in events if self._delivery_record_key(row) != key]
+            self._write_delivery_persistence_locked(kept)
+
+    async def _restore_persisted_dead_letters(self) -> int:
+        if self._delivery_persistence_path is None:
+            self._delivery_persistence_pending = 0
+            return 0
+        if int(self.bus.stats().get("dead_letter_size", 0) or 0) > 0:
+            async with self._delivery_persistence_lock:
+                self._load_delivery_persistence_locked()
+            return 0
+        async with self._delivery_persistence_lock:
+            events = self._load_delivery_persistence_locked()
+        if not events:
+            return 0
+        restored = await self.bus.restore_dead_letters(events)
+        bind_event("channel.delivery").info(
+            "delivery journal restored path={} restored={}",
+            self._delivery_persistence_path,
+            restored,
+        )
+        return restored
+
+    async def _run_startup_delivery_replay(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "enabled": bool(self._delivery_replay_on_startup),
+            "running": True,
+            "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
+            "restored": 0,
+            "replayed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
+            "last_error": "",
+            "replayed_by_channel": {},
+            "failed_by_channel": {},
+            "skipped_by_channel": {},
+        }
+        self._delivery_startup_replay = dict(summary)
+        try:
+            summary["restored"] = await self._restore_persisted_dead_letters()
+            if self._delivery_replay_on_startup:
+                replay = await self.replay_dead_letters(
+                    limit=self._delivery_replay_limit,
+                    reasons=list(self._delivery_replay_reasons),
+                )
+                for key in (
+                    "replayed",
+                    "failed",
+                    "skipped",
+                    "remaining",
+                    "replayed_by_channel",
+                    "failed_by_channel",
+                    "skipped_by_channel",
+                ):
+                    summary[key] = replay.get(key, summary.get(key))
+        except Exception as exc:
+            summary["last_error"] = str(exc)
+            bind_event("channel.delivery").warning("startup delivery replay failed error={}", exc)
+        summary["running"] = False
+        self._delivery_startup_replay = dict(summary)
+        return dict(summary)
+
+    def startup_replay_status(self) -> dict[str, Any]:
+        return dict(self._delivery_startup_replay)
 
     def register(self, name: str, channel_cls: type[BaseChannel]) -> None:
         self._registry[name] = channel_cls
@@ -416,6 +610,7 @@ class ChannelManager:
                 outcome="idempotency_suppressed",
                 idempotency_key=idempotency_key,
             )
+            await self._clear_persisted_dead_letter(suppressed_event)
             bind_event("channel.send", session=event.session_id, channel=event.channel).info(
                 "dispatch suppressed duplicate target={} key={}",
                 event.target,
@@ -445,6 +640,7 @@ class ChannelManager:
                     idempotency_key=idempotency_key,
                     send_result=send_result,
                 )
+                await self._clear_persisted_dead_letter(attempt_event)
                 bind_event("channel.send", session=event.session_id, channel=event.channel).info(
                     "dispatch sent target={} attempt={}/{}",
                     event.target,
@@ -481,6 +677,7 @@ class ChannelManager:
         await self.bus.publish_dead_letter(dead)
         self._inc_delivery(channel=event.channel, key="dead_lettered")
         self._inc_delivery(channel=event.channel, key="delivery_failed_final")
+        await self._persist_dead_letter(dead)
         self._record_delivery_recent(
             event=dead,
             outcome="delivery_failed_final",
@@ -496,13 +693,14 @@ class ChannelManager:
         )
         return None
 
-    async def _publish_and_send(self, *, event: OutboundEvent) -> None:
+    async def _publish_and_send(self, *, event: OutboundEvent) -> bool:
         channel = self._channels.get(event.channel)
         if channel is None:
             self._inc_delivery(channel=event.channel, key="channel_unavailable")
             bind_event("channel.dispatch", session=event.session_id, channel=event.channel).error("channel unavailable")
+            dead_event, idempotency_key = self._ensure_delivery_idempotency_key(event)
             dead = replace(
-                event,
+                dead_event,
                 attempt=1,
                 max_attempts=1,
                 retryable=False,
@@ -513,7 +711,7 @@ class ChannelManager:
             await self.bus.publish_dead_letter(dead)
             self._inc_delivery(channel=event.channel, key="dead_lettered")
             self._inc_delivery(channel=event.channel, key="delivery_failed_final")
-            _, idempotency_key = self._ensure_delivery_idempotency_key(event)
+            await self._persist_dead_letter(dead)
             self._record_delivery_recent(
                 event=dead,
                 outcome="delivery_failed_final",
@@ -521,15 +719,15 @@ class ChannelManager:
                 dead_letter_reason=dead.dead_letter_reason,
                 last_error=dead.last_error,
             )
-            return
+            return False
         if not self._delivery_allowed(channel=channel, event=event):
             self._inc_delivery(channel=event.channel, key="policy_dropped")
             bind_event("channel.send", session=event.session_id, channel=event.channel).debug(
                 "dispatch dropped by delivery policy target={}",
                 event.target,
             )
-            return
-        await self._retry_send(channel=channel, event=event)
+            return True
+        return await self._retry_send(channel=channel, event=event) is not None
 
     async def replay_dead_letters(
         self,
@@ -538,30 +736,123 @@ class ChannelManager:
         channel: str = "",
         reason: str = "",
         session_id: str = "",
+        reasons: list[str] | tuple[str, ...] | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        summary = await self.bus.replay_dead_letters(
-            limit=limit,
-            channel=channel,
-            reason=reason,
-            session_id=session_id,
-            dry_run=dry_run,
-        )
-        replayed_by_channel = summary.get("replayed_by_channel", {})
-        if isinstance(replayed_by_channel, dict):
-            for name, count in replayed_by_channel.items():
-                try:
-                    amount = int(count)
-                except (TypeError, ValueError):
-                    continue
-                self._inc_delivery(channel=str(name), key="replayed", delta=amount)
-        return summary
+        bounded_limit = max(0, int(limit or 0))
+        channel_filter = str(channel or "").strip()
+        reason_filter = str(reason or "").strip()
+        session_filter = str(session_id or "").strip()
+        reasons_filter = {str(item or "").strip() for item in reasons or () if str(item or "").strip()}
+        snapshot = self.bus.dead_letter_snapshot()
+        scanned = len(snapshot)
+
+        matched_events: list[OutboundEvent] = []
+        for event in snapshot:
+            if channel_filter and event.channel != channel_filter:
+                continue
+            if session_filter and event.session_id != session_filter:
+                continue
+            event_reason = str(event.dead_letter_reason or "")
+            if reason_filter and event_reason != reason_filter:
+                continue
+            if reasons_filter and event_reason not in reasons_filter:
+                continue
+            matched_events.append(event)
+
+        matched = len(matched_events)
+        if dry_run or bounded_limit <= 0:
+            return {
+                "scanned": scanned,
+                "matched": matched,
+                "replayed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "kept": int(self.bus.stats().get("dead_letter_size", 0) or 0),
+                "dropped": 0,
+                "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
+                "replayed_by_channel": {},
+                "failed_by_channel": {},
+                "skipped_by_channel": {},
+                "dry_run": bool(dry_run),
+                "limit": bounded_limit,
+            }
+
+        replayed = 0
+        failed = 0
+        skipped = 0
+        replayed_by_channel: dict[str, int] = {}
+        failed_by_channel: dict[str, int] = {}
+        skipped_by_channel: dict[str, int] = {}
+        skipped_events: list[OutboundEvent] = []
+
+        for event in matched_events[:bounded_limit]:
+            event, idempotency_key = self._ensure_delivery_idempotency_key(event)
+            drained = await self.bus.drain_dead_letters(
+                limit=1,
+                channel=event.channel,
+                reason=event.dead_letter_reason,
+                session_id=event.session_id,
+                idempotency_key=idempotency_key,
+            )
+            if not drained:
+                continue
+            pending = drained[0]
+            if pending.channel not in self._channels:
+                skipped += 1
+                skipped_by_channel[pending.channel] = skipped_by_channel.get(pending.channel, 0) + 1
+                skipped_events.append(pending)
+                continue
+            replay_metadata = dict(pending.metadata) if isinstance(pending.metadata, dict) else {}
+            replay_metadata["_replayed_from_dead_letter"] = True
+            replay_event = replace(
+                pending,
+                metadata=replay_metadata,
+                attempt=1,
+                dead_lettered=False,
+                dead_letter_reason="",
+                last_error="",
+            )
+            delivered = await self._publish_and_send(event=replay_event)
+            if delivered:
+                replayed += 1
+                replayed_by_channel[pending.channel] = replayed_by_channel.get(pending.channel, 0) + 1
+                self._inc_delivery(channel=pending.channel, key="replayed")
+                continue
+            failed += 1
+            failed_by_channel[pending.channel] = failed_by_channel.get(pending.channel, 0) + 1
+
+        if skipped_events:
+            await self.bus.restore_dead_letters(skipped_events)
+
+        remaining = int(self.bus.stats().get("dead_letter_size", 0) or 0)
+        return {
+            "scanned": scanned,
+            "matched": matched,
+            "replayed": replayed,
+            "failed": failed,
+            "skipped": skipped,
+            "kept": remaining,
+            "dropped": 0,
+            "remaining": remaining,
+            "replayed_by_channel": dict(sorted(replayed_by_channel.items())),
+            "failed_by_channel": dict(sorted(failed_by_channel.items())),
+            "skipped_by_channel": dict(sorted(skipped_by_channel.items())),
+            "dry_run": False,
+            "limit": bounded_limit,
+        }
 
     def delivery_diagnostics(self) -> dict[str, Any]:
         return {
             "total": dict(self._delivery_total),
             "per_channel": {name: dict(row) for name, row in sorted(self._delivery_per_channel.items())},
             "recent": list(reversed(self._delivery_recent)),
+            "persistence": {
+                "enabled": self._delivery_persistence_path is not None,
+                "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
+                "pending": int(self._delivery_persistence_pending),
+                "startup_replay": dict(self._delivery_startup_replay),
+            },
         }
 
     async def _handle_stop(self, event: InboundEvent) -> None:
@@ -775,8 +1066,56 @@ class ChannelManager:
         except (TypeError, ValueError):
             parsed_recent_limit = 50
         self._set_delivery_recent_limit(parsed_recent_limit)
+        replay_on_startup_raw = channels_cfg.get(
+            "replay_dead_letters_on_startup",
+            channels_cfg.get("replayDeadLettersOnStartup", True),
+        )
+        self._delivery_replay_on_startup = bool(replay_on_startup_raw)
+        replay_limit_raw = channels_cfg.get("replay_dead_letters_limit", channels_cfg.get("replayDeadLettersLimit", 50))
+        try:
+            self._delivery_replay_limit = max(0, int(replay_limit_raw or 50))
+        except (TypeError, ValueError):
+            self._delivery_replay_limit = 50
+        replay_reasons_raw = channels_cfg.get(
+            "replay_dead_letters_reasons",
+            channels_cfg.get("replayDeadLettersReasons", ["send_failed", "channel_unavailable"]),
+        )
+        if isinstance(replay_reasons_raw, list):
+            replay_reasons = [str(item or "").strip() for item in replay_reasons_raw if str(item or "").strip()]
+        else:
+            replay_reasons = ["send_failed", "channel_unavailable"]
+        self._delivery_replay_reasons = tuple(replay_reasons or ["send_failed", "channel_unavailable"])
+        persistence_path_raw = channels_cfg.get(
+            "delivery_persistence_path",
+            channels_cfg.get("deliveryPersistencePath", ""),
+        )
+        if persistence_path_raw:
+            self._delivery_persistence_path = Path(str(persistence_path_raw)).expanduser()
+        else:
+            state_path_raw = str(config.get("state_path", "") or "").strip()
+            if state_path_raw:
+                state_root = Path(state_path_raw).expanduser()
+                self._delivery_persistence_path = state_root / "channels" / "delivery-dead-letters.json"
+            else:
+                self._delivery_persistence_path = None
         self._prune_delivery_idempotency_cache()
         self._reset_dispatch_controls()
+        self._delivery_startup_replay = {
+            "enabled": bool(self._delivery_replay_on_startup),
+            "running": False,
+            "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
+            "restored": 0,
+            "replayed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
+            "last_error": "",
+            "replayed_by_channel": {},
+            "failed_by_channel": {},
+            "skipped_by_channel": {},
+        }
+        async with self._delivery_persistence_lock:
+            self._load_delivery_persistence_locked()
 
         for name, row in channels_cfg.items():
             if not isinstance(row, dict):
@@ -796,6 +1135,8 @@ class ChannelManager:
         if self._dispatcher_task is None:
             self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
             bind_event("channel.lifecycle").info("channel dispatcher started")
+
+        await self._run_startup_delivery_replay()
 
     async def stop(self) -> None:
         for session_id, tasks in list(self._active_tasks.items()):

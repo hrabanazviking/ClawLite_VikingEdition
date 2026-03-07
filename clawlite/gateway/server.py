@@ -625,6 +625,7 @@ class GatewayLifecycleState:
                 "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
                 "subagent_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0},
+                "delivery_replay": {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0, "skipped": 0},
                 "bootstrap": {"enabled": True, "running": False, "pending": False, "last_status": "", "last_error": ""},
                 "engine": {"enabled": True, "running": True, "last_error": ""},
             }
@@ -2315,6 +2316,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             try:
                 if name == "channels":
                     await start_fn(cfg.to_dict())
+                    replay_component = lifecycle.components.setdefault(
+                        "delivery_replay",
+                        {"enabled": True, "running": False, "last_error": "", "replayed": 0, "failed": 0, "skipped": 0},
+                    )
+                    replay_summary = runtime.channels.startup_replay_status()
+                    replay_component["enabled"] = bool(replay_summary.get("enabled", True))
+                    replay_component["running"] = bool(replay_summary.get("running", False))
+                    replay_component["last_error"] = str(replay_summary.get("last_error", "") or "")
+                    replay_component["replayed"] = int(replay_summary.get("replayed", 0) or 0)
+                    replay_component["failed"] = int(replay_summary.get("failed", 0) or 0)
+                    replay_component["skipped"] = int(replay_summary.get("skipped", 0) or 0)
                 elif name == "autonomy_wake":
                     await start_fn(_dispatch_autonomy_wake)
                 elif name == "cron":

@@ -298,6 +298,46 @@ def test_message_queue_dead_letter_recent_snapshot_is_bounded_ordered_and_saniti
     asyncio.run(_scenario())
 
 
+def test_message_queue_drain_and_restore_dead_letters_preserves_filtered_items() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        first = OutboundEvent(
+            channel="fake",
+            session_id="s1",
+            target="u1",
+            text="one",
+            metadata={"_delivery_idempotency_key": "dead-one"},
+            dead_lettered=True,
+            dead_letter_reason="send_failed",
+        )
+        second = OutboundEvent(
+            channel="fake",
+            session_id="s2",
+            target="u2",
+            text="two",
+            metadata={"_delivery_idempotency_key": "dead-two"},
+            dead_lettered=True,
+            dead_letter_reason="send_failed",
+        )
+        await bus.publish_dead_letter(first)
+        await bus.publish_dead_letter(second)
+
+        drained = await bus.drain_dead_letters(limit=1, channel="fake", reason="send_failed", idempotency_key="dead-two")
+        assert len(drained) == 1
+        assert drained[0].session_id == "s2"
+        assert bus.stats()["dead_letter_size"] == 1
+
+        await bus.restore_dead_letters(drained)
+        stats = bus.stats()
+        assert stats["dead_letter_size"] == 2
+        assert stats["dead_letter_restored"] == 1
+
+        snapshot = bus.dead_letter_snapshot()
+        assert [event.session_id for event in snapshot] == ["s1", "s2"]
+
+    asyncio.run(_scenario())
+
+
 def test_message_queue_stop_events_are_pruned_by_ttl() -> None:
     async def _scenario() -> None:
         bus = MessageQueue(stop_event_ttl_s=0.05)
