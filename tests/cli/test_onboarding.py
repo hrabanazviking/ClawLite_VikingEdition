@@ -95,6 +95,8 @@ def test_probe_provider_openai_success(monkeypatch) -> None:
     assert payload["ok"] is True
     assert payload["status_code"] == 200
     assert payload["api_key_masked"].endswith("3456")
+    assert payload["transport"] == "openai_compatible"
+    assert any("OpenAI-compatible" in row for row in payload["hints"])
 
 
 def test_probe_telegram_handles_network_error(monkeypatch) -> None:
@@ -147,6 +149,16 @@ def test_probe_provider_ollama_accepts_runtime_base_url_with_v1(monkeypatch) -> 
     payload = probe_provider("ollama", api_key="", base_url="http://127.0.0.1:11434/v1")
     assert payload["ok"] is True
     assert payload["status_code"] == 200
+    assert payload["transport"] == "local_runtime"
+    assert any("Ollama respondeu" in row for row in payload["hints"])
+
+
+def test_probe_provider_openai_missing_api_key_returns_actionable_hint() -> None:
+    payload = probe_provider("openai", api_key="", base_url="https://api.openai.com/v1")
+    assert payload["ok"] is False
+    assert payload["error"] == "api_key_missing"
+    assert payload["transport"] == "openai_compatible"
+    assert any("Configure a chave do provider 'openai'" in row for row in payload["hints"])
 
 
 def test_probe_provider_minimax_uses_anthropic_messages_transport(monkeypatch) -> None:

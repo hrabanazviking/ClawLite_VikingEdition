@@ -30,6 +30,7 @@ from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
 from clawlite.providers.discovery import probe_local_provider_runtime
+from clawlite.providers.hints import provider_telemetry_summary
 from clawlite.providers.reliability import is_quota_429_error
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
@@ -561,6 +562,7 @@ def _provider_telemetry_snapshot(provider: Any) -> dict[str, Any]:
     telemetry["diagnostics_available"] = True
     if not isinstance(telemetry.get("counters"), dict):
         telemetry["counters"] = {}
+    telemetry["summary"] = provider_telemetry_summary(telemetry)
     return telemetry
 
 

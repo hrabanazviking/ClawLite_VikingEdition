@@ -105,6 +105,37 @@ class ProviderWithUnsafeDiagnostics:
         }
 
 
+class ProviderWithFailoverDiagnostics:
+    async def complete(self, *, messages, tools):
+        return LLMResult(text="pong", model="openai/gpt-4o-mini", tool_calls=[], metadata={})
+
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "provider": "failover",
+            "provider_name": "failover",
+            "model": "openai/gpt-4o-mini",
+            "transport": "openai_compatible",
+            "counters": {
+                "fallback_attempts": 2,
+                "last_error_class": "rate_limit",
+            },
+            "candidates": [
+                {
+                    "role": "primary",
+                    "model": "openai/gpt-4o-mini",
+                    "in_cooldown": True,
+                    "cooldown_remaining_s": 17.25,
+                },
+                {
+                    "role": "fallback",
+                    "model": "groq/llama-3.1-8b-instant",
+                    "in_cooldown": False,
+                    "cooldown_remaining_s": 0.0,
+                },
+            ],
+        }
+
+
 class RecoveringGatewayChannel(BaseChannel):
     starts = 0
 
@@ -3453,6 +3484,36 @@ def test_gateway_diagnostics_omits_provider_telemetry_when_disabled(tmp_path: Pa
         alias_payload = client.get("/api/diagnostics").json()
         assert "provider" not in alias_payload["engine"]
         assert alias_payload["engine"] == payload["engine"]
+
+
+def test_gateway_diagnostics_provider_summary_surfaces_failover_state(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {
+                "enabled": True,
+                "require_auth": False,
+                "include_provider_telemetry": True,
+            },
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = ProviderWithFailoverDiagnostics()
+
+    with TestClient(app) as client:
+        payload = client.get("/v1/diagnostics").json()
+        provider_payload = payload["engine"]["provider"]
+        summary = provider_payload["summary"]
+
+        assert summary["state"] == "cooldown"
+        assert summary["transport"] == "openai_compatible"
+        assert summary["cooling_candidates"][0]["model"] == "openai/gpt-4o-mini"
+        assert any("cooldown" in row.lower() for row in summary["hints"])
+        assert any("rate limit" in row.lower() for row in summary["hints"])
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:

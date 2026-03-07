@@ -13,6 +13,7 @@ from rich.prompt import Prompt
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.providers.discovery import normalize_local_runtime_base_url
+from clawlite.providers.hints import provider_probe_hints, provider_transport_name
 from clawlite.providers.registry import SPECS
 from clawlite.workspace.loader import WorkspaceLoader
 
@@ -187,6 +188,9 @@ def probe_provider(
             "error": f"unsupported_provider:{provider_key}",
             "api_key_masked": _mask_secret(api_key),
             "base_url": str(base_url or "").strip(),
+            "transport": "native",
+            "probe_method": "",
+            "hints": [],
         }
 
     key = str(api_key or "").strip()
@@ -196,6 +200,8 @@ def probe_provider(
 
     headers: dict[str, str] = {}
     payload: dict[str, Any] | None = None
+    probe_method = "GET"
+    transport = provider_transport_name(provider=provider_key, spec=spec, auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key")
 
     if provider_key == "ollama":
         url = _join_base(resolved_base, "/api/tags")
@@ -219,6 +225,7 @@ def probe_provider(
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "ping"}],
         }
+        probe_method = "POST"
     elif spec.openai_compatible:
         url = _join_base(resolved_base, "/models")
         headers = {"Authorization": f"Bearer {key}"} if key else {}
@@ -229,9 +236,20 @@ def probe_provider(
             "error": f"unsupported_provider:{provider_key}",
             "api_key_masked": _mask_secret(key),
             "base_url": resolved_base,
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider_key,
+                error=f"unsupported_provider:{provider_key}",
+                status_code=0,
+                auth_mode="api_key",
+                transport=transport,
+                endpoint="",
+            ),
         }
 
     if provider_key not in {"ollama", "vllm"} and not key:
+        error = "api_key_missing"
         return {
             "ok": False,
             "provider": provider_key,
@@ -239,8 +257,18 @@ def probe_provider(
             "url": url,
             "base_url": resolved_base,
             "api_key_masked": "",
-            "error": "api_key_missing",
+            "error": error,
             "body": "",
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider_key,
+                error=error,
+                status_code=0,
+                auth_mode="api_key",
+                transport=transport,
+                endpoint=url,
+            ),
         }
 
     try:
@@ -254,6 +282,7 @@ def probe_provider(
             body = response.json()
         except Exception:
             body = response.text
+        error = "" if response.is_success else f"http_status:{response.status_code}"
         return {
             "ok": bool(response.is_success),
             "provider": provider_key,
@@ -261,10 +290,21 @@ def probe_provider(
             "url": url,
             "base_url": resolved_base,
             "api_key_masked": _mask_secret(key),
-            "error": "" if response.is_success else f"http_status:{response.status_code}",
+            "error": error,
             "body": body if response.is_success else "",
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider_key,
+                error=error,
+                status_code=int(response.status_code),
+                auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
+                transport=transport,
+                endpoint=url,
+            ),
         }
     except Exception as exc:
+        error = str(exc)
         return {
             "ok": False,
             "provider": provider_key,
@@ -272,8 +312,18 @@ def probe_provider(
             "url": url,
             "base_url": resolved_base,
             "api_key_masked": _mask_secret(key),
-            "error": str(exc),
+            "error": error,
             "body": "",
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider_key,
+                error=error,
+                status_code=0,
+                auth_mode="none" if provider_key in {"ollama", "vllm"} else "api_key",
+                transport=transport,
+                endpoint=url,
+            ),
         }
 
 
@@ -386,6 +436,8 @@ def run_onboarding_wizard(
                 "base_url": str(provider_probe.get("base_url", "") or ""),
                 "api_key_masked": str(provider_probe.get("api_key_masked", "") or ""),
                 "probe_error": str(provider_probe.get("error", "") or ""),
+                "probe_hints": list(provider_probe.get("hints", []) or []),
+                "transport": str(provider_probe.get("transport", "") or ""),
             }
         )
         if (not bool(provider_probe.get("ok", False))) and (not Confirm.ask("Provider probe failed. Continue?", default=False)):
@@ -485,6 +537,9 @@ def run_onboarding_wizard(
                     "status_code": int(provider_probe.get("status_code", 0) or 0),
                     "error": str(provider_probe.get("error", "") or ""),
                     "api_key_masked": str(provider_probe.get("api_key_masked", "") or ""),
+                    "transport": str(provider_probe.get("transport", "") or ""),
+                    "probe_method": str(provider_probe.get("probe_method", "") or ""),
+                    "hints": list(provider_probe.get("hints", []) or []),
                 },
                 "telegram": {
                     "ok": bool(telegram_probe.get("ok", False)),

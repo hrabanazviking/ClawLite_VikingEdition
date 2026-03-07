@@ -17,6 +17,7 @@ from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor
 from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.discovery import probe_local_provider_runtime
+from clawlite.providers.hints import provider_probe_hints, provider_status_hints, provider_transport_name
 from clawlite.providers.registry import SPECS, detect_provider_name
 from clawlite.workspace.loader import TEMPLATE_FILES
 from clawlite.workspace.loader import WorkspaceLoader
@@ -410,6 +411,7 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
     provider_norm = str(provider or "openai-codex").strip().lower().replace("_", "-")
     if provider_norm in {"openai-codex", "codex"}:
         status = resolve_codex_auth(config)
+        transport = provider_transport_name(provider="openai_codex", auth_mode="oauth")
         return {
             "ok": True,
             "provider": "openai_codex",
@@ -418,6 +420,13 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
             "account_id_masked": status["account_id_masked"],
             "source": status["source"],
             "model": str(config.agents.defaults.model or config.provider.model),
+            "transport": transport,
+            "hints": provider_status_hints(
+                provider="openai_codex",
+                configured=bool(status["configured"]),
+                auth_mode="oauth",
+                transport=transport,
+            ),
         }
 
     supported_api_key_providers = set(SUPPORTED_PROVIDER_AUTH)
@@ -479,18 +488,27 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
 
     auth_mode = "none" if spec.name in {"ollama", "vllm"} else "api_key"
     configured = bool(base_url) if auth_mode == "none" else bool(api_key)
+    transport = provider_transport_name(provider=spec.name, spec=spec, auth_mode=auth_mode)
 
     return {
         "ok": True,
         "provider": spec.name,
         "configured": configured,
         "auth_mode": auth_mode,
+        "transport": transport,
         "api_key_masked": _mask_secret(api_key),
         "api_key_source": api_key_source,
         "base_url": base_url,
         "base_url_source": base_url_source,
         "env_key_present": env_key_present,
         "model": str(config.agents.defaults.model or config.provider.model),
+        "hints": provider_status_hints(
+            provider=spec.name,
+            configured=configured,
+            auth_mode=auth_mode,
+            transport=transport,
+            base_url=base_url,
+        ),
     }
 
 
@@ -652,9 +670,10 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     detected = detect_provider_name(model)
     target = _resolve_provider_probe_target(config, detected)
     if not bool(target.get("ok", False)):
+        provider_name = str(target.get("provider", detected) or detected)
         return {
             "ok": False,
-            "provider": str(target.get("provider", detected) or detected),
+            "provider": provider_name,
             "provider_detected": detected,
             "model": model,
             "status_code": 0,
@@ -664,6 +683,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "base_url": "",
             "base_url_source": "",
             "endpoint": "",
+            "transport": provider_transport_name(provider=provider_name, auth_mode=str(target.get("auth_mode", "") or "")),
+            "probe_method": "",
+            "hints": provider_probe_hints(
+                provider=provider_name,
+                error=str(target.get("error", "provider_resolution_failed") or "provider_resolution_failed"),
+                status_code=0,
+                auth_mode=str(target.get("auth_mode", "") or ""),
+                transport=provider_transport_name(provider=provider_name, auth_mode=str(target.get("auth_mode", "") or "")),
+                endpoint="",
+            ),
         }
 
     provider = str(target.get("provider", detected) or detected)
@@ -673,6 +702,9 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     endpoint = ""
     headers: dict[str, str] = {}
     payload: dict[str, Any] | None = None
+    auth_mode = str(target.get("auth_mode", "") or "")
+    transport = provider_transport_name(provider=provider, spec=spec, auth_mode=auth_mode)
+    probe_method = "GET"
 
     if provider == "ollama":
         endpoint = "/api/tags"
@@ -691,6 +723,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "base_url": base_url,
                 "base_url_source": str(target.get("base_url_source", "") or ""),
                 "endpoint": endpoint,
+                "transport": transport,
+                "probe_method": probe_method,
+                "hints": provider_probe_hints(
+                    provider=provider,
+                    error="api_key_missing",
+                    status_code=0,
+                    auth_mode=auth_mode,
+                    transport=transport,
+                    endpoint=endpoint,
+                ),
             }
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
@@ -709,6 +751,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "base_url": base_url,
                 "base_url_source": str(target.get("base_url_source", "") or ""),
                 "endpoint": endpoint,
+                "transport": transport,
+                "probe_method": probe_method,
+                "hints": provider_probe_hints(
+                    provider=provider,
+                    error="api_key_missing",
+                    status_code=0,
+                    auth_mode=auth_mode,
+                    transport=transport,
+                    endpoint=endpoint,
+                ),
             }
         probe_model = model
         if "/" in probe_model:
@@ -722,6 +774,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "ping"}],
         }
+        probe_method = "POST"
     elif spec is not None and spec.openai_compatible:
         endpoint = "/models"
         if not api_key and provider not in {"vllm"}:
@@ -737,6 +790,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "base_url": base_url,
                 "base_url_source": str(target.get("base_url_source", "") or ""),
                 "endpoint": endpoint,
+                "transport": transport,
+                "probe_method": probe_method,
+                "hints": provider_probe_hints(
+                    provider=provider,
+                    error="api_key_missing",
+                    status_code=0,
+                    auth_mode=auth_mode,
+                    transport=transport,
+                    endpoint=endpoint,
+                ),
             }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -753,6 +816,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "base_url": base_url,
             "base_url_source": str(target.get("base_url_source", "") or ""),
             "endpoint": endpoint,
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider,
+                error=f"unsupported_provider:{provider}",
+                status_code=0,
+                auth_mode=auth_mode,
+                transport=transport,
+                endpoint=endpoint,
+            ),
         }
 
     if not base_url:
@@ -768,6 +841,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "base_url": "",
             "base_url_source": str(target.get("base_url_source", "") or ""),
             "endpoint": endpoint,
+            "transport": transport,
+            "probe_method": probe_method,
+            "hints": provider_probe_hints(
+                provider=provider,
+                error="base_url_missing",
+                status_code=0,
+                auth_mode=auth_mode,
+                transport=transport,
+                endpoint=endpoint,
+            ),
         }
 
     url = f"{base_url}{endpoint}"
@@ -797,6 +880,16 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
         "base_url": base_url,
         "base_url_source": str(target.get("base_url_source", "") or ""),
         "endpoint": endpoint,
+        "transport": transport,
+        "probe_method": probe_method,
+        "hints": provider_probe_hints(
+            provider=provider,
+            error=error,
+            status_code=status_code,
+            auth_mode=auth_mode,
+            transport=transport,
+            endpoint=endpoint,
+        ),
     }
 
 

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from clawlite.cli.commands import main
+from clawlite.cli.ops import provider_live_probe
 from clawlite.channels.telegram_pairing import TelegramPairingStore
 from clawlite.workspace.loader import TEMPLATE_FILES
 
@@ -1407,9 +1408,52 @@ def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, cap
     assert payload["provider"] == "openai"
     assert payload["configured"] is True
     assert payload["auth_mode"] == "api_key"
+    assert payload["transport"] == "openai_compatible"
     assert payload["api_key_source"] == "env:OPENAI_API_KEY"
     assert payload["env_key_present"] is True
     assert payload["base_url"] == "https://api.openai.com/v1"
+    assert any("live probe" in row.lower() for row in payload["hints"])
+
+
+def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "vllm/meta-llama/Llama-3.2-3B-Instruct"},
+                "agents": {"defaults": {"model": "vllm/meta-llama/Llama-3.2-3B-Instruct"}},
+                "providers": {"vllm": {"api_base": "http://127.0.0.1:8000/v1"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            del url, headers
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _Client)
+
+    from clawlite.config.loader import load_config
+
+    payload = provider_live_probe(load_config(config_path), timeout=0.1)
+    assert payload["ok"] is False
+    assert payload["provider"] == "vllm"
+    assert payload["transport"] == "local_runtime"
+    assert payload["probe_method"] == "GET"
+    assert any("Inicie o servidor vLLM" in row for row in payload["hints"])
 
 
 def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
