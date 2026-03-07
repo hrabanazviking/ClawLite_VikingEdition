@@ -512,6 +512,10 @@ class TelegramChannel(BaseChannel):
         )
         self._seen_update_keys: set[str] = set()
         self._seen_update_order: deque[str] = deque()
+        # In-flight set: prevents concurrent webhook workers from processing the
+        # same update_id simultaneously (closes TOCTOU between check and commit).
+        # Removed on failure so retries are allowed; only moved to _seen on success.
+        self._inflight_update_keys: set[str] = set()
         self._dedupe_persist_task: asyncio.Task[Any] | None = None
         self._own_sent_message_keys: set[tuple[str, int]] = set()
         self._own_sent_message_order: deque[tuple[str, int]] = deque()
@@ -1580,9 +1584,12 @@ class TelegramChannel(BaseChannel):
                 backoff = self.reconnect_initial_s
                 for item in updates:
                     dedupe_key = self._build_update_dedupe_key(item)
-                    if dedupe_key and self._is_duplicate_update_dedupe_key(dedupe_key, source="polling"):
-                        continue
                     update_id = self._coerce_update_id(getattr(item, "update_id", None))
+                    if dedupe_key and self._is_duplicate_update_dedupe_key(dedupe_key, source="polling"):
+                        if update_id is not None and update_id >= self._offset:
+                            self._offset = max(self._offset, update_id + 1)
+                            self._save_offset()
+                        continue
                     if update_id is not None and update_id < self._offset:
                         self._signals["polling_stale_update_skip_count"] += 1
                         continue
@@ -2754,13 +2761,27 @@ class TelegramChannel(BaseChannel):
         self._signals["webhook_update_received_count"] += 1
         normalized = self._normalize_webhook_payload(payload)
         dedupe_key = self._build_update_dedupe_key(normalized)
+
+        # Check committed deduplication first (permanent after success).
         if dedupe_key and self._is_duplicate_update_dedupe_key(dedupe_key, source="webhook"):
             return False
+
+        # Check in-flight set to prevent TOCTOU: two concurrent webhook coroutines
+        # could both pass the committed-dedupe check and process the same update.
+        # The in-flight key is cleared on failure so retries remain possible.
+        if dedupe_key and dedupe_key in self._inflight_update_keys:
+            self._signals["update_duplicate_skip_count"] += 1
+            self._signals["webhook_update_duplicate_count"] += 1
+            return False
+        if dedupe_key:
+            self._inflight_update_keys.add(dedupe_key)
 
         try:
             item = self._to_namespace(normalized)
         except Exception:
             self._signals["webhook_update_parse_error_count"] += 1
+            if dedupe_key:
+                self._inflight_update_keys.discard(dedupe_key)
             return False
 
         try:
@@ -2773,6 +2794,9 @@ class TelegramChannel(BaseChannel):
             self._last_error = str(exc)
             logger.warning("telegram webhook update processing failed error={}", exc)
             return False
+        finally:
+            if dedupe_key:
+                self._inflight_update_keys.discard(dedupe_key)
 
     async def send(self, *, target: str, text: str, metadata: dict[str, Any] | None = None) -> str:
         chat_id, target_thread_id = self._parse_target(str(target))
