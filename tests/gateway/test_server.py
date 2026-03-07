@@ -2781,6 +2781,7 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
             "idempotency_suppressed",
         }
         assert "cron" in payload
+        assert "wake_policy" in payload["cron"]
         assert "heartbeat" in payload
         assert "bootstrap" in payload
         assert "pending" in payload["bootstrap"]
@@ -4264,3 +4265,138 @@ def test_gateway_heartbeat_trigger_reports_quota_pressure_and_notices_on_repeat(
         assert metadata["pressure_class"] == "quota"
         assert metadata["pressure_streak"] == 2
         assert "heartbeat wakes throttled by quota backpressure" in str(send_kwargs["text"])
+
+
+def test_gateway_diagnostics_exposes_proactive_wake_policy_delay(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        agents={"defaults": {"memory": {"proactive": True}}},
+        gateway={"heartbeat": {"enabled": False}, "diagnostics": {"enabled": True, "require_auth": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    counters = {"coalesced": 0}
+
+    def _status() -> dict[str, object]:
+        return {
+            "running": True,
+            "worker_state": "running",
+            "dropped_backpressure": 0,
+            "dropped_quota": 0,
+            "dropped_global_backpressure": 0,
+            "pending_by_kind": {"proactive": 1},
+            "kind_limits": {"proactive": 1},
+            "by_kind": {
+                "proactive": {
+                    "coalesced": counters["coalesced"],
+                    "dropped_backpressure": 0,
+                    "dropped_quota": 0,
+                    "dropped_global_backpressure": 0,
+                }
+            },
+        }
+
+    async def _submit(**_kwargs):
+        counters["coalesced"] = 1
+        return {
+            "status": "ok",
+            "scanned": 0,
+            "delivered": 0,
+            "failed": 0,
+            "replayed": 0,
+            "next_step_sent": False,
+            "error": "",
+        }
+
+    app.state.runtime.autonomy_wake.status = _status
+    app.state.runtime.autonomy_wake.submit = AsyncMock(side_effect=_submit)
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 2.0
+        payload: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            payload = client.get("/v1/diagnostics").json()
+            runner = payload["memory_monitor"]["runner"]
+            if int(runner.get("policy_event_count", 0) or 0) >= 1:
+                break
+            time.sleep(0.05)
+
+        runner = payload["memory_monitor"]["runner"]
+        assert runner["policy_event_count"] >= 1
+        assert runner["delayed_count"] >= 1
+        assert runner["last_policy_action"] == "delayed"
+        assert runner["last_policy_reason"] == "coalesced"
+        assert runner["policy_by_action"]["delayed"] >= 1
+        assert runner["recent_policy_events"][-1]["summary"] == "proactive wake delayed by coalesced pending run"
+
+
+def test_gateway_diagnostics_exposes_cron_wake_policy_discard(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}, "diagnostics": {"enabled": True, "require_auth": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    counters = {"quota": 0, "global": 0, "total": 0}
+    job_id = asyncio.run(
+        app.state.runtime.cron.add_job(
+            session_id="cli:cron-policy",
+            expression="every 60",
+            prompt="run wake policy check",
+            name="cron-policy",
+            metadata={"run_once": True},
+        )
+    )
+    job = app.state.runtime.cron.get_job(job_id)
+    assert job is not None
+    job.next_run_iso = (gateway_server.dt.datetime.now(gateway_server.dt.timezone.utc) - gateway_server.dt.timedelta(seconds=1)).isoformat()
+    app.state.runtime.cron._save()
+
+    def _status() -> dict[str, object]:
+        return {
+            "running": True,
+            "worker_state": "running",
+            "dropped_backpressure": counters["total"],
+            "dropped_quota": counters["quota"],
+            "dropped_global_backpressure": counters["global"],
+            "pending_by_kind": {"cron": 1},
+            "kind_limits": {"cron": 1},
+            "by_kind": {
+                "cron": {
+                    "coalesced": 0,
+                    "dropped_backpressure": counters["total"],
+                    "dropped_quota": counters["quota"],
+                    "dropped_global_backpressure": counters["global"],
+                }
+            },
+        }
+
+    async def _submit(**_kwargs):
+        counters["quota"] = 1
+        counters["total"] = 1
+        return "cron_backpressure_skipped"
+
+    app.state.runtime.autonomy_wake.status = _status
+    app.state.runtime.autonomy_wake.submit = AsyncMock(side_effect=_submit)
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 3.0
+        payload: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            payload = client.get("/v1/diagnostics").json()
+            wake_policy = payload["cron"]["wake_policy"]
+            if int(wake_policy.get("discarded_count", 0) or 0) >= 1:
+                break
+            time.sleep(0.05)
+
+        wake_policy = payload["cron"]["wake_policy"]
+        assert wake_policy["policy_event_count"] >= 1
+        assert wake_policy["discarded_count"] >= 1
+        assert wake_policy["last_policy_action"] == "discarded"
+        assert wake_policy["last_policy_reason"] == "quota"
+        assert wake_policy["policy_by_reason"]["quota"] >= 1
+        assert wake_policy["recent_policy_events"][-1]["summary"] == f"cron wake discarded by quota policy job_id={job_id}"

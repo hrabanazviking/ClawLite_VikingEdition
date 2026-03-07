@@ -1440,6 +1440,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "last_result": "",
         "last_error": "",
         "last_run_iso": "",
+        "policy_event_count": 0,
+        "delayed_count": 0,
+        "discarded_count": 0,
+        "policy_by_action": {},
+        "policy_by_reason": {},
+        "last_policy_action": "",
+        "last_policy_reason": "",
+        "last_policy_at": "",
+        "recent_policy_events": [],
     }
     tuning_loop_interval_seconds = max(1, int(cfg.gateway.autonomy.tuning_loop_interval_s or 1800))
     tuning_loop_timeout_seconds = max(1.0, float(cfg.gateway.autonomy.tuning_loop_timeout_s or 45.0))
@@ -1466,6 +1475,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "last_summary": "",
         "last_event_at": "",
         "last_notice_at": "",
+    }
+    cron_wake_state: dict[str, Any] = {
+        "enabled": True,
+        "policy_event_count": 0,
+        "delayed_count": 0,
+        "discarded_count": 0,
+        "policy_by_action": {},
+        "policy_by_reason": {},
+        "last_policy_action": "",
+        "last_policy_reason": "",
+        "last_policy_at": "",
+        "last_result": "",
+        "recent_policy_events": [],
     }
     tuning_runner_state: dict[str, Any] = {
         "enabled": bool(cfg.gateway.autonomy.tuning_loop_enabled),
@@ -1523,6 +1545,77 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "dropped_quota": int(row.get("dropped_quota", 0) or 0),
             "dropped_global_backpressure": int(row.get("dropped_global_backpressure", 0) or 0),
         }
+
+    def _wake_metric_delta(before: dict[str, Any], after: dict[str, Any], kind: str, metric: str) -> int:
+        before_row = _wake_backpressure_row(before, kind)
+        after_row = _wake_backpressure_row(after, kind)
+        if metric == "coalesced":
+            before_by_kind = before.get("by_kind") if isinstance(before.get("by_kind"), dict) else {}
+            after_by_kind = after.get("by_kind") if isinstance(after.get("by_kind"), dict) else {}
+            before_metric = before_by_kind.get(kind) if isinstance(before_by_kind.get(kind), dict) else {}
+            after_metric = after_by_kind.get(kind) if isinstance(after_by_kind.get(kind), dict) else {}
+            return int(after_metric.get("coalesced", 0) or 0) - int(before_metric.get("coalesced", 0) or 0)
+        return int(after_row.get(metric, 0) or 0) - int(before_row.get(metric, 0) or 0)
+
+    def _record_wake_policy_event(
+        *,
+        state: dict[str, Any],
+        source: str,
+        kind: str,
+        action: str,
+        reason: str,
+        summary: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        event_at = _utc_now_iso()
+        normalized_action = str(action or "unknown").strip() or "unknown"
+        normalized_reason = str(reason or "unknown").strip() or "unknown"
+        state["policy_event_count"] = int(state.get("policy_event_count", 0) or 0) + 1
+        if normalized_action == "delayed":
+            state["delayed_count"] = int(state.get("delayed_count", 0) or 0) + 1
+        elif normalized_action == "discarded":
+            state["discarded_count"] = int(state.get("discarded_count", 0) or 0) + 1
+        policy_by_action = state.get("policy_by_action")
+        if not isinstance(policy_by_action, dict):
+            policy_by_action = {}
+            state["policy_by_action"] = policy_by_action
+        policy_by_action[normalized_action] = int(policy_by_action.get(normalized_action, 0) or 0) + 1
+        policy_by_reason = state.get("policy_by_reason")
+        if not isinstance(policy_by_reason, dict):
+            policy_by_reason = {}
+            state["policy_by_reason"] = policy_by_reason
+        policy_by_reason[normalized_reason] = int(policy_by_reason.get(normalized_reason, 0) or 0) + 1
+        state["last_policy_action"] = normalized_action
+        state["last_policy_reason"] = normalized_reason
+        state["last_policy_at"] = event_at
+        state["last_result"] = summary
+        recent_events = state.get("recent_policy_events")
+        if not isinstance(recent_events, list):
+            recent_events = []
+        recent_events.append(
+            {
+                "at": event_at,
+                "kind": kind,
+                "source": source,
+                "action": normalized_action,
+                "reason": normalized_reason,
+                "summary": summary,
+            }
+        )
+        state["recent_policy_events"] = recent_events[-10:]
+        _record_autonomy_event(
+            source,
+            "wake_policy",
+            normalized_action,
+            summary=summary,
+            metadata={
+                "wake_kind": kind,
+                "policy_action": normalized_action,
+                "policy_reason": normalized_reason,
+                **metadata,
+            },
+            event_at=event_at,
+        )
 
     def _classify_wake_backpressure(
         kind: str,
@@ -1875,14 +1968,45 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             payload={"job": job},
             fallback_result="cron_backpressure_skipped",
         )
+        after = runtime.autonomy_wake.status()
+        coalesced_delta = _wake_metric_delta(before, after, "cron", "coalesced")
+        if coalesced_delta > 0:
+            _record_wake_policy_event(
+                state=cron_wake_state,
+                source="cron",
+                kind="cron",
+                action="delayed",
+                reason="coalesced",
+                summary=f"cron wake delayed by coalesced pending run job_id={job.id}",
+                metadata={
+                    "job_id": str(job.id),
+                    "job_name": str(getattr(job, "name", "") or ""),
+                    "coalesced_delta": int(coalesced_delta),
+                    "autonomy_wake": dict(after),
+                },
+            )
         if result == "cron_backpressure_skipped":
             pressure_class = await _track_wake_backpressure(
                 kind="cron",
                 source="cron",
                 before=before,
-                after=runtime.autonomy_wake.status(),
+                after=after,
+            )
+            _record_wake_policy_event(
+                state=cron_wake_state,
+                source="cron",
+                kind="cron",
+                action="discarded",
+                reason=pressure_class,
+                summary=f"cron wake discarded by {pressure_class} policy job_id={job.id}",
+                metadata={
+                    "job_id": str(job.id),
+                    "job_name": str(getattr(job, "name", "") or ""),
+                    "autonomy_wake": dict(after),
+                },
             )
             return f"cron_{_wake_reason_label(pressure_class)}_skipped"
+        cron_wake_state["last_result"] = str(result or "")
         return result
 
     async def _submit_proactive_wake() -> dict[str, Any]:
@@ -1902,17 +2026,43 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             payload={},
             fallback_result=fallback,
         )
+        after = runtime.autonomy_wake.status()
         if isinstance(response, dict):
             normalized = dict(response)
+            coalesced_delta = _wake_metric_delta(before, after, "proactive", "coalesced")
+            if coalesced_delta > 0:
+                _record_wake_policy_event(
+                    state=proactive_runner_state,
+                    source="proactive",
+                    kind="proactive",
+                    action="delayed",
+                    reason="coalesced",
+                    summary="proactive wake delayed by coalesced pending run",
+                    metadata={
+                        "coalesced_delta": int(coalesced_delta),
+                        "autonomy_wake": dict(after),
+                    },
+                )
             if str(normalized.get("status", "") or "").strip().lower() == "wake_backpressure":
                 pressure_class = await _track_wake_backpressure(
                     kind="proactive",
                     source="proactive",
                     before=before,
-                    after=runtime.autonomy_wake.status(),
+                    after=after,
                 )
                 normalized["status"] = f"wake_{_wake_reason_label(pressure_class)}"
                 normalized["pressure_class"] = pressure_class
+                _record_wake_policy_event(
+                    state=proactive_runner_state,
+                    source="proactive",
+                    kind="proactive",
+                    action="discarded",
+                    reason=pressure_class,
+                    summary=f"proactive wake discarded by {pressure_class} policy",
+                    metadata={
+                        "autonomy_wake": dict(after),
+                    },
+                )
             return normalized
         return fallback
 
@@ -3500,6 +3650,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 monitor_payload = {}
             monitor_payload["enabled"] = True
             monitor_payload["runner"] = dict(proactive_runner_state)
+        cron_payload = dict(runtime.cron.status())
+        cron_payload["wake_policy"] = dict(cron_wake_state)
 
         return DiagnosticsResponse(
             schema_version="2026-03-02",
@@ -3511,7 +3663,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             channels=runtime.channels.status(),
             channels_delivery=runtime.channels.delivery_diagnostics(),
             channels_inbound=runtime.channels.inbound_diagnostics(),
-            cron=runtime.cron.status(),
+            cron=cron_payload,
             heartbeat=runtime.heartbeat.status(),
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
             autonomy_wake=runtime.autonomy_wake.status(),
