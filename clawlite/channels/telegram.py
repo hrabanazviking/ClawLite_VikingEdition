@@ -2244,6 +2244,36 @@ class TelegramChannel(BaseChannel):
         return trimmed, None
 
     @staticmethod
+    def _normalize_outbound_parse_mode(metadata: dict[str, Any]) -> str:
+        raw_value = metadata.get("_telegram_parse_mode")
+        if raw_value is None:
+            raw_value = metadata.get("telegram_parse_mode")
+        if raw_value is None:
+            raw_value = metadata.get("parse_mode")
+        normalized = str(raw_value or "").strip().lower()
+        aliases = {
+            "": "markdown",
+            "default": "markdown",
+            "markdown": "markdown",
+            "markdownv2": "markdown",
+            "md": "markdown",
+            "html": "html",
+            "raw_html": "html",
+            "plain": "plain",
+            "text": "plain",
+            "none": "plain",
+        }
+        return aliases.get(normalized, "markdown")
+
+    @staticmethod
+    def _render_outbound_text(text: str, *, parse_mode: str) -> tuple[str, str | None]:
+        if parse_mode == "html":
+            return text, "HTML"
+        if parse_mode == "plain":
+            return text, None
+        return markdown_to_telegram_html(text), "HTML"
+
+    @staticmethod
     def _normalize_outbound_media_items(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         media_source = metadata.get("_telegram_media")
         if media_source is None:
@@ -2351,6 +2381,7 @@ class TelegramChannel(BaseChannel):
         *,
         chat_id: str,
         text: str,
+        outbound_parse_mode: str,
         reply_to_message_id: int | None,
         thread_state: dict[str, int | None],
         reply_markup: Any | None,
@@ -2371,9 +2402,7 @@ class TelegramChannel(BaseChannel):
                 message_ids.append(message_id)
 
         for idx, chunk in enumerate(chunks, start=1):
-            html_payload = markdown_to_telegram_html(chunk)
-            payload_text = html_payload
-            payload_parse_mode: str | None = "HTML"
+            payload_text, payload_parse_mode = self._render_outbound_text(chunk, parse_mode=outbound_parse_mode)
             formatting_fallback_used = False
 
             for attempt in range(1, policy.max_attempts + 1):
@@ -2471,6 +2500,7 @@ class TelegramChannel(BaseChannel):
         chat_id: str,
         items: list[dict[str, Any]],
         caption_text: str | None,
+        outbound_parse_mode: str,
         reply_to_message_id: int | None,
         thread_state: dict[str, int | None],
         reply_markup: Any | None,
@@ -2492,8 +2522,13 @@ class TelegramChannel(BaseChannel):
         for idx, item in enumerate(items, start=1):
             sender, payload_key = self._resolve_media_sender(self.bot, str(item["type"]))
             raw_caption = caption_text if idx == 1 else None
-            caption_payload = markdown_to_telegram_html(raw_caption) if raw_caption else None
-            caption_parse_mode: str | None = "HTML" if caption_payload else None
+            if raw_caption:
+                caption_payload, caption_parse_mode = self._render_outbound_text(
+                    raw_caption,
+                    parse_mode=outbound_parse_mode,
+                )
+            else:
+                caption_payload, caption_parse_mode = None, None
             formatting_fallback_used = False
 
             for attempt in range(1, policy.max_attempts + 1):
@@ -2808,6 +2843,7 @@ class TelegramChannel(BaseChannel):
         message_ids: list[int] = []
         reply_markup = self._build_inline_keyboard_reply_markup(metadata_payload)
         media_items = self._normalize_outbound_media_items(metadata_payload)
+        outbound_parse_mode = self._normalize_outbound_parse_mode(metadata_payload)
         total_messages = 0
         if media_items:
             caption_text, follow_up_text = self._split_media_caption(text)
@@ -2815,6 +2851,7 @@ class TelegramChannel(BaseChannel):
                 chat_id=chat_id,
                 items=media_items,
                 caption_text=caption_text,
+                outbound_parse_mode=outbound_parse_mode,
                 reply_to_message_id=reply_to_message_id,
                 thread_state=thread_state,
                 reply_markup=None if follow_up_text else reply_markup,
@@ -2824,6 +2861,7 @@ class TelegramChannel(BaseChannel):
                 total_messages += await self._send_text_chunks(
                     chat_id=chat_id,
                     text=follow_up_text,
+                    outbound_parse_mode=outbound_parse_mode,
                     reply_to_message_id=None,
                     thread_state=thread_state,
                     reply_markup=reply_markup,
@@ -2833,6 +2871,7 @@ class TelegramChannel(BaseChannel):
             total_messages += await self._send_text_chunks(
                 chat_id=chat_id,
                 text=text,
+                outbound_parse_mode=outbound_parse_mode,
                 reply_to_message_id=reply_to_message_id,
                 thread_state=thread_state,
                 reply_markup=reply_markup,

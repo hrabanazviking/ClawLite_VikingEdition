@@ -1662,6 +1662,32 @@ def test_telegram_send_markdown_falls_back_to_plain_text() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_send_supports_raw_html_parse_mode_from_metadata() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(message_id=91)
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        html_text = "<b>hello</b> <i>team</i> <code>x=1</code>"
+        out = await channel.send(target="42", text=html_text, metadata={"telegram_parse_mode": "html"})
+
+        assert out == "telegram:sent:1"
+        assert len(bot.calls) == 1
+        assert bot.calls[0]["text"] == html_text
+        assert bot.calls[0]["parse_mode"] == "HTML"
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_send_supports_inline_keyboard_from_metadata() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(config={"token": "x:token"})
@@ -2152,6 +2178,36 @@ def test_telegram_send_places_reply_markup_on_follow_up_text_when_media_caption_
         assert isinstance(receipt, dict)
         assert receipt["chunks"] == 2
         assert receipt["message_ids"] == [201, 202]
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_send_media_caption_supports_raw_html_parse_mode_from_metadata() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.photo_calls: list[dict] = []
+
+            async def send_photo(self, **kwargs):
+                self.photo_calls.append(kwargs)
+                return SimpleNamespace(message_id=301)
+
+        bot = FakeBot()
+        channel.bot = bot
+        html_text = "<b>hello</b> <i>team</i>"
+        metadata: dict[str, object] = {
+            "telegram_parse_mode": "html",
+            "media": [{"type": "photo", "file_id": "photo-1"}],
+        }
+
+        out = await channel.send(target="42", text=html_text, metadata=metadata)
+
+        assert out == "telegram:sent:1"
+        assert len(bot.photo_calls) == 1
+        assert bot.photo_calls[0]["caption"] == html_text
+        assert bot.photo_calls[0]["parse_mode"] == "HTML"
 
     asyncio.run(_scenario())
 
