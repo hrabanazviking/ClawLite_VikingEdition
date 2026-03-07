@@ -774,22 +774,53 @@ class MemoryStore:
         backend_supported = False
         backend_initialized = False
         backend_init_error = ""
+        backend_driver = ""
+        backend_connection_ok = False
+        backend_vector_extension = False
+        backend_vector_version = ""
+
+        def _capture_backend_details() -> None:
+            nonlocal backend_driver, backend_connection_ok, backend_vector_extension, backend_vector_version, backend_init_error
+            details_fn = getattr(self.backend, "diagnostics", None)
+            if not callable(details_fn):
+                return
+            try:
+                details = details_fn()
+            except Exception as exc:
+                backend_init_error = backend_init_error or str(exc)
+                self._diagnostics["last_error"] = str(exc)
+                return
+            if not isinstance(details, dict):
+                return
+            backend_driver = str(details.get("driver_name", "") or "")
+            backend_connection_ok = bool(details.get("connection_ok", False))
+            backend_vector_extension = bool(details.get("vector_extension", False))
+            backend_vector_version = str(details.get("vector_version", "") or "")
+            backend_init_error = backend_init_error or str(details.get("last_error", "") or "")
+
         try:
             backend_supported = bool(self.backend.is_supported())
         except Exception as exc:
             backend_init_error = str(exc)
             self._diagnostics["last_error"] = str(exc)
-        try:
-            self.backend.initialize(self.memory_home)
-            backend_initialized = True
-        except Exception as exc:
-            backend_init_error = str(exc)
-            self._diagnostics["last_error"] = str(exc)
+        _capture_backend_details()
+        if backend_supported:
+            try:
+                self.backend.initialize(self.memory_home)
+                backend_initialized = True
+            except Exception as exc:
+                backend_init_error = str(exc)
+                self._diagnostics["last_error"] = str(exc)
+            _capture_backend_details()
         self._backend_diagnostics: dict[str, bool | str] = {
             "backend_name": backend_name,
             "backend_supported": backend_supported,
             "backend_initialized": backend_initialized,
             "backend_init_error": backend_init_error,
+            "backend_driver": backend_driver,
+            "backend_connection_ok": backend_connection_ok,
+            "backend_vector_extension": backend_vector_extension,
+            "backend_vector_version": backend_vector_version,
         }
         self._privacy_key: bytes | None = None
 
@@ -6476,6 +6507,10 @@ class MemoryStore:
             "backend_supported": bool(self._backend_diagnostics["backend_supported"]),
             "backend_initialized": bool(self._backend_diagnostics["backend_initialized"]),
             "backend_init_error": str(self._backend_diagnostics["backend_init_error"]),
+            "backend_driver": str(self._backend_diagnostics["backend_driver"]),
+            "backend_connection_ok": bool(self._backend_diagnostics["backend_connection_ok"]),
+            "backend_vector_extension": bool(self._backend_diagnostics["backend_vector_extension"]),
+            "backend_vector_version": str(self._backend_diagnostics["backend_vector_version"]),
         }
 
     @staticmethod

@@ -948,10 +948,14 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         pgvector_url=str(config.agents.defaults.memory.pgvector_url or ""),
     )
     if memory_backend.name == "pgvector" and not memory_backend.is_supported():
+        diagnostics_fn = getattr(memory_backend, "diagnostics", None)
+        details = diagnostics_fn() if callable(diagnostics_fn) else {}
+        detail_text = str(details.get("last_error", "") or "").strip() if isinstance(details, dict) else ""
         raise RuntimeError(
             "memory backend 'pgvector' is not supported in this runtime: configure "
             "agents.defaults.memory.pgvector_url with postgres:// or postgresql://, "
             "or use backend=sqlite"
+            + (f" ({detail_text})" if detail_text else "")
         )
 
     memory = MemoryStore(

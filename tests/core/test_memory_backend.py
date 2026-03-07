@@ -127,6 +127,109 @@ def test_pgvector_support_detection_requires_valid_url_and_driver(monkeypatch) -
     assert attempted_imports == ["psycopg", "psycopg2"]
 
 
+def test_pgvector_support_detection_requires_connection_and_vector_extension(monkeypatch) -> None:
+    backend = resolve_memory_backend(
+        "pgvector",
+        pgvector_url="postgresql://user:pass@localhost:5432/clawlite",
+    )
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def execute(self, query: str) -> None:
+            self.queries.append(query)
+
+        def fetchone(self):
+            return ("0.8.1",)
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+            self.closed = False
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_instance
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeDriver:
+        @staticmethod
+        def connect(url: str) -> FakeConnection:
+            assert url == "postgresql://user:pass@localhost:5432/clawlite"
+            return FakeConnection()
+
+    monkeypatch.setattr(type(backend), "_detect_driver", lambda self: ("psycopg", FakeDriver))
+
+    assert backend.is_supported() is True
+    details = backend.diagnostics()
+    assert details["driver_name"] == "psycopg"
+    assert details["connection_ok"] is True
+    assert details["vector_extension"] is True
+    assert details["vector_version"] == "0.8.1"
+    assert details["supported"] is True
+    assert details["last_error"] == ""
+
+
+def test_pgvector_support_detection_reports_missing_vector_extension(monkeypatch) -> None:
+    backend = resolve_memory_backend(
+        "pgvector",
+        pgvector_url="postgresql://user:pass@localhost:5432/clawlite",
+    )
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def execute(self, query: str) -> None:
+            self.queries.append(query)
+            if query.startswith("CREATE EXTENSION"):
+                raise RuntimeError("permission denied")
+
+        def fetchone(self):
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+            self.closed = False
+            self.rollback_calls = 0
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeDriver:
+        @staticmethod
+        def connect(url: str) -> FakeConnection:
+            assert url == "postgresql://user:pass@localhost:5432/clawlite"
+            return FakeConnection()
+
+    monkeypatch.setattr(type(backend), "_detect_driver", lambda self: ("psycopg", FakeDriver))
+
+    assert backend.is_supported() is False
+    details = backend.diagnostics()
+    assert details["connection_ok"] is True
+    assert details["vector_extension"] is False
+    assert details["supported"] is False
+    assert "pgvector extension 'vector' is unavailable" in str(details["last_error"])
+
+
 def test_pgvector_query_similar_embeddings_uses_sql_path(monkeypatch) -> None:
     backend = resolve_memory_backend(
         "pgvector",
@@ -171,7 +274,7 @@ def test_pgvector_query_similar_embeddings_uses_sql_path(monkeypatch) -> None:
     hits = backend.query_similar_embeddings([1.0, 0.0], record_ids=["alpha", "beta"], limit=1)
 
     assert hits == [{"record_id": "alpha", "score": 0.95}]
-    assert "embedding::vector <=> %s::vector" in fake_conn._cursor.executed_query
+    assert "embedding <=> %s::vector" in fake_conn._cursor.executed_query
     assert "record_id IN (%s, %s)" in fake_conn._cursor.executed_query
     assert fake_conn._cursor.executed_params[-1] == 1
     assert fake_conn.closed is True
@@ -212,6 +315,115 @@ def test_pgvector_query_similar_embeddings_falls_back_when_sql_fails(monkeypatch
 
     assert [item["record_id"] for item in hits] == ["alpha", "beta"]
     assert float(hits[0]["score"]) > float(hits[1]["score"])
+
+
+def test_pgvector_initialize_migrates_embedding_column_to_vector(monkeypatch, tmp_path: Path) -> None:
+    backend = resolve_memory_backend(
+        "pgvector",
+        pgvector_url="postgresql://user:pass@localhost:5432/clawlite",
+    )
+    connections: list[FakeConnection] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+            self.last_query: str = ""
+
+        def execute(self, query: str) -> None:
+            self.last_query = query
+            self.queries.append(query)
+
+        def fetchone(self):
+            if "SELECT extversion FROM pg_extension" in self.last_query:
+                return ("0.8.1",)
+            if "SELECT udt_name" in self.last_query:
+                return ("text",)
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+            self.commit_calls = 0
+            self.rollback_calls = 0
+            self.closed = False
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeDriver:
+        @staticmethod
+        def connect(url: str) -> FakeConnection:
+            assert url == "postgresql://user:pass@localhost:5432/clawlite"
+            conn = FakeConnection()
+            connections.append(conn)
+            return conn
+
+    monkeypatch.setattr(type(backend), "_detect_driver", lambda self: ("psycopg", FakeDriver))
+
+    backend.initialize(tmp_path)
+
+    assert len(connections) == 2
+    init_queries = connections[-1].cursor_instance.queries
+    assert any("embedding vector NOT NULL" in query for query in init_queries)
+    assert any("ALTER TABLE embeddings" in query for query in init_queries)
+    assert connections[-1].commit_calls >= 1
+
+
+def test_pgvector_upsert_embedding_casts_literal_to_vector(monkeypatch) -> None:
+    backend = resolve_memory_backend(
+        "pgvector",
+        pgvector_url="postgresql://user:pass@localhost:5432/clawlite",
+    )
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed_query: str = ""
+            self.executed_params: tuple[object, ...] = ()
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            self.executed_query = query
+            self.executed_params = params
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+            self.commit_calls = 0
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    fake_conn = FakeConnection()
+    monkeypatch.setattr(type(backend), "_open_connection", lambda self: fake_conn)
+
+    backend.upsert_embedding("alpha", [1.0, 0.0], "2026-03-01T00:00:00+00:00", "seed")
+
+    assert "VALUES (%s, %s::vector, %s, %s)" in fake_conn.cursor_instance.executed_query
+    assert fake_conn.cursor_instance.executed_params[1] == "[1.0,0.0]"
+    assert fake_conn.commit_calls == 1
 
 
 def test_backends_share_module_level_embedding_and_similarity_helpers(monkeypatch, tmp_path: Path) -> None:

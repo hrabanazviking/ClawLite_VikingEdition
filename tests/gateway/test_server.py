@@ -719,6 +719,29 @@ def test_gateway_runtime_rejects_pgvector_backend_with_invalid_url(tmp_path: Pat
         build_runtime(cfg)
 
 
+def test_gateway_runtime_rejects_pgvector_backend_with_probe_details(tmp_path: Path, monkeypatch) -> None:
+    class _Backend:
+        name = "pgvector"
+
+        def is_supported(self) -> bool:
+            return False
+
+        def diagnostics(self) -> dict[str, object]:
+            return {"last_error": "pgvector extension 'vector' is unavailable"}
+
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        agents={"defaults": {"memory": {"backend": "pgvector", "pgvector_url": "postgresql://memory-db"}}},
+        channels={},
+    )
+    monkeypatch.setattr("clawlite.gateway.server.resolve_memory_backend", lambda **kwargs: _Backend())
+
+    with pytest.raises(RuntimeError, match="vector' is unavailable"):
+        build_runtime(cfg)
+
+
 def test_gateway_runtime_rejects_local_provider_when_startup_probe_fails(tmp_path: Path, monkeypatch) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

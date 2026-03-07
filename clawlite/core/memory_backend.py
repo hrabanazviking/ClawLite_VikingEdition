@@ -334,18 +334,79 @@ class SQLiteMemoryBackend:
 class PgvectorMemoryBackend:
     pgvector_url: str = ""
     _lock: threading.Lock = field(init=False)
+    _status: dict[str, Any] = field(init=False)
 
     def __post_init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._status = self._default_status()
 
     @property
     def name(self) -> str:
         return "pgvector"
 
+    @staticmethod
+    def _default_status() -> dict[str, Any]:
+        return {
+            "url_valid": False,
+            "driver_name": "",
+            "driver_available": False,
+            "connection_ok": False,
+            "vector_extension": False,
+            "vector_version": "",
+            "sql_similarity_available": False,
+            "supported": False,
+            "last_error": "",
+        }
+
+    def diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
+
+    def support_error(self) -> str:
+        if not bool(self.diagnostics().get("supported", False)):
+            self.is_supported()
+        return str(self.diagnostics().get("last_error", "") or "")
+
+    def _set_status(self, **updates: Any) -> None:
+        with self._lock:
+            self._status.update(updates)
+
     def is_supported(self) -> bool:
-        if not self._is_valid_pg_url():
+        status = self._default_status()
+        status["url_valid"] = self._is_valid_pg_url()
+        if not status["url_valid"]:
+            status["last_error"] = "pgvector_url must use postgres:// or postgresql:// with a hostname"
+            self._set_status(**status)
             return False
-        return self._detect_driver()[0] is not None
+
+        driver_name, driver_module = self._detect_driver()
+        status["driver_name"] = str(driver_name or "")
+        status["driver_available"] = bool(driver_name is not None and driver_module is not None)
+        if driver_name is None or driver_module is None:
+            status["last_error"] = "pgvector backend requires psycopg or psycopg2"
+            self._set_status(**status)
+            return False
+
+        conn = None
+        try:
+            conn = driver_module.connect(str(self.pgvector_url or ""))
+            status["connection_ok"] = True
+            status["vector_version"] = self._probe_vector_extension(conn)
+            status["vector_extension"] = bool(status["vector_version"])
+            status["sql_similarity_available"] = bool(status["vector_extension"])
+            status["supported"] = bool(status["connection_ok"] and status["vector_extension"])
+            status["last_error"] = ""
+            return bool(status["supported"])
+        except Exception as exc:
+            status["last_error"] = str(exc)
+            return False
+        finally:
+            self._set_status(**status)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def _to_vector_literal(embedding: list[float]) -> str:
@@ -372,22 +433,118 @@ class PgvectorMemoryBackend:
                 continue
         return None, None
 
+    @staticmethod
+    def _row_first_value(row: Any) -> str:
+        if isinstance(row, (list, tuple)) and row:
+            return str(row[0] or "")
+        if row is None:
+            return ""
+        return str(row or "")
+
+    def _probe_vector_extension(self, conn: Any) -> str:
+        cursor = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            version = self._row_first_value(cursor.fetchone()).strip()
+            if version:
+                return version
+
+            try:
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise RuntimeError("pgvector extension 'vector' is unavailable") from exc
+
+            cursor.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            version = self._row_first_value(cursor.fetchone()).strip()
+            if not version:
+                raise RuntimeError("pgvector extension 'vector' is unavailable")
+            return version
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    def _ensure_embeddings_vector_column(self, cursor: Any) -> None:
+        cursor.execute(
+            """
+            SELECT udt_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'embeddings'
+              AND column_name = 'embedding'
+            """
+        )
+        udt_name = self._row_first_value(cursor.fetchone()).strip().lower()
+        if udt_name == "vector":
+            return
+        cursor.execute(
+            """
+            ALTER TABLE embeddings
+            ALTER COLUMN embedding TYPE vector
+            USING embedding::vector
+            """
+        )
+
     def _open_connection(self) -> Any | None:
         if not self._is_valid_pg_url():
+            self._set_status(
+                url_valid=False,
+                connection_ok=False,
+                sql_similarity_available=False,
+                supported=False,
+                last_error="pgvector_url must use postgres:// or postgresql:// with a hostname",
+            )
             return None
         driver_name, driver_module = self._detect_driver()
         if driver_name is None or driver_module is None:
+            self._set_status(
+                url_valid=True,
+                driver_name=str(driver_name or ""),
+                driver_available=False,
+                connection_ok=False,
+                sql_similarity_available=False,
+                supported=False,
+                last_error="pgvector backend requires psycopg or psycopg2",
+            )
             return None
         try:
-            return driver_module.connect(str(self.pgvector_url or ""))
-        except Exception:
+            conn = driver_module.connect(str(self.pgvector_url or ""))
+            self._set_status(
+                url_valid=True,
+                driver_name=str(driver_name or ""),
+                driver_available=True,
+                connection_ok=True,
+                last_error="",
+            )
+            return conn
+        except Exception as exc:
+            self._set_status(
+                url_valid=True,
+                driver_name=str(driver_name or ""),
+                driver_available=True,
+                connection_ok=False,
+                sql_similarity_available=False,
+                supported=False,
+                last_error=str(exc),
+            )
             return None
 
     def initialize(self, memory_home: str | Path) -> None:
         del memory_home
+        if not self.is_supported():
+            return
         conn = self._open_connection()
         if conn is None:
-            return
+            details = self.diagnostics()
+            raise RuntimeError(str(details.get("last_error", "") or "pgvector connection unavailable"))
         with self._lock:
             cursor = None
             try:
@@ -409,22 +566,25 @@ class PgvectorMemoryBackend:
                     """
                     CREATE TABLE IF NOT EXISTS embeddings (
                         record_id TEXT PRIMARY KEY,
-                        embedding TEXT NOT NULL,
+                        embedding vector NOT NULL,
                         created_at TEXT NOT NULL,
                         source TEXT NOT NULL
                     )
                     """
                 )
+                self._ensure_embeddings_vector_column(cursor)
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_layer ON layer_records(layer)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_category ON layer_records(category)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_updated_at ON layer_records(updated_at)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at)")
                 conn.commit()
+                self._set_status(sql_similarity_available=True, supported=True, last_error="")
             except Exception:
                 try:
                     conn.rollback()
                 except Exception:
                     pass
+                raise
             finally:
                 if cursor is not None:
                     try:
@@ -600,7 +760,7 @@ class PgvectorMemoryBackend:
                 cursor.execute(
                     """
                     INSERT INTO embeddings (record_id, embedding, created_at, source)
-                    VALUES (%s, %s, %s, %s)
+                    VALUES (%s, %s::vector, %s, %s)
                     ON CONFLICT(record_id) DO UPDATE SET
                         embedding = EXCLUDED.embedding,
                         created_at = EXCLUDED.created_at,
@@ -608,7 +768,7 @@ class PgvectorMemoryBackend:
                     """,
                     (
                         clean_id,
-                        json.dumps(normalized, ensure_ascii=False),
+                        self._to_vector_literal(normalized),
                         str(created_at or ""),
                         str(source or ""),
                     ),
@@ -671,7 +831,7 @@ class PgvectorMemoryBackend:
             return {}
 
         clean_ids = [str(item).strip() for item in (record_ids or []) if str(item).strip()]
-        query = "SELECT record_id, embedding FROM embeddings"
+        query = "SELECT record_id, embedding::text FROM embeddings"
         params: list[Any] = []
         if clean_ids:
             placeholders = ", ".join("%s" for _ in clean_ids)
@@ -730,7 +890,7 @@ class PgvectorMemoryBackend:
                     vector_literal = self._to_vector_literal(normalized_query)
                     params: list[Any] = [vector_literal]
                     query = (
-                        "SELECT record_id, (1 - (embedding::vector <=> %s::vector)) AS score "
+                        "SELECT record_id, (1 - (embedding <=> %s::vector)) AS score "
                         "FROM embeddings"
                     )
 
@@ -740,13 +900,14 @@ class PgvectorMemoryBackend:
                         query += f" WHERE record_id IN ({placeholders})"
                         params.extend(clean_ids)
 
-                    query += " ORDER BY embedding::vector <=> %s::vector ASC, record_id DESC LIMIT %s"
+                    query += " ORDER BY embedding <=> %s::vector ASC, record_id DESC LIMIT %s"
                     params.append(vector_literal)
                     params.append(bounded_limit)
 
                     cursor = conn.cursor()
                     cursor.execute(query, tuple(params))
                     rows = cursor.fetchall()
+                    self._set_status(sql_similarity_available=True, last_error="")
 
                     sql_hits = []
                     for row in rows:
@@ -758,7 +919,8 @@ class PgvectorMemoryBackend:
                         except Exception:
                             score = 0.0
                         sql_hits.append({"record_id": row_id, "score": score})
-                except Exception:
+                except Exception as exc:
+                    self._set_status(sql_similarity_available=False, last_error=str(exc))
                     sql_hits = None
                 finally:
                     if cursor is not None:

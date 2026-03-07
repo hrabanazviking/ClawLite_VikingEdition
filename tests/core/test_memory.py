@@ -747,6 +747,40 @@ def test_memory_diagnostics_preserve_backend_init_failure_details(tmp_path: Path
     assert diag["backend_init_error"] == "backend init exploded"
     assert diag["last_error"] == "backend init exploded"
 
+
+def test_memory_diagnostics_capture_backend_probe_details(tmp_path: Path, monkeypatch) -> None:
+    class _DetailedBackend:
+        name = "pgvector"
+
+        def is_supported(self) -> bool:
+            return False
+
+        def initialize(self, memory_home):
+            del memory_home
+            raise AssertionError("initialize should not run when backend is unsupported")
+
+        def diagnostics(self) -> dict[str, object]:
+            return {
+                "driver_name": "psycopg",
+                "connection_ok": False,
+                "vector_extension": False,
+                "vector_version": "",
+                "last_error": "pgvector extension 'vector' is unavailable",
+            }
+
+    monkeypatch.setattr("clawlite.core.memory.resolve_memory_backend", lambda **kwargs: _DetailedBackend())
+
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    diag = store.diagnostics()
+
+    assert diag["backend_name"] == "pgvector"
+    assert diag["backend_supported"] is False
+    assert diag["backend_initialized"] is False
+    assert diag["backend_driver"] == "psycopg"
+    assert diag["backend_connection_ok"] is False
+    assert diag["backend_vector_extension"] is False
+    assert diag["backend_init_error"] == "pgvector extension 'vector' is unavailable"
+
 def test_memory_recover_session_context_uses_history_then_curated_fallback(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")
     store.add("session direct context", source="abc")
