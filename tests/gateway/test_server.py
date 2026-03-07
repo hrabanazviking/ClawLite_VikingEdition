@@ -1182,6 +1182,8 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "coalesced_priority_upgrades",
             "coalesced_payload_updates",
             "dropped_backpressure",
+            "dropped_quota",
+            "dropped_global_backpressure",
             "executed_ok",
             "executed_error",
             "queue_depth",
@@ -1190,10 +1192,15 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "restored",
             "journal_path",
             "journal_entries",
+            "kind_limits",
+            "kind_policies",
+            "pending_by_kind",
             "last_error",
             "by_kind",
         }
         assert payload["autonomy_wake"]["journal_path"].endswith("autonomy-wake.json")
+        assert payload["autonomy_wake"]["kind_policies"]["heartbeat"]["coalesce_mode"] == "replace_latest"
+        assert payload["autonomy_wake"]["kind_limits"]["cron"] >= 1
         assert set(payload["autonomy_log"].keys()) >= {
             "enabled",
             "path",

@@ -52,6 +52,8 @@ def test_autonomy_wake_coalesces_same_key_and_shares_result() -> None:
             assert snapshot["executed_ok"] == 1
             assert snapshot["coalesced_priority_upgrades"] == 0
             assert snapshot["coalesced_payload_updates"] == 0
+            assert snapshot["kind_limits"]["heartbeat"] == 1
+            assert snapshot["kind_policies"]["heartbeat"]["coalesce_mode"] == "replace_latest"
         finally:
             await coordinator.stop()
 
@@ -126,6 +128,63 @@ def test_autonomy_wake_upgrades_queued_priority_and_payload_on_coalesce() -> Non
     asyncio.run(_scenario())
 
 
+def test_autonomy_wake_heartbeat_replace_latest_drops_stale_payload_keys() -> None:
+    entered_blocker = asyncio.Event()
+    release_blocker = asyncio.Event()
+
+    async def _on_wake(kind: str, payload: dict[str, object]) -> dict[str, object]:
+        if kind == "blocker":
+            entered_blocker.set()
+            await release_blocker.wait()
+            return {"kind": kind}
+        return dict(payload)
+
+    async def _scenario() -> None:
+        coordinator = AutonomyWakeCoordinator(max_pending=10)
+        await coordinator.start(_on_wake)
+        try:
+            blocker = asyncio.create_task(
+                coordinator.submit(kind="blocker", key="blocker:1", priority=1, payload={})
+            )
+            await asyncio.wait_for(entered_blocker.wait(), timeout=1.0)
+
+            first = asyncio.create_task(
+                coordinator.submit(
+                    kind="heartbeat",
+                    key="heartbeat:loop",
+                    priority=20,
+                    payload={"value": "first", "stale": "drop-me"},
+                )
+            )
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                if coordinator.status()["queue_depth"] >= 1:
+                    break
+            else:
+                raise AssertionError("queued heartbeat did not reach backlog")
+
+            second = asyncio.create_task(
+                coordinator.submit(
+                    kind="heartbeat",
+                    key="heartbeat:loop",
+                    priority=10,
+                    payload={"value": "second"},
+                )
+            )
+
+            release_blocker.set()
+            await blocker
+            first_result = await first
+            second_result = await second
+
+            assert first_result == {"value": "second"}
+            assert second_result == {"value": "second"}
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_autonomy_wake_prioritizes_high_before_low_after_blocker() -> None:
     entered_blocker = asyncio.Event()
     release_blocker = asyncio.Event()
@@ -160,6 +219,72 @@ def test_autonomy_wake_prioritizes_high_before_low_after_blocker() -> None:
             assert high_result == "high"
             assert low_result == "low"
             assert order == ["blocker", "high", "low"]
+        finally:
+            await coordinator.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_wake_kind_quota_reserves_room_for_heartbeat() -> None:
+    entered_blocker = asyncio.Event()
+    release_blocker = asyncio.Event()
+    order: list[str] = []
+
+    async def _on_wake(kind: str, payload: dict[str, object]) -> str:
+        del payload
+        order.append(kind)
+        if kind == "blocker":
+            entered_blocker.set()
+            await release_blocker.wait()
+        return kind
+
+    async def _scenario() -> None:
+        coordinator = AutonomyWakeCoordinator(max_pending=3)
+        await coordinator.start(_on_wake)
+        try:
+            blocker = asyncio.create_task(
+                coordinator.submit(kind="blocker", key="blocker:1", priority=1, payload={})
+            )
+            await asyncio.wait_for(entered_blocker.wait(), timeout=1.0)
+
+            cron_first = asyncio.create_task(
+                coordinator.submit(kind="cron", key="cron:1", priority=50, payload={})
+            )
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                snapshot = coordinator.status()
+                if snapshot["pending_by_kind"].get("cron", 0) >= 1:
+                    break
+            else:
+                raise AssertionError("cron wake did not reach backlog")
+
+            cron_second = await coordinator.submit(
+                kind="cron",
+                key="cron:2",
+                priority=60,
+                payload={},
+                fallback_result="cron_quota_skipped",
+            )
+            heartbeat = asyncio.create_task(
+                coordinator.submit(kind="heartbeat", key="heartbeat:loop", priority=10, payload={})
+            )
+
+            release_blocker.set()
+            blocker_result = await blocker
+            cron_first_result = await cron_first
+            heartbeat_result = await heartbeat
+            snapshot = coordinator.status()
+
+            assert blocker_result == "blocker"
+            assert cron_first_result == "cron"
+            assert cron_second == "cron_quota_skipped"
+            assert heartbeat_result == "heartbeat"
+            assert order == ["blocker", "heartbeat", "cron"]
+            assert snapshot["dropped_backpressure"] == 1
+            assert snapshot["dropped_quota"] == 1
+            assert snapshot["dropped_global_backpressure"] == 0
+            assert snapshot["kind_limits"]["cron"] == 1
+            assert snapshot["by_kind"]["cron"]["dropped_quota"] == 1
         finally:
             await coordinator.stop()
 
@@ -202,6 +327,8 @@ def test_autonomy_wake_backpressure_returns_fallback_for_new_key() -> None:
             assert dropped == "cron_backpressure_skipped"
             assert snapshot["enqueued"] == 1
             assert snapshot["dropped_backpressure"] == 1
+            assert snapshot["dropped_quota"] == 0
+            assert snapshot["dropped_global_backpressure"] == 1
         finally:
             await coordinator.stop()
 

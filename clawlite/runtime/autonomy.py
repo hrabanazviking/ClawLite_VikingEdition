@@ -30,6 +30,12 @@ class _WakeQueueEntry:
     queued: bool = field(default=True, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class _WakeKindPolicy:
+    quota: int
+    coalesce_mode: str
+
+
 class AutonomyWakeCoordinator:
     def __init__(self, *, max_pending: int = 200, journal_path: str | Path | None = None) -> None:
         self.max_pending = max(1, int(max_pending or 200))
@@ -49,6 +55,8 @@ class AutonomyWakeCoordinator:
         self._enqueued = 0
         self._coalesced = 0
         self._dropped_backpressure = 0
+        self._dropped_quota = 0
+        self._dropped_global_backpressure = 0
         self._executed_ok = 0
         self._executed_error = 0
         self._coalesced_priority_upgrades = 0
@@ -60,6 +68,7 @@ class AutonomyWakeCoordinator:
         self._journal_save_failures = 0
         self._last_journal_error = ""
         self._by_kind: dict[str, dict[str, int]] = {}
+        self._kind_policies = self._build_kind_policies()
 
     def _task_snapshot(self) -> tuple[str, str]:
         task = self._task
@@ -86,11 +95,77 @@ class AutonomyWakeCoordinator:
                 "coalesced_priority_upgrades": 0,
                 "coalesced_payload_updates": 0,
                 "dropped_backpressure": 0,
+                "dropped_quota": 0,
+                "dropped_global_backpressure": 0,
                 "executed_ok": 0,
                 "executed_error": 0,
             },
         )
         row[metric] = int(row.get(metric, 0) or 0) + 1
+
+    def _build_kind_policies(self) -> dict[str, _WakeKindPolicy]:
+        if self.max_pending <= 1:
+            quota = 1
+            return {
+                "heartbeat": _WakeKindPolicy(quota=quota, coalesce_mode="replace_latest"),
+                "proactive": _WakeKindPolicy(quota=quota, coalesce_mode="replace_latest"),
+                "cron": _WakeKindPolicy(quota=quota, coalesce_mode="merge"),
+                "default": _WakeKindPolicy(quota=quota, coalesce_mode="merge"),
+            }
+
+        heartbeat_quota = 1
+        proactive_quota = 1 if self.max_pending >= 3 else 1
+        cron_quota = max(1, self.max_pending - heartbeat_quota - proactive_quota)
+        default_quota = max(1, self.max_pending - heartbeat_quota)
+        return {
+            "heartbeat": _WakeKindPolicy(quota=heartbeat_quota, coalesce_mode="replace_latest"),
+            "proactive": _WakeKindPolicy(quota=proactive_quota, coalesce_mode="replace_latest"),
+            "cron": _WakeKindPolicy(quota=cron_quota, coalesce_mode="merge"),
+            "default": _WakeKindPolicy(quota=default_quota, coalesce_mode="merge"),
+        }
+
+    def _policy_for_kind(self, kind: str) -> _WakeKindPolicy:
+        return self._kind_policies.get(kind, self._kind_policies["default"])
+
+    def _pending_count_for_kind(self, kind: str) -> int:
+        count = 0
+        for entry in self._pending_entries_by_key.values():
+            if entry.kind == kind:
+                count += 1
+        return count
+
+    def _merge_payload_for_policy(
+        self,
+        *,
+        current: dict[str, Any],
+        incoming: dict[str, Any],
+        policy: _WakeKindPolicy,
+    ) -> dict[str, Any]:
+        if not incoming:
+            return dict(current)
+        if policy.coalesce_mode == "replace_latest":
+            return dict(incoming)
+        merged = dict(current)
+        merged.update(incoming)
+        return merged
+
+    def _kind_limits_status(self) -> dict[str, int]:
+        return {kind: int(policy.quota) for kind, policy in self._kind_policies.items()}
+
+    def _kind_policy_status(self) -> dict[str, dict[str, Any]]:
+        return {
+            kind: {
+                "quota": int(policy.quota),
+                "coalesce_mode": str(policy.coalesce_mode),
+            }
+            for kind, policy in self._kind_policies.items()
+        }
+
+    def _pending_by_kind_status(self) -> dict[str, int]:
+        rows: dict[str, int] = {}
+        for entry in self._pending_entries_by_key.values():
+            rows[entry.kind] = int(rows.get(entry.kind, 0) or 0) + 1
+        return rows
 
     @staticmethod
     def _consume_background_future(future: asyncio.Future[Any]) -> None:
@@ -331,6 +406,7 @@ class AutonomyWakeCoordinator:
                 changed = False
                 if entry is not None:
                     tracked_kind = entry.kind
+                    policy = self._policy_for_kind(tracked_kind)
                     if entry.queued:
                         normalized_priority = int(priority)
                         if normalized_priority < entry.priority:
@@ -340,10 +416,13 @@ class AutonomyWakeCoordinator:
                             self._track_kind(tracked_kind, "coalesced_priority_upgrades")
                             changed = True
                         if normalized_payload:
-                            merged_payload = dict(entry.payload)
-                            merged_payload.update(normalized_payload)
-                            if merged_payload != entry.payload:
-                                entry.payload = merged_payload
+                            next_payload = self._merge_payload_for_policy(
+                                current=entry.payload,
+                                incoming=normalized_payload,
+                                policy=policy,
+                            )
+                            if next_payload != entry.payload:
+                                entry.payload = next_payload
                                 self._coalesced_payload_updates += 1
                                 self._track_kind(tracked_kind, "coalesced_payload_updates")
                                 changed = True
@@ -352,9 +431,19 @@ class AutonomyWakeCoordinator:
                     await self._persist_journal_locked()
                 future = existing
             else:
+                policy = self._policy_for_kind(normalized_kind)
+                pending_for_kind = self._pending_count_for_kind(normalized_kind)
+                if pending_for_kind >= policy.quota:
+                    self._dropped_backpressure += 1
+                    self._dropped_quota += 1
+                    self._track_kind(normalized_kind, "dropped_backpressure")
+                    self._track_kind(normalized_kind, "dropped_quota")
+                    return fallback_result
                 if len(self._pending_by_key) >= self.max_pending:
                     self._dropped_backpressure += 1
+                    self._dropped_global_backpressure += 1
                     self._track_kind(normalized_kind, "dropped_backpressure")
+                    self._track_kind(normalized_kind, "dropped_global_backpressure")
                     return fallback_result
 
                 loop = asyncio.get_running_loop()
@@ -395,6 +484,8 @@ class AutonomyWakeCoordinator:
             "enqueued": self._enqueued,
             "coalesced": self._coalesced,
             "dropped_backpressure": self._dropped_backpressure,
+            "dropped_quota": self._dropped_quota,
+            "dropped_global_backpressure": self._dropped_global_backpressure,
             "executed_ok": self._executed_ok,
             "executed_error": self._executed_error,
             "coalesced_priority_upgrades": self._coalesced_priority_upgrades,
@@ -410,6 +501,9 @@ class AutonomyWakeCoordinator:
             "journal_save_failures": self._journal_save_failures,
             "last_journal_error": self._last_journal_error,
             "last_error": task_error,
+            "kind_limits": self._kind_limits_status(),
+            "kind_policies": self._kind_policy_status(),
+            "pending_by_kind": self._pending_by_kind_status(),
             "by_kind": {kind: dict(metrics) for kind, metrics in self._by_kind.items()},
         }
 
