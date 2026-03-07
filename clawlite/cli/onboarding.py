@@ -13,23 +13,96 @@ from rich.prompt import Prompt
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.providers.discovery import normalize_local_runtime_base_url
+from clawlite.providers.registry import SPECS
 from clawlite.workspace.loader import WorkspaceLoader
 
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "groq", "ollama")
-
-DEFAULT_PROVIDER_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com/v1",
-    "groq": "https://api.groq.com/openai/v1",
-    "anthropic": "https://api.anthropic.com",
-    "ollama": "http://127.0.0.1:11434",
-}
+ONBOARDING_PROVIDER_ORDER: tuple[str, ...] = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "groq",
+    "deepseek",
+    "openrouter",
+    "xai",
+    "mistral",
+    "moonshot",
+    "zai",
+    "qianfan",
+    "huggingface",
+    "together",
+    "kilocode",
+    "minimax",
+    "xiaomi",
+    "kimi-coding",
+    "ollama",
+    "vllm",
+)
 
 DEFAULT_PROVIDER_MODELS: dict[str, str] = {
     "openai": "openai/gpt-4o-mini",
-    "groq": "groq/llama-3.1-8b-instant",
     "anthropic": "anthropic/claude-3-5-haiku-latest",
+    "gemini": "gemini/gemini-2.5-flash",
+    "groq": "groq/llama-3.1-8b-instant",
+    "deepseek": "deepseek/deepseek-chat",
+    "openrouter": "openrouter/auto",
+    "xai": "xai/grok-4",
+    "mistral": "mistral/mistral-large-latest",
+    "moonshot": "moonshot/kimi-k2.5",
+    "zai": "zai/glm-5",
+    "qianfan": "qianfan/deepseek-v3.2",
+    "huggingface": "huggingface/deepseek-ai/DeepSeek-R1",
+    "together": "together/moonshotai/Kimi-K2.5",
+    "kilocode": "kilocode/anthropic/claude-opus-4.6",
+    "minimax": "minimax/MiniMax-M2.5",
+    "xiaomi": "xiaomi/mimo-v2-flash",
+    "kimi_coding": "kimi-coding/k2p5",
     "ollama": "openai/llama3.2",
+    "vllm": "vllm/meta-llama/Llama-3.2-3B-Instruct",
 }
+
+
+def _provider_name_variants(spec_name: str, aliases: tuple[str, ...]) -> set[str]:
+    values = {str(spec_name or "").strip().lower().replace("-", "_")}
+    values.update(str(alias or "").strip().lower().replace("-", "_") for alias in aliases)
+    return values
+
+
+def _provider_spec(name: str) -> Any:
+    provider_name = str(name or "").strip().lower().replace("-", "_")
+    return next(
+        (
+            row
+            for row in SPECS
+            if provider_name in _provider_name_variants(row.name, row.aliases)
+            and row.name not in {"custom", "openai_codex"}
+        ),
+        None,
+    )
+
+
+SUPPORTED_PROVIDERS: tuple[str, ...] = tuple(
+    provider_id for provider_id in ONBOARDING_PROVIDER_ORDER if _provider_spec(provider_id) is not None
+)
+
+DEFAULT_PROVIDER_BASE_URLS: dict[str, str] = {}
+for provider_id in SUPPORTED_PROVIDERS:
+    spec = _provider_spec(provider_id)
+    if spec is None:
+        continue
+    default_base = str(spec.default_base_url or "").strip()
+    if spec.name in {"ollama", "vllm"} and default_base:
+        default_base = normalize_local_runtime_base_url(spec.name, default_base)
+    DEFAULT_PROVIDER_BASE_URLS[spec.name] = default_base
+
+
+def _probe_model_name(model: str, provider_key: str, aliases: tuple[str, ...]) -> str:
+    normalized = str(model or "").strip()
+    if "/" not in normalized:
+        return normalized
+    prefix, remainder = normalized.split("/", 1)
+    if prefix.strip().lower().replace("-", "_") in _provider_name_variants(provider_key, aliases):
+        return remainder
+    return normalized
 
 
 def _mask_secret(value: str, *, keep: int = 4) -> str:
@@ -66,15 +139,16 @@ def apply_provider_selection(
     base_url: str,
     model: str = "",
 ) -> dict[str, Any]:
-    provider_key = str(provider or "").strip().lower()
-    if provider_key not in SUPPORTED_PROVIDERS:
+    spec = _provider_spec(provider)
+    provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
+    if spec is None or provider_key not in {item.replace("-", "_") for item in SUPPORTED_PROVIDERS}:
         raise ValueError(f"unsupported_provider:{provider_key}")
 
-    selected_model = str(model or "").strip() or DEFAULT_PROVIDER_MODELS[provider_key]
-    raw_base_url = str(base_url or "").strip() or DEFAULT_PROVIDER_BASE_URLS[provider_key]
+    selected_model = str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
+    raw_base_url = str(base_url or "").strip() or DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
     selected_base_url = (
         normalize_local_runtime_base_url(provider_key, raw_base_url)
-        if provider_key == "ollama"
+        if provider_key in {"ollama", "vllm"} and raw_base_url
         else raw_base_url
     )
     selected_api_key = str(api_key or "").strip()
@@ -84,18 +158,9 @@ def apply_provider_selection(
     config.provider.litellm_base_url = selected_base_url
     config.provider.litellm_api_key = selected_api_key
 
-    if provider_key == "openai":
-        config.providers.openai.api_key = selected_api_key
-        config.providers.openai.api_base = selected_base_url
-    elif provider_key == "groq":
-        config.providers.groq.api_key = selected_api_key
-        config.providers.groq.api_base = selected_base_url
-    elif provider_key == "anthropic":
-        config.providers.anthropic.api_key = selected_api_key
-        config.providers.anthropic.api_base = selected_base_url
-    elif provider_key == "ollama":
-        config.providers.ollama.api_key = selected_api_key
-        config.providers.ollama.api_base = selected_base_url
+    selected_override = config.providers.ensure(provider_key)
+    selected_override.api_key = selected_api_key
+    selected_override.api_base = selected_base_url
 
     return {
         "provider": provider_key,
@@ -105,22 +170,58 @@ def apply_provider_selection(
     }
 
 
-def probe_provider(provider: str, *, api_key: str, base_url: str, timeout_s: float = 8.0) -> dict[str, Any]:
-    provider_key = str(provider or "").strip().lower()
+def probe_provider(
+    provider: str,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str = "",
+    timeout_s: float = 8.0,
+) -> dict[str, Any]:
+    spec = _provider_spec(provider)
+    provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
+    if spec is None:
+        return {
+            "ok": False,
+            "provider": provider_key,
+            "error": f"unsupported_provider:{provider_key}",
+            "api_key_masked": _mask_secret(api_key),
+            "base_url": str(base_url or "").strip(),
+        }
+
     key = str(api_key or "").strip()
     resolved_base = str(base_url or "").strip() or DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
     if provider_key == "ollama" and resolved_base.endswith("/v1"):
         resolved_base = resolved_base[: -len("/v1")]
 
-    if provider_key in {"openai", "groq"}:
-        url = _join_base(resolved_base, "/models")
-        headers = {"Authorization": f"Bearer {key}"}
-    elif provider_key == "anthropic":
-        url = _join_base(resolved_base, "/v1/models")
-        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-    elif provider_key == "ollama":
+    headers: dict[str, str] = {}
+    payload: dict[str, Any] | None = None
+
+    if provider_key == "ollama":
         url = _join_base(resolved_base, "/api/tags")
-        headers = {}
+    elif provider_key == "vllm":
+        url = _join_base(resolved_base, "/models")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+    elif provider_key == "anthropic":
+        url = _join_base(resolved_base, "/models")
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif spec.native_transport == "anthropic":
+        resolved_model = _probe_model_name(
+            str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, ""),
+            provider_key,
+            spec.aliases,
+        )
+        url = _join_base(resolved_base, "/messages")
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        payload = {
+            "model": resolved_model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    elif spec.openai_compatible:
+        url = _join_base(resolved_base, "/models")
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
     else:
         return {
             "ok": False,
@@ -130,9 +231,24 @@ def probe_provider(provider: str, *, api_key: str, base_url: str, timeout_s: flo
             "base_url": resolved_base,
         }
 
+    if provider_key not in {"ollama", "vllm"} and not key:
+        return {
+            "ok": False,
+            "provider": provider_key,
+            "status_code": 0,
+            "url": url,
+            "base_url": resolved_base,
+            "api_key_masked": "",
+            "error": "api_key_missing",
+            "body": "",
+        }
+
     try:
         with httpx.Client(timeout=max(0.5, float(timeout_s))) as client:
-            response = client.get(url, headers=headers)
+            if payload is None:
+                response = client.get(url, headers=headers)
+            else:
+                response = client.post(url, headers=headers, json=payload)
         body: Any
         try:
             body = response.json()
@@ -243,7 +359,9 @@ def run_onboarding_wizard(
                 config.gateway.auth.mode = "off"
 
         provider = Prompt.ask("Step 2/5 - provider", choices=list(SUPPORTED_PROVIDERS), default="openai")
-        provider_default_base = DEFAULT_PROVIDER_BASE_URLS[provider]
+        provider_spec = _provider_spec(provider)
+        provider_key = provider_spec.name if provider_spec is not None else provider
+        provider_default_base = DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
         current_base = str(config.provider.litellm_base_url or "").strip()
         base_default = current_base or provider_default_base
         base_url = base_default
@@ -251,13 +369,13 @@ def run_onboarding_wizard(
         if step_1_mode == "advanced":
             base_url = Prompt.ask(f"{provider} base URL", default=base_default)
             current_model = str(config.provider.model or "").strip()
-            model_default = current_model or DEFAULT_PROVIDER_MODELS[provider]
+            model_default = current_model or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
             selected_model = Prompt.ask(f"{provider} model", default=model_default)
         api_key = ""
-        if provider != "ollama":
+        if provider_key not in {"ollama", "vllm"}:
             api_key = Prompt.ask(f"{provider} API key", password=True)
-        provider_probe = probe_provider(provider, api_key=api_key, base_url=base_url)
-        persisted_model = str(selected_model or "").strip() or DEFAULT_PROVIDER_MODELS[provider]
+        provider_probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
+        persisted_model = str(selected_model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
         payload["steps"].append(
             {
                 "step": 2,

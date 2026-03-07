@@ -42,6 +42,22 @@ def test_apply_provider_selection_ollama_normalizes_runtime_base_url() -> None:
     assert cfg.providers.ollama.api_base == "http://127.0.0.1:11434/v1"
 
 
+def test_apply_provider_selection_xai_updates_dynamic_provider_block() -> None:
+    cfg = AppConfig.from_dict({})
+    persisted = apply_provider_selection(
+        cfg,
+        provider="xai",
+        api_key="xai-key-123456",
+        base_url="https://api.x.ai/v1",
+    )
+
+    assert persisted["provider"] == "xai"
+    assert persisted["model"] == "xai/grok-4"
+    assert cfg.providers.get("xai") is not None
+    assert cfg.providers.get("xai").api_key == "xai-key-123456"
+    assert cfg.providers.get("xai").api_base == "https://api.x.ai/v1"
+
+
 def test_ensure_gateway_token_generates_when_missing() -> None:
     cfg = AppConfig.from_dict({"gateway": {"auth": {"mode": "required", "token": ""}}})
     generated = ensure_gateway_token(cfg)
@@ -133,6 +149,44 @@ def test_probe_provider_ollama_accepts_runtime_base_url_with_v1(monkeypatch) -> 
     assert payload["status_code"] == 200
 
 
+def test_probe_provider_minimax_uses_anthropic_messages_transport(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        is_success = True
+        text = "ok"
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {"id": "msg_1"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            assert url == "https://api.minimax.io/anthropic/messages"
+            assert headers["x-api-key"] == "mini-key"
+            assert json["model"] == "MiniMax-M2.5"
+            assert json["messages"][0]["content"] == "ping"
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    payload = probe_provider(
+        "minimax",
+        api_key="mini-key",
+        base_url="https://api.minimax.io/anthropic",
+        model="minimax/MiniMax-M2.5",
+    )
+    assert payload["ok"] is True
+    assert payload["status_code"] == 200
+
+
 def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkeypatch, tmp_path) -> None:
     cfg = AppConfig.from_dict(
         {
@@ -166,7 +220,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
     monkeypatch.setattr(
         "clawlite.cli.onboarding.probe_provider",
-        lambda provider, *, api_key, base_url, timeout_s=8.0: {
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
             "ok": True,
             "status_code": 200,
             "provider": provider,
