@@ -96,6 +96,12 @@ def test_probe_provider_openai_success(monkeypatch) -> None:
     assert payload["status_code"] == 200
     assert payload["api_key_masked"].endswith("3456")
     assert payload["transport"] == "openai_compatible"
+    assert payload["family"] == "openai_compatible"
+    assert payload["recommended_model"] == "openai/gpt-4o-mini"
+    assert "openai/gpt-4o-mini" in payload["recommended_models"]
+    assert "billing" in payload["onboarding_hint"].lower()
+    assert payload["default_base_url"] == "https://api.openai.com/v1"
+    assert payload["key_envs"] == ["OPENAI_API_KEY"]
     assert payload["model_check"]["checked"] is True
     assert payload["model_check"]["ok"] is True
     assert any("OpenAI-compatible" in row for row in payload["hints"])
@@ -250,6 +256,10 @@ def test_probe_provider_minimax_uses_anthropic_messages_transport(monkeypatch) -
     )
     assert payload["ok"] is True
     assert payload["status_code"] == 200
+    assert payload["family"] == "anthropic_compatible"
+    assert payload["recommended_model"] == "minimax/MiniMax-M2.5"
+    assert "minimax/MiniMax-M2.5" in payload["recommended_models"]
+    assert "/anthropic" in payload["onboarding_hint"]
 
 
 def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkeypatch, tmp_path) -> None:
@@ -289,6 +299,10 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
             "ok": True,
             "status_code": 200,
             "provider": provider,
+            "family": "openai_compatible",
+            "recommended_model": "openai/gpt-4o-mini",
+            "recommended_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
             "base_url": base_url,
             "api_key_masked": "********3456",
             "error": "",
@@ -324,6 +338,10 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     assert payload["steps"][1]["step"] == 2
     assert payload["steps"][1]["provider"] == "openai"
     assert payload["steps"][1]["model"] == "openai/gpt-4.1-mini"
+    assert payload["steps"][1]["family"] == "openai_compatible"
+    assert payload["steps"][1]["recommended_model"] == "openai/gpt-4o-mini"
+    assert payload["steps"][1]["recommended_models"] == ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
+    assert "billing" in payload["steps"][1]["onboarding_hint"].lower()
     assert payload["persisted"]["provider"]["model"] == "openai/gpt-4.1-mini"
     assert payload["persisted"]["gateway"]["host"] == "0.0.0.0"
     assert payload["persisted"]["gateway"]["port"] == 19090

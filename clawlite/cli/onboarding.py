@@ -12,55 +12,12 @@ from rich.prompt import Prompt
 
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
+from clawlite.providers.catalog import ONBOARDING_PROVIDER_ORDER, default_provider_model, provider_profile
 from clawlite.providers.discovery import normalize_local_runtime_base_url, probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_transport_name
 from clawlite.providers.model_probe import evaluate_remote_model_check, model_check_hints
 from clawlite.providers.registry import SPECS
 from clawlite.workspace.loader import WorkspaceLoader
-
-ONBOARDING_PROVIDER_ORDER: tuple[str, ...] = (
-    "openai",
-    "anthropic",
-    "gemini",
-    "groq",
-    "deepseek",
-    "openrouter",
-    "xai",
-    "mistral",
-    "moonshot",
-    "zai",
-    "qianfan",
-    "huggingface",
-    "together",
-    "kilocode",
-    "minimax",
-    "xiaomi",
-    "kimi-coding",
-    "ollama",
-    "vllm",
-)
-
-DEFAULT_PROVIDER_MODELS: dict[str, str] = {
-    "openai": "openai/gpt-4o-mini",
-    "anthropic": "anthropic/claude-3-5-haiku-latest",
-    "gemini": "gemini/gemini-2.5-flash",
-    "groq": "groq/llama-3.1-8b-instant",
-    "deepseek": "deepseek/deepseek-chat",
-    "openrouter": "openrouter/auto",
-    "xai": "xai/grok-4",
-    "mistral": "mistral/mistral-large-latest",
-    "moonshot": "moonshot/kimi-k2.5",
-    "zai": "zai/glm-5",
-    "qianfan": "qianfan/deepseek-v3.2",
-    "huggingface": "huggingface/deepseek-ai/DeepSeek-R1",
-    "together": "together/moonshotai/Kimi-K2.5",
-    "kilocode": "kilocode/anthropic/claude-opus-4.6",
-    "minimax": "minimax/MiniMax-M2.5",
-    "xiaomi": "xiaomi/mimo-v2-flash",
-    "kimi_coding": "kimi-coding/k2p5",
-    "ollama": "openai/llama3.2",
-    "vllm": "vllm/meta-llama/Llama-3.2-3B-Instruct",
-}
 
 
 def _provider_name_variants(spec_name: str, aliases: tuple[str, ...]) -> set[str]:
@@ -116,6 +73,16 @@ def _mask_secret(value: str, *, keep: int = 4) -> str:
     return f"{'*' * max(3, len(token) - keep)}{token[-keep:]}"
 
 
+def _provider_profile_payload(provider_name: str) -> dict[str, Any]:
+    profile = provider_profile(provider_name)
+    return {
+        "family": profile.family,
+        "recommended_model": default_provider_model(provider_name),
+        "recommended_models": list(profile.recommended_models),
+        "onboarding_hint": profile.onboarding_hint,
+    }
+
+
 def _join_base(base_url: str, path: str) -> str:
     base = str(base_url or "").strip().rstrip("/")
     suffix = str(path or "").strip()
@@ -146,7 +113,7 @@ def apply_provider_selection(
     if spec is None or provider_key not in {item.replace("-", "_") for item in SUPPORTED_PROVIDERS}:
         raise ValueError(f"unsupported_provider:{provider_key}")
 
-    selected_model = str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
+    selected_model = str(model or "").strip() or default_provider_model(provider_key)
     raw_base_url = str(base_url or "").strip() or DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
     selected_base_url = (
         normalize_local_runtime_base_url(provider_key, raw_base_url)
@@ -182,7 +149,8 @@ def probe_provider(
 ) -> dict[str, Any]:
     spec = _provider_spec(provider)
     provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
-    selected_model = str(model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
+    selected_model = str(model or "").strip() or default_provider_model(provider_key)
+    profile_payload = _provider_profile_payload(provider_key)
     if spec is None:
         return {
             "ok": False,
@@ -196,6 +164,7 @@ def probe_provider(
             "default_base_url": "",
             "key_envs": [],
             "model_check": {"checked": False, "ok": True, "enforced": False},
+            **profile_payload,
             "hints": [],
         }
 
@@ -251,6 +220,7 @@ def probe_provider(
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": model_check,
+            **profile_payload,
             "hints": provider_probe_hints(
                 provider=provider_key,
                 error=f"unsupported_provider:{provider_key}",
@@ -269,10 +239,10 @@ def probe_provider(
         error = "api_key_missing"
         return {
             "ok": False,
-            "provider": provider_key,
-            "status_code": 0,
-            "url": url,
-            "base_url": resolved_base,
+                "provider": provider_key,
+                "status_code": 0,
+                "url": url,
+                "base_url": resolved_base,
             "api_key_masked": "",
             "error": error,
             "body": "",
@@ -282,6 +252,7 @@ def probe_provider(
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": model_check,
+            **profile_payload,
             "hints": provider_probe_hints(
                 provider=provider_key,
                 error=error,
@@ -367,6 +338,7 @@ def probe_provider(
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": model_check,
+            **profile_payload,
             "hints": hints,
         }
     except Exception as exc:
@@ -398,6 +370,7 @@ def probe_provider(
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": model_check,
+            **profile_payload,
             "hints": hints,
         }
 
@@ -494,19 +467,23 @@ def run_onboarding_wizard(
         if step_1_mode == "advanced":
             base_url = Prompt.ask(f"{provider} base URL", default=base_default)
             current_model = str(config.provider.model or "").strip()
-            model_default = current_model or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
+            model_default = current_model or default_provider_model(provider_key)
             selected_model = Prompt.ask(f"{provider} model", default=model_default)
         api_key = ""
         if provider_key not in {"ollama", "vllm"}:
             api_key = Prompt.ask(f"{provider} API key", password=True)
         provider_probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
-        persisted_model = str(selected_model or "").strip() or DEFAULT_PROVIDER_MODELS.get(provider_key, "")
+        persisted_model = str(selected_model or "").strip() or default_provider_model(provider_key)
         payload["steps"].append(
             {
                 "step": 2,
                 "name": "provider",
                 "provider": provider,
                 "model": persisted_model,
+                "family": str(provider_probe.get("family", "") or ""),
+                "recommended_model": str(provider_probe.get("recommended_model", "") or ""),
+                "recommended_models": list(provider_probe.get("recommended_models", []) or []),
+                "onboarding_hint": str(provider_probe.get("onboarding_hint", "") or ""),
                 "probe_ok": bool(provider_probe.get("ok", False)),
                 "base_url": str(provider_probe.get("base_url", "") or ""),
                 "api_key_masked": str(provider_probe.get("api_key_masked", "") or ""),

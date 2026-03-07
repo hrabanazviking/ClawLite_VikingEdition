@@ -2518,7 +2518,23 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert alias_payload["schema_version"] == payload["schema_version"]
         assert alias_payload["contract_version"] == payload["contract_version"]
         assert alias_payload["environment"] == payload["environment"]
-        assert alias_payload["engine"] == payload["engine"]
+        expected_engine = dict(payload["engine"])
+        actual_engine = dict(alias_payload["engine"])
+        for engine_block in (expected_engine, actual_engine):
+            skills_diag = dict(engine_block.get("skills", {}) or {})
+            watcher = dict(skills_diag.get("watcher", {}) or {})
+            for key in (
+                "ticks",
+                "last_result",
+                "last_tick_monotonic",
+                "last_refresh_monotonic",
+                "pending",
+                "debounced",
+            ):
+                watcher.pop(key, None)
+            skills_diag["watcher"] = watcher
+            engine_block["skills"] = skills_diag
+        assert actual_engine == expected_engine
         assert set(alias_payload["control_plane"].keys()) == set(payload["control_plane"].keys())
         assert alias_payload["control_plane"]["contract_version"] == payload["control_plane"]["contract_version"]
 

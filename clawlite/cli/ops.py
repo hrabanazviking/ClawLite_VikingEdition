@@ -15,6 +15,7 @@ from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor
+from clawlite.providers.catalog import default_provider_model, provider_profile
 from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_status_hints, provider_transport_name
@@ -83,6 +84,16 @@ def _response_error_detail(response: httpx.Response) -> str:
     if not detail:
         detail = str(response.text or "").strip()
     return " ".join(detail.split())[:300]
+
+
+def _provider_profile_payload(provider_name: str) -> dict[str, Any]:
+    profile = provider_profile(provider_name)
+    return {
+        "family": profile.family,
+        "recommended_model": default_provider_model(provider_name),
+        "recommended_models": list(profile.recommended_models),
+        "onboarding_hint": profile.onboarding_hint,
+    }
 
 
 def provider_set_auth(
@@ -444,6 +455,7 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
             "transport": transport,
             "default_base_url": "https://api.openai.com/v1",
             "key_envs": [],
+            **_provider_profile_payload("openai_codex"),
             "hints": provider_status_hints(
                 provider="openai_codex",
                 configured=bool(status["configured"]),
@@ -529,6 +541,7 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
         "is_gateway": bool(spec.is_gateway),
         "env_key_present": env_key_present,
         "model": str(config.agents.defaults.model or config.provider.model),
+        **_provider_profile_payload(spec.name),
         "hints": provider_status_hints(
             provider=spec.name,
             configured=configured,
@@ -714,6 +727,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "endpoint": "",
             "transport": provider_transport_name(provider=provider_name, auth_mode=str(target.get("auth_mode", "") or "")),
             "probe_method": "",
+            **_provider_profile_payload(provider_name),
             "hints": provider_probe_hints(
                 provider=provider_name,
                 error=str(target.get("error", "provider_resolution_failed") or "provider_resolution_failed"),
@@ -728,6 +742,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     base_url = str(target.get("base_url", "") or "").strip().rstrip("/")
     api_key = str(target.get("api_key", "") or "").strip()
     spec = _provider_spec(provider)
+    profile_payload = _provider_profile_payload(provider)
     endpoint = ""
     headers: dict[str, str] = {}
     payload: dict[str, Any] | None = None
@@ -762,6 +777,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "default_base_url": default_base_url,
                 "key_envs": key_envs,
                 "model_check": {"checked": False, "ok": True},
+                **profile_payload,
                 "hints": provider_probe_hints(
                     provider=provider,
                     error="api_key_missing",
@@ -799,6 +815,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "default_base_url": default_base_url,
                 "key_envs": key_envs,
                 "model_check": {"checked": False, "ok": True},
+                **profile_payload,
                 "hints": provider_probe_hints(
                     provider=provider,
                     error="api_key_missing",
@@ -847,6 +864,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
                 "default_base_url": default_base_url,
                 "key_envs": key_envs,
                 "model_check": {"checked": False, "ok": True},
+                **profile_payload,
                 "hints": provider_probe_hints(
                     provider=provider,
                     error="api_key_missing",
@@ -882,6 +900,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": {"checked": False, "ok": True},
+            **profile_payload,
             "hints": provider_probe_hints(
                 provider=provider,
                 error=f"unsupported_provider:{provider}",
@@ -916,6 +935,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "default_base_url": default_base_url,
             "key_envs": key_envs,
             "model_check": {"checked": False, "ok": True},
+            **profile_payload,
             "hints": provider_probe_hints(
                 provider=provider,
                 error="base_url_missing",
@@ -1018,6 +1038,7 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
         "default_base_url": default_base_url,
         "key_envs": key_envs,
         "model_check": model_check,
+        **profile_payload,
         "hints": hints,
     }
 

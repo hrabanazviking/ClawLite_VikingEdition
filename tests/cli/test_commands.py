@@ -597,7 +597,10 @@ def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, 
             "ok": True,
             "provider": "openai",
             "provider_detected": "openai",
+            "family": "openai_compatible",
             "model": str(config.provider.model),
+            "recommended_model": "openai/gpt-4o-mini",
+            "recommended_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
             "status_code": 200,
             "error": "",
             "error_detail": "",
@@ -612,6 +615,7 @@ def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, 
             "api_key_source": "env:OPENAI_API_KEY",
             "key_envs": ["OPENAI_API_KEY"],
             "model_check": {"checked": False, "ok": True},
+            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
             "hints": ["Credenciais validas."],
         },
     )
@@ -645,8 +649,12 @@ def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, 
     assert payload["gateway_probe"]["ok"] is True
     assert payload["provider_live_probe"]["enabled"] is True
     assert payload["provider_live_probe"]["ok"] is True
+    assert payload["provider_live_probe"]["family"] == "openai_compatible"
     assert payload["provider_live_probe"]["transport"] == "openai_compatible"
     assert payload["provider_live_probe"]["probe_method"] == "GET"
+    assert payload["provider_live_probe"]["recommended_model"] == "openai/gpt-4o-mini"
+    assert payload["provider_live_probe"]["recommended_models"] == ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
+    assert "billing" in payload["provider_live_probe"]["onboarding_hint"].lower()
     assert payload["provider_live_probe"]["hints"] == ["Credenciais validas."]
     assert payload["telegram_live_probe"]["enabled"] is True
     assert payload["telegram_live_probe"]["ok"] is True
@@ -1425,7 +1433,41 @@ def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, cap
     assert payload["base_url"] == "https://api.openai.com/v1"
     assert payload["default_base_url"] == "https://api.openai.com/v1"
     assert payload["key_envs"] == ["OPENAI_API_KEY"]
+    assert payload["family"] == "openai_compatible"
+    assert payload["recommended_model"] == "openai/gpt-4o-mini"
+    assert "openai/gpt-4o-mini" in payload["recommended_models"]
+    assert "billing" in payload["onboarding_hint"].lower()
     assert any("live probe" in row.lower() for row in payload["hints"])
+
+
+def test_cli_provider_status_minimax_reports_anthropic_family(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("MINIMAX_API_KEY", "mini-key-1234")
+    monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "minimax/MiniMax-M2.5"},
+                "providers": {"minimax": {"api_base": "https://api.minimax.io/anthropic"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "minimax"])
+    assert rc_status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["provider"] == "minimax"
+    assert payload["transport"] == "anthropic"
+    assert payload["family"] == "anthropic_compatible"
+    assert payload["recommended_model"] == "minimax/MiniMax-M2.5"
+    assert "minimax/MiniMax-M2.5" in payload["recommended_models"]
+    assert "/anthropic" in payload["onboarding_hint"]
 
 
 def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: Path, monkeypatch) -> None:

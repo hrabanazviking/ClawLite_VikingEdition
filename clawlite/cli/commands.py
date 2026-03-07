@@ -435,7 +435,10 @@ def cmd_validate_preflight(args: argparse.Namespace) -> int:
             "ok": bool(probe.get("ok", False)),
             "provider": str(probe.get("provider", "") or ""),
             "provider_detected": str(probe.get("provider_detected", "") or ""),
+            "family": str(probe.get("family", "") or ""),
             "model": str(probe.get("model", "") or ""),
+            "recommended_model": str(probe.get("recommended_model", "") or ""),
+            "recommended_models": list(probe.get("recommended_models", []) or []),
             "status_code": int(probe.get("status_code", 0) or 0),
             "error": str(probe.get("error", "") or ""),
             "error_detail": str(probe.get("error_detail", "") or ""),
@@ -450,6 +453,7 @@ def cmd_validate_preflight(args: argparse.Namespace) -> int:
             "api_key_source": str(probe.get("api_key_source", "") or ""),
             "key_envs": list(probe.get("key_envs", []) or []),
             "model_check": dict(probe.get("model_check", {}) or {}),
+            "onboarding_hint": str(probe.get("onboarding_hint", "") or ""),
             "hints": list(probe.get("hints", []) or []),
         }
 
