@@ -528,6 +528,124 @@ def test_telegram_edited_business_message_marks_edit_metadata() -> None:
     asyncio.run(_scenario())
 
 
+def test_telegram_inline_query_is_answered_with_empty_results() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.inline_answers: list[dict] = []
+
+            async def answer_inline_query(self, **kwargs):
+                self.inline_answers.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+        update = SimpleNamespace(
+            update_id=603,
+            inline_query=SimpleNamespace(id="iq-1", query="hello"),
+            message=None,
+            edited_message=None,
+            effective_message=None,
+        )
+
+        processed = await channel._handle_update(update)
+
+        assert processed is True
+        assert len(bot.inline_answers) == 1
+        assert bot.inline_answers[0]["inline_query_id"] == "iq-1"
+        assert bot.inline_answers[0]["results"] == []
+        signals = channel.signals()
+        assert signals["inline_query_received_count"] == 1
+        assert signals["inline_query_answered_count"] == 1
+        assert signals["inline_query_answer_error_count"] == 0
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_payment_queries_are_rejected_when_payments_are_unsupported() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.shipping_answers: list[dict] = []
+                self.pre_checkout_answers: list[dict] = []
+
+            async def answer_shipping_query(self, **kwargs):
+                self.shipping_answers.append(kwargs)
+                return True
+
+            async def answer_pre_checkout_query(self, **kwargs):
+                self.pre_checkout_answers.append(kwargs)
+                return True
+
+        bot = FakeBot()
+        channel.bot = bot
+
+        shipping_processed = await channel._handle_update(
+            SimpleNamespace(
+                update_id=604,
+                shipping_query=SimpleNamespace(id="ship-1"),
+                message=None,
+                edited_message=None,
+                effective_message=None,
+            )
+        )
+        checkout_processed = await channel._handle_update(
+            SimpleNamespace(
+                update_id=605,
+                pre_checkout_query=SimpleNamespace(id="checkout-1"),
+                message=None,
+                edited_message=None,
+                effective_message=None,
+            )
+        )
+
+        assert shipping_processed is True
+        assert checkout_processed is True
+        assert bot.shipping_answers[0]["shipping_query_id"] == "ship-1"
+        assert bot.shipping_answers[0]["ok"] is False
+        assert bot.pre_checkout_answers[0]["pre_checkout_query_id"] == "checkout-1"
+        assert bot.pre_checkout_answers[0]["ok"] is False
+        signals = channel.signals()
+        assert signals["shipping_query_received_count"] == 1
+        assert signals["shipping_query_rejected_count"] == 1
+        assert signals["pre_checkout_query_received_count"] == 1
+        assert signals["pre_checkout_query_rejected_count"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_my_chat_member_updates_connection_state() -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(config={"token": "x:token"})
+
+        connected_update = SimpleNamespace(
+            update_id=606,
+            my_chat_member=SimpleNamespace(new_chat_member=SimpleNamespace(status="administrator")),
+            message=None,
+            edited_message=None,
+            effective_message=None,
+        )
+        blocked_update = SimpleNamespace(
+            update_id=607,
+            my_chat_member=SimpleNamespace(new_chat_member=SimpleNamespace(status="kicked")),
+            message=None,
+            edited_message=None,
+            effective_message=None,
+        )
+
+        assert await channel._handle_update(connected_update) is True
+        assert channel._connected is True
+        assert await channel._handle_update(blocked_update) is True
+        assert channel._connected is False
+        assert channel.signals()["my_chat_member_received_count"] == 2
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_callback_query_policy_blocked_when_context_denies() -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict]] = []
@@ -3169,10 +3287,25 @@ def test_telegram_webhook_mode_start_sets_webhook_and_stop_deletes_webhook() -> 
             assert bot.set_calls[0]["allowed_updates"] == [
                 "message",
                 "edited_message",
+                "inline_query",
+                "chosen_inline_result",
                 "business_message",
                 "edited_business_message",
+                "deleted_business_messages",
+                "business_connection",
                 "callback_query",
+                "shipping_query",
+                "pre_checkout_query",
+                "poll",
+                "poll_answer",
+                "my_chat_member",
+                "chat_member",
+                "chat_join_request",
                 "message_reaction",
+                "message_reaction_count",
+                "chat_boost",
+                "removed_chat_boost",
+                "purchased_paid_media",
                 "channel_post",
                 "edited_channel_post",
             ]

@@ -31,10 +31,25 @@ MAX_CAPTION_LEN = 1024
 TELEGRAM_ALLOWED_UPDATES = [
     "message",
     "edited_message",
+    "inline_query",
+    "chosen_inline_result",
     "business_message",
     "edited_business_message",
+    "deleted_business_messages",
+    "business_connection",
     "callback_query",
+    "shipping_query",
+    "pre_checkout_query",
+    "poll",
+    "poll_answer",
+    "my_chat_member",
+    "chat_member",
+    "chat_join_request",
     "message_reaction",
+    "message_reaction_count",
+    "chat_boost",
+    "removed_chat_boost",
+    "purchased_paid_media",
     "channel_post",
     "edited_channel_post",
 ]
@@ -438,6 +453,28 @@ class TelegramChannel(BaseChannel):
             "callback_query_signature_accepted_count": 0,
             "callback_query_signature_blocked_count": 0,
             "callback_query_unsigned_allowed_count": 0,
+            "inline_query_received_count": 0,
+            "inline_query_answered_count": 0,
+            "inline_query_answer_error_count": 0,
+            "shipping_query_received_count": 0,
+            "shipping_query_rejected_count": 0,
+            "shipping_query_answer_error_count": 0,
+            "pre_checkout_query_received_count": 0,
+            "pre_checkout_query_rejected_count": 0,
+            "pre_checkout_query_answer_error_count": 0,
+            "poll_received_count": 0,
+            "poll_answer_received_count": 0,
+            "chat_member_received_count": 0,
+            "my_chat_member_received_count": 0,
+            "chat_join_request_received_count": 0,
+            "message_reaction_count_received_count": 0,
+            "business_connection_received_count": 0,
+            "deleted_business_messages_received_count": 0,
+            "chat_boost_received_count": 0,
+            "removed_chat_boost_received_count": 0,
+            "purchased_paid_media_received_count": 0,
+            "chosen_inline_result_received_count": 0,
+            "unhandled_update_received_count": 0,
             "webhook_set_count": 0,
             "webhook_delete_count": 0,
             "webhook_fallback_to_polling_count": 0,
@@ -783,10 +820,67 @@ class TelegramChannel(BaseChannel):
         if update_id is not None:
             return f"update:{update_id}"
 
+        inline_query = self._field(update, "inline_query")
+        inline_query_id = str(self._field(inline_query, "id") or "").strip()
+        if inline_query_id:
+            return f"inline:{inline_query_id}"
+
         callback_query = self._field(update, "callback_query")
         callback_query_id = str(self._field(callback_query, "id") or "").strip()
         if callback_query_id:
             return f"callback:{callback_query_id}"
+
+        shipping_query = self._field(update, "shipping_query")
+        shipping_query_id = str(self._field(shipping_query, "id") or "").strip()
+        if shipping_query_id:
+            return f"shipping:{shipping_query_id}"
+
+        pre_checkout_query = self._field(update, "pre_checkout_query")
+        pre_checkout_query_id = str(self._field(pre_checkout_query, "id") or "").strip()
+        if pre_checkout_query_id:
+            return f"pre_checkout:{pre_checkout_query_id}"
+
+        chosen_inline_result = self._field(update, "chosen_inline_result")
+        chosen_inline_result_id = str(self._field(chosen_inline_result, "result_id") or "").strip()
+        if chosen_inline_result_id:
+            return f"chosen_inline:{chosen_inline_result_id}"
+
+        poll = self._field(update, "poll")
+        poll_id = str(self._field(poll, "id") or "").strip()
+        if poll_id:
+            return f"poll:{poll_id}"
+
+        poll_answer = self._field(update, "poll_answer")
+        poll_answer_poll_id = str(self._field(poll_answer, "poll_id") or "").strip()
+        if poll_answer_poll_id:
+            poll_user = self._field(poll_answer, "user") or self._field(poll_answer, "voter_chat")
+            poll_user_id = str(self._field(poll_user, "id") or "").strip()
+            return f"poll_answer:{poll_answer_poll_id}:{poll_user_id or 'unknown'}"
+
+        chat_join_request = self._field(update, "chat_join_request")
+        if chat_join_request is not None:
+            join_chat = self._field(chat_join_request, "chat")
+            join_user = self._field(chat_join_request, "from_user")
+            join_chat_id = str(self._field(join_chat, "id") or self._field(chat_join_request, "chat_id") or "").strip()
+            join_user_id = str(self._field(join_user, "id") or "").strip()
+            join_date = str(self._field(chat_join_request, "date") or "").strip()
+            if join_chat_id and join_user_id:
+                return f"join:{join_chat_id}:{join_user_id}:{join_date}"
+
+        business_connection = self._field(update, "business_connection")
+        business_connection_id = str(self._field(business_connection, "id") or "").strip()
+        if business_connection_id:
+            return f"business_connection:{business_connection_id}"
+
+        deleted_business_messages = self._field(update, "deleted_business_messages")
+        if deleted_business_messages is not None:
+            deleted_connection_id = str(self._field(deleted_business_messages, "business_connection_id") or "").strip()
+            deleted_chat = self._field(deleted_business_messages, "chat")
+            deleted_chat_id = str(self._field(deleted_chat, "id") or self._field(deleted_business_messages, "chat_id") or "").strip()
+            message_ids = self._field(deleted_business_messages, "message_ids")
+            ids_repr = ",".join(str(item) for item in message_ids) if isinstance(message_ids, list) else ""
+            if deleted_connection_id or deleted_chat_id or ids_repr:
+                return f"deleted_business:{deleted_connection_id}:{deleted_chat_id}:{ids_repr}"
 
         for field_name, is_edit in (
             ("message", False),
@@ -1455,6 +1549,134 @@ class TelegramChannel(BaseChannel):
                 backoff = min(backoff * 2, self.reconnect_max_s)
 
     async def _handle_update(self, item: Any) -> bool:
+        inline_query = getattr(item, "inline_query", None)
+        if inline_query is not None:
+            self._signals["inline_query_received_count"] += 1
+            inline_query_id = str(getattr(inline_query, "id", "") or "").strip()
+            if self.bot is not None and inline_query_id and hasattr(self.bot, "answer_inline_query"):
+                try:
+                    await self.bot.answer_inline_query(
+                        inline_query_id=inline_query_id,
+                        results=[],
+                        cache_time=0,
+                        is_personal=True,
+                    )
+                    self._signals["inline_query_answered_count"] += 1
+                except TypeError:
+                    try:
+                        await self.bot.answer_inline_query(
+                            inline_query_id=inline_query_id,
+                            results=[],
+                        )
+                        self._signals["inline_query_answered_count"] += 1
+                    except Exception as exc:
+                        self._signals["inline_query_answer_error_count"] += 1
+                        logger.debug("telegram inline_query answer failed id={} error={}", inline_query_id, exc)
+                except Exception as exc:
+                    self._signals["inline_query_answer_error_count"] += 1
+                    logger.debug("telegram inline_query answer failed id={} error={}", inline_query_id, exc)
+            return True
+
+        shipping_query = getattr(item, "shipping_query", None)
+        if shipping_query is not None:
+            self._signals["shipping_query_received_count"] += 1
+            shipping_query_id = str(getattr(shipping_query, "id", "") or "").strip()
+            if self.bot is not None and shipping_query_id and hasattr(self.bot, "answer_shipping_query"):
+                try:
+                    await self.bot.answer_shipping_query(
+                        shipping_query_id=shipping_query_id,
+                        ok=False,
+                        error_message="Telegram payments are not enabled for this bot.",
+                    )
+                    self._signals["shipping_query_rejected_count"] += 1
+                except Exception as exc:
+                    self._signals["shipping_query_answer_error_count"] += 1
+                    logger.debug("telegram shipping_query answer failed id={} error={}", shipping_query_id, exc)
+            return True
+
+        pre_checkout_query = getattr(item, "pre_checkout_query", None)
+        if pre_checkout_query is not None:
+            self._signals["pre_checkout_query_received_count"] += 1
+            pre_checkout_query_id = str(getattr(pre_checkout_query, "id", "") or "").strip()
+            if self.bot is not None and pre_checkout_query_id and hasattr(self.bot, "answer_pre_checkout_query"):
+                try:
+                    await self.bot.answer_pre_checkout_query(
+                        pre_checkout_query_id=pre_checkout_query_id,
+                        ok=False,
+                        error_message="Telegram payments are not enabled for this bot.",
+                    )
+                    self._signals["pre_checkout_query_rejected_count"] += 1
+                except Exception as exc:
+                    self._signals["pre_checkout_query_answer_error_count"] += 1
+                    logger.debug("telegram pre_checkout_query answer failed id={} error={}", pre_checkout_query_id, exc)
+            return True
+
+        chosen_inline_result = getattr(item, "chosen_inline_result", None)
+        if chosen_inline_result is not None:
+            self._signals["chosen_inline_result_received_count"] += 1
+            return True
+
+        poll = getattr(item, "poll", None)
+        if poll is not None:
+            self._signals["poll_received_count"] += 1
+            return True
+
+        poll_answer = getattr(item, "poll_answer", None)
+        if poll_answer is not None:
+            self._signals["poll_answer_received_count"] += 1
+            return True
+
+        chat_member_update = getattr(item, "chat_member", None)
+        if chat_member_update is not None:
+            self._signals["chat_member_received_count"] += 1
+            return True
+
+        my_chat_member_update = getattr(item, "my_chat_member", None)
+        if my_chat_member_update is not None:
+            self._signals["my_chat_member_received_count"] += 1
+            new_state = getattr(my_chat_member_update, "new_chat_member", None)
+            new_status = str(getattr(new_state, "status", "") or "").strip().lower()
+            if new_status in {"kicked", "left"}:
+                self._connected = False
+            elif new_status:
+                self._connected = True
+            return True
+
+        chat_join_request = getattr(item, "chat_join_request", None)
+        if chat_join_request is not None:
+            self._signals["chat_join_request_received_count"] += 1
+            return True
+
+        business_connection = getattr(item, "business_connection", None)
+        if business_connection is not None:
+            self._signals["business_connection_received_count"] += 1
+            return True
+
+        deleted_business_messages = getattr(item, "deleted_business_messages", None)
+        if deleted_business_messages is not None:
+            self._signals["deleted_business_messages_received_count"] += 1
+            return True
+
+        message_reaction_count = getattr(item, "message_reaction_count", None)
+        if message_reaction_count is not None:
+            self._signals["message_reaction_count_received_count"] += 1
+            return True
+
+        chat_boost = getattr(item, "chat_boost", None)
+        if chat_boost is not None:
+            self._signals["chat_boost_received_count"] += 1
+            return True
+
+        removed_chat_boost = getattr(item, "removed_chat_boost", None)
+        if removed_chat_boost is not None:
+            self._signals["removed_chat_boost_received_count"] += 1
+            return True
+
+        purchased_paid_media = getattr(item, "purchased_paid_media", None)
+        if purchased_paid_media is not None:
+            self._signals["purchased_paid_media_received_count"] += 1
+            return True
+
         callback_query = getattr(item, "callback_query", None)
         if callback_query is not None:
             self._signals["callback_query_received_count"] += 1
@@ -1700,6 +1922,7 @@ class TelegramChannel(BaseChannel):
             if message is not None:
                 update_kind = "effective_message"
         if message is None:
+            self._signals["unhandled_update_received_count"] += 1
             return True
 
         media_info = self._extract_media_info(message)
