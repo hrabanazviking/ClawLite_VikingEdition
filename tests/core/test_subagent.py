@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import clawlite.core.subagent as subagent_module
 from clawlite.core.subagent import SubagentLimitError, SubagentManager, SubagentRun
 
 
@@ -52,6 +55,32 @@ def test_subagent_manager_spawn_persists_custom_metadata(tmp_path: Path) -> None
         assert restored.metadata["share_scope"] == "family"
 
     asyncio.run(_scenario())
+
+
+def test_subagent_manager_save_state_uses_durable_atomic_write(tmp_path: Path) -> None:
+    mgr = SubagentManager(state_path=tmp_path / "state")
+    mgr._runs["run-1"] = SubagentRun(
+        run_id="run-1",
+        session_id="s1",
+        task="task-1",
+        status="queued",
+        metadata={"resume_attempts": 0, "resume_attempts_max": 2, "retry_budget_remaining": 2},
+    )
+
+    fsync_fds: list[int] = []
+    real_fsync = subagent_module.os.fsync
+
+    def _tracking_fsync(fd: int) -> None:
+        fsync_fds.append(fd)
+        real_fsync(fd)
+
+    with patch("clawlite.core.subagent.os.fsync", side_effect=_tracking_fsync):
+        mgr._save_state()
+
+    payload = json.loads(mgr._state_file.read_text(encoding="utf-8"))
+    assert payload["runs"][0]["run_id"] == "run-1"
+    assert len(fsync_fds) >= 1
+    assert not list(mgr._state_file.parent.glob("runs.json.tmp*"))
 
 
 def test_subagent_manager_queue_limits_and_session_quota(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -322,8 +323,35 @@ class SubagentManager:
             "runs": [self._to_payload(run) for run in self._runs.values()],
         }
         tmp_path = self._state_file.with_suffix(self._state_file.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(self._state_file)
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp_path, self._state_file)
+            try:
+                dir_fd = os.open(str(self._state_file.parent), os.O_RDONLY)
+            except OSError:
+                dir_fd = -1
+            if dir_fd >= 0:
+                try:
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.close(dir_fd)
+                    except OSError:
+                        pass
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     @staticmethod
     def _normalize_run_metadata(
