@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from clawlite.utils.logging import bind_event, setup_logging
@@ -26,13 +30,17 @@ class _WakeQueueEntry:
 
 
 class AutonomyWakeCoordinator:
-    def __init__(self, *, max_pending: int = 200) -> None:
+    def __init__(self, *, max_pending: int = 200, journal_path: str | Path | None = None) -> None:
         self.max_pending = max(1, int(max_pending or 200))
+        self.journal_path = Path(journal_path).expanduser() if journal_path is not None else None
+        if self.journal_path is not None:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self._running = False
         self._on_wake: WakeCallback | None = None
         self._task: asyncio.Task[Any] | None = None
         self._queue: list[_WakeQueueEntry] = []
         self._pending_by_key: dict[str, asyncio.Future[Any]] = {}
+        self._pending_entries_by_key: dict[str, _WakeQueueEntry] = {}
         self._sequence = 0
         self._lock = asyncio.Lock()
         self._has_items = asyncio.Condition(self._lock)
@@ -44,6 +52,10 @@ class AutonomyWakeCoordinator:
         self._executed_error = 0
         self._inflight = 0
         self._max_queue_depth_seen = 0
+        self._restored = 0
+        self._journal_load_failures = 0
+        self._journal_save_failures = 0
+        self._last_journal_error = ""
         self._by_kind: dict[str, dict[str, int]] = {}
 
     def _task_snapshot(self) -> tuple[str, str]:
@@ -75,6 +87,135 @@ class AutonomyWakeCoordinator:
         )
         row[metric] = int(row.get(metric, 0) or 0) + 1
 
+    @staticmethod
+    def _consume_background_future(future: asyncio.Future[Any]) -> None:
+        try:
+            future.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    def _journal_rows_locked(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for entry in sorted(self._pending_entries_by_key.values(), key=lambda item: (item.priority, item.sequence)):
+            rows.append(
+                {
+                    "kind": entry.kind,
+                    "key": entry.key,
+                    "priority": int(entry.priority),
+                    "sequence": int(entry.sequence),
+                    "payload": dict(entry.payload),
+                }
+            )
+        return rows
+
+    def _write_journal_rows(self, rows: list[dict[str, Any]]) -> None:
+        if self.journal_path is None:
+            return
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        if not rows:
+            try:
+                self.journal_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        payload = json.dumps(rows, ensure_ascii=False, indent=2)
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self.journal_path.parent),
+                prefix=f".{self.journal_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                tmp_path = Path(handle.name)
+            os.replace(str(tmp_path), str(self.journal_path))
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    async def _persist_journal_locked(self) -> None:
+        if self.journal_path is None:
+            return
+        rows = self._journal_rows_locked()
+        try:
+            await asyncio.to_thread(self._write_journal_rows, rows)
+        except Exception as exc:
+            self._journal_save_failures += 1
+            self._last_journal_error = str(exc)
+            bind_event("autonomy.wake").warning("wake journal save failed path={} error={}", self.journal_path, exc)
+        else:
+            self._last_journal_error = ""
+
+    def _read_journal_rows(self) -> list[dict[str, Any]]:
+        if self.journal_path is None or not self.journal_path.exists():
+            return []
+        raw = json.loads(self.journal_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ValueError("invalid_autonomy_wake_journal")
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                rows.append(item)
+        return rows
+
+    async def _restore_journal_locked(self) -> None:
+        if self.journal_path is None or self._pending_entries_by_key:
+            return
+        try:
+            rows = await asyncio.to_thread(self._read_journal_rows)
+        except Exception as exc:
+            self._journal_load_failures += 1
+            self._last_journal_error = str(exc)
+            bind_event("autonomy.wake").warning("wake journal load failed path={} error={}", self.journal_path, exc)
+            return
+        if not rows:
+            self._last_journal_error = ""
+            return
+        loop = asyncio.get_running_loop()
+        restored = 0
+        for row in rows:
+            kind = str(row.get("kind", "") or "unknown").strip() or "unknown"
+            key = str(row.get("key", "") or kind).strip() or kind
+            if key in self._pending_entries_by_key:
+                continue
+            priority = int(row.get("priority", 100) or 100)
+            payload = row.get("payload", {})
+            normalized_payload = dict(payload) if isinstance(payload, dict) else {}
+            future: asyncio.Future[Any] = loop.create_future()
+            future.add_done_callback(self._consume_background_future)
+            entry = _WakeQueueEntry(
+                priority=priority,
+                sequence=max(self._sequence, int(row.get("sequence", self._sequence) or self._sequence)),
+                kind=kind,
+                key=key,
+                payload=normalized_payload,
+                future=future,
+            )
+            self._sequence = entry.sequence + 1
+            heapq.heappush(self._queue, entry)
+            self._pending_by_key[key] = future
+            self._pending_entries_by_key[key] = entry
+            depth = len(self._queue)
+            if depth > self._max_queue_depth_seen:
+                self._max_queue_depth_seen = depth
+            restored += 1
+            self._track_kind(kind, "enqueued")
+        self._restored += restored
+        self._enqueued += restored
+        self._last_journal_error = ""
+        if restored:
+            self._has_items.notify_all()
+
     async def _worker_loop(self) -> None:
         while True:
             async with self._has_items:
@@ -86,11 +227,13 @@ class AutonomyWakeCoordinator:
                 self._inflight += 1
 
             callback = self._on_wake
+            preserve_pending = False
             try:
                 if callback is None:
                     raise RuntimeError("autonomy_wake_callback_missing")
                 result = await callback(entry.kind, dict(entry.payload))
             except asyncio.CancelledError:
+                preserve_pending = True
                 if not entry.future.done():
                     entry.future.set_exception(RuntimeError("autonomy_wake_stopped"))
                 raise
@@ -109,12 +252,15 @@ class AutonomyWakeCoordinator:
             finally:
                 async with self._lock:
                     self._inflight = max(0, self._inflight - 1)
-                    pending = self._pending_by_key.get(entry.key)
-                    if pending is entry.future:
-                        self._pending_by_key.pop(entry.key, None)
+                    if not preserve_pending:
+                        pending = self._pending_by_key.get(entry.key)
+                        if pending is entry.future:
+                            self._pending_by_key.pop(entry.key, None)
+                            self._pending_entries_by_key.pop(entry.key, None)
+                            await self._persist_journal_locked()
 
     async def start(self, on_wake: WakeCallback) -> None:
-        async with self._lock:
+        async with self._has_items:
             self._on_wake = on_wake
             if self._task is not None:
                 task_state, _task_error = self._task_snapshot()
@@ -124,7 +270,10 @@ class AutonomyWakeCoordinator:
                     self._running = True
                     return
             self._running = True
+            await self._restore_journal_locked()
             self._task = asyncio.create_task(self._worker_loop())
+            if self._queue:
+                self._has_items.notify_all()
 
     async def stop(self) -> None:
         async with self._has_items:
@@ -150,6 +299,7 @@ class AutonomyWakeCoordinator:
                 if not future.done():
                     future.set_exception(RuntimeError("autonomy_wake_stopped"))
             self._pending_by_key.clear()
+            self._pending_entries_by_key.clear()
 
     async def submit(
         self,
@@ -191,11 +341,13 @@ class AutonomyWakeCoordinator:
                 self._sequence += 1
                 heapq.heappush(self._queue, entry)
                 self._pending_by_key[normalized_key] = future
+                self._pending_entries_by_key[normalized_key] = entry
                 self._enqueued += 1
                 self._track_kind(normalized_kind, "enqueued")
                 depth = len(self._queue)
                 if depth > self._max_queue_depth_seen:
                     self._max_queue_depth_seen = depth
+                await self._persist_journal_locked()
                 self._has_items.notify()
 
         try:
@@ -219,6 +371,13 @@ class AutonomyWakeCoordinator:
             "queue_depth": len(self._queue),
             "inflight": self._inflight,
             "max_queue_depth_seen": self._max_queue_depth_seen,
+            "pending_count": len(self._pending_entries_by_key),
+            "restored": self._restored,
+            "journal_path": str(self.journal_path) if self.journal_path is not None else "",
+            "journal_entries": len(self._pending_entries_by_key),
+            "journal_load_failures": self._journal_load_failures,
+            "journal_save_failures": self._journal_save_failures,
+            "last_journal_error": self._last_journal_error,
             "last_error": task_error,
             "by_kind": {kind: dict(metrics) for kind, metrics in self._by_kind.items()},
         }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 from clawlite.runtime.autonomy import AutonomyWakeCoordinator
 
@@ -127,5 +129,73 @@ def test_autonomy_wake_backpressure_returns_fallback_for_new_key() -> None:
             assert snapshot["dropped_backpressure"] == 1
         finally:
             await coordinator.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_wake_replays_pending_entries_from_journal_after_restart(tmp_path: Path) -> None:
+    journal_path = tmp_path / "autonomy-wake.json"
+    entered_first = asyncio.Event()
+    release_first = asyncio.Event()
+    restored_calls: list[tuple[str, str]] = []
+    restored_done = asyncio.Event()
+
+    async def _first_on_wake(kind: str, payload: dict[str, object]) -> str:
+        if kind == "first":
+            entered_first.set()
+            await release_first.wait()
+        return f"{kind}:{payload.get('value', 'na')}"
+
+    async def _restored_on_wake(kind: str, payload: dict[str, object]) -> str:
+        restored_calls.append((kind, str(payload.get("value", ""))))
+        if len(restored_calls) >= 2:
+            restored_done.set()
+        return f"{kind}:{payload.get('value', 'na')}"
+
+    async def _scenario() -> None:
+        coordinator = AutonomyWakeCoordinator(max_pending=10, journal_path=journal_path)
+        await coordinator.start(_first_on_wake)
+        first_task = asyncio.create_task(
+            coordinator.submit(kind="first", key="job:1", priority=10, payload={"value": "one"})
+        )
+        await asyncio.wait_for(entered_first.wait(), timeout=1.0)
+        second_task = asyncio.create_task(
+            coordinator.submit(kind="second", key="job:2", priority=20, payload={"value": "two"})
+        )
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if journal_path.exists():
+                journal_rows = json.loads(journal_path.read_text(encoding="utf-8"))
+                if {row["key"] for row in journal_rows} == {"job:1", "job:2"}:
+                    break
+        else:
+            raise AssertionError("journal did not persist both pending wakes")
+        assert {row["key"] for row in journal_rows} == {"job:1", "job:2"}
+
+        await coordinator.stop()
+        release_first.set()
+        assert await first_task is None
+        assert await second_task is None
+
+        replay = AutonomyWakeCoordinator(max_pending=10, journal_path=journal_path)
+        await replay.start(_restored_on_wake)
+        try:
+            await asyncio.wait_for(restored_done.wait(), timeout=1.0)
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                snapshot = replay.status()
+                if snapshot["journal_entries"] == 0 and (
+                    not journal_path.exists()
+                    or json.loads(journal_path.read_text(encoding="utf-8")) == []
+                ):
+                    break
+            else:
+                raise AssertionError("journal cleanup did not complete")
+            assert snapshot["restored"] == 2
+            assert snapshot["journal_entries"] == 0
+            assert snapshot["journal_path"] == str(journal_path)
+            assert restored_calls == [("first", "one"), ("second", "two")]
+        finally:
+            await replay.stop()
 
     asyncio.run(_scenario())

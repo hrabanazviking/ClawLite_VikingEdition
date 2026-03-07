@@ -1185,9 +1185,13 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "queue_depth",
             "inflight",
             "max_queue_depth_seen",
+            "restored",
+            "journal_path",
+            "journal_entries",
             "last_error",
             "by_kind",
         }
+        assert payload["autonomy_wake"]["journal_path"].endswith("autonomy-wake.json")
         assert set(payload["autonomy_log"].keys()) >= {
             "enabled",
             "path",

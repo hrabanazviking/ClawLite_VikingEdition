@@ -876,7 +876,10 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     wake_backlog = int(getattr(config.gateway.autonomy, "max_queue_backlog", 200) or 200)
     if wake_backlog <= 0:
         wake_backlog = 200
-    autonomy_wake = AutonomyWakeCoordinator(max_pending=wake_backlog)
+    autonomy_wake = AutonomyWakeCoordinator(
+        max_pending=wake_backlog,
+        journal_path=Path(config.state_path) / "autonomy-wake.json",
+    )
 
     tools = ToolRegistry(safety=config.tools.safety)
     tools.register(
