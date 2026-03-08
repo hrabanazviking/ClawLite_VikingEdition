@@ -680,6 +680,47 @@ def _provider_telemetry_snapshot(provider: Any) -> dict[str, Any]:
     return telemetry
 
 
+def _provider_autonomy_snapshot(*, provider: Any, default_circuit_cooldown_s: float = 30.0) -> dict[str, Any]:
+    telemetry = _provider_telemetry_snapshot(provider)
+    summary = telemetry.get("summary", {}) if isinstance(telemetry, dict) else {}
+    counters = telemetry.get("counters", {}) if isinstance(telemetry, dict) else {}
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(counters, dict):
+        counters = {}
+
+    cooldown_candidates: list[float] = []
+    for key in ("primary_cooldown_remaining_s", "fallback_cooldown_remaining_s"):
+        try:
+            value = float(counters.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0.0:
+            cooldown_candidates.append(value)
+    cooling_candidates = summary.get("cooling_candidates", []) if isinstance(summary.get("cooling_candidates"), list) else []
+    for row in cooling_candidates:
+        if not isinstance(row, dict):
+            continue
+        try:
+            value = float(row.get("cooldown_remaining_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0.0:
+            cooldown_candidates.append(value)
+
+    state = str(summary.get("state", "healthy") or "healthy").strip().lower() or "healthy"
+    cooldown_remaining_s = max(cooldown_candidates, default=0.0)
+    if state == "circuit_open" and cooldown_remaining_s <= 0.0:
+        cooldown_remaining_s = max(0.0, float(default_circuit_cooldown_s or 0.0))
+
+    return {
+        "provider": str(telemetry.get("provider", "") or ""),
+        "state": state,
+        "cooldown_remaining_s": round(cooldown_remaining_s, 3),
+        "last_error_class": str(telemetry.get("last_error_class", counters.get("last_error_class", "")) or ""),
+    }
+
+
 async def _run_engine_with_timeout(
     *,
     engine: AgentEngine,
@@ -1787,13 +1828,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         queue_snapshot = runtime.bus.stats()
         channels_snapshot = runtime.channels.status()
         supervisor_snapshot = runtime.supervisor.status() if runtime.supervisor is not None else {}
+        provider_snapshot = _provider_autonomy_snapshot(
+            provider=runtime.engine.provider,
+            default_circuit_cooldown_s=float(cfg.provider.circuit_cooldown_s or 30.0),
+        )
         return {
             "queue": queue_snapshot if isinstance(queue_snapshot, dict) else {},
             "channels": channels_snapshot if isinstance(channels_snapshot, dict) else {},
             "supervisor": supervisor_snapshot if isinstance(supervisor_snapshot, dict) else {},
+            "provider": provider_snapshot,
         }
 
     async def _run_autonomy_tick(snapshot: dict[str, Any]) -> str:
+        provider_snapshot = snapshot.get("provider") if isinstance(snapshot, dict) else {}
+        provider_state = str(provider_snapshot.get("state", "") or "").strip().lower() if isinstance(provider_snapshot, dict) else ""
+        provider_name = str(provider_snapshot.get("provider", "") or "provider").strip().lower() or "provider"
+        provider_cooldown_remaining_s = 0.0
+        if isinstance(provider_snapshot, dict):
+            try:
+                provider_cooldown_remaining_s = float(provider_snapshot.get("cooldown_remaining_s", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                provider_cooldown_remaining_s = 0.0
+        if provider_state in {"circuit_open", "cooldown"}:
+            raise RuntimeError(
+                f"autonomy_provider_backoff:{provider_name}:{provider_state}:{round(max(0.0, provider_cooldown_remaining_s), 3)}"
+            )
+
         prompt_text = (
             "Autonomy tick. Review the runtime snapshot and workspace context. "
             "If nothing needs operator attention right now, reply AUTONOMY_IDLE. "
@@ -1808,6 +1868,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         model_name = str(getattr(result, "model", "") or "").strip()
         if not model_name or model_name.startswith("engine/"):
+            provider_snapshot = _provider_autonomy_snapshot(
+                provider=runtime.engine.provider,
+                default_circuit_cooldown_s=float(cfg.provider.circuit_cooldown_s or 30.0),
+            )
+            provider_state = str(provider_snapshot.get("state", "") or "").strip().lower()
+            provider_name = str(provider_snapshot.get("provider", "") or "provider").strip().lower() or "provider"
+            provider_cooldown_remaining_s = 0.0
+            try:
+                provider_cooldown_remaining_s = float(provider_snapshot.get("cooldown_remaining_s", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                provider_cooldown_remaining_s = 0.0
+            if provider_state in {"circuit_open", "cooldown"}:
+                raise RuntimeError(
+                    f"autonomy_provider_backoff:{provider_name}:{provider_state}:{round(max(0.0, provider_cooldown_remaining_s), 3)}"
+                )
             raise RuntimeError(f"autonomy_tick_unsatisfied:{model_name or 'unknown_model'}")
 
         text = str(getattr(result, "text", "") or "").strip() or "AUTONOMY_IDLE"

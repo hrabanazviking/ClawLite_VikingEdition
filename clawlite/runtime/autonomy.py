@@ -536,6 +536,7 @@ class AutonomyService:
         self._task: asyncio.Task[Any] | None = None
         self._running = False
         self._cooldown_until = 0.0
+        self._provider_backoff_until = 0.0
 
         self._ticks = 0
         self._run_attempts = 0
@@ -543,10 +544,12 @@ class AutonomyService:
         self._run_failures = 0
         self._skipped_backlog = 0
         self._skipped_cooldown = 0
+        self._skipped_provider_backoff = 0
         self._skipped_disabled = 0
         self._last_run_at = ""
         self._last_result_excerpt = ""
         self._last_error = ""
+        self._last_error_kind = ""
         self._consecutive_error_count = 0
         self._last_snapshot: dict[str, Any] = {}
 
@@ -582,10 +585,12 @@ class AutonomyService:
         queue_raw = snapshot.get("queue")
         supervisor_raw = snapshot.get("supervisor")
         channels_raw = snapshot.get("channels")
+        provider_raw = snapshot.get("provider")
 
         queue = queue_raw if isinstance(queue_raw, dict) else {}
         supervisor = supervisor_raw if isinstance(supervisor_raw, dict) else {}
         channels = channels_raw if isinstance(channels_raw, dict) else {}
+        provider = provider_raw if isinstance(provider_raw, dict) else {}
 
         queue_trimmed = {
             "outbound_size": int(queue.get("outbound_size", 0) or 0),
@@ -605,11 +610,37 @@ class AutonomyService:
             "running_count": int(channels.get("running_count", 0) or 0),
         }
 
+        provider_trimmed = {
+            "provider": str(provider.get("provider", "") or ""),
+            "state": str(provider.get("state", "") or ""),
+            "cooldown_remaining_s": float(provider.get("cooldown_remaining_s", 0.0) or 0.0),
+            "last_error_class": str(provider.get("last_error_class", "") or ""),
+        }
+
         return {
             "queue": queue_trimmed,
             "supervisor": supervisor_trimmed,
             "channels": channels_trimmed,
+            "provider": provider_trimmed,
         }
+
+    @staticmethod
+    def _classify_run_error(exc: Exception) -> tuple[str, float]:
+        message = str(exc or "").strip()
+        if message.startswith("autonomy_provider_backoff:"):
+            parts = message.split(":")
+            backoff_s = 0.0
+            if len(parts) >= 2:
+                try:
+                    backoff_s = max(0.0, float(parts[-1] or 0.0))
+                except (TypeError, ValueError):
+                    backoff_s = 0.0
+            return ("provider_backoff", backoff_s)
+        if message.startswith("autonomy_tick_unsatisfied:"):
+            return ("unsatisfied", 0.0)
+        if message == "engine_run_timeout":
+            return ("timeout", 0.0)
+        return ("error", 0.0)
 
     async def _read_snapshot(self) -> dict[str, Any]:
         if self._snapshot_callback is None:
@@ -641,11 +672,15 @@ class AutonomyService:
             if not force and now < self._cooldown_until:
                 self._skipped_cooldown += 1
                 return self.status()
+            if not force and now < self._provider_backoff_until:
+                self._skipped_provider_backoff += 1
+                return self.status()
 
             if self._run_callback is None:
                 self._run_failures += 1
                 self._consecutive_error_count += 1
                 self._last_error = "autonomy_callback_unavailable"
+                self._last_error_kind = "error"
                 self._cooldown_until = now + self.cooldown_s
                 return self.status()
 
@@ -656,13 +691,19 @@ class AutonomyService:
             self._run_success += 1
             self._last_result_excerpt = self._excerpt(result)
             self._last_error = ""
+            self._last_error_kind = ""
             self._consecutive_error_count = 0
+            self._provider_backoff_until = 0.0
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._run_failures += 1
             self._consecutive_error_count += 1
             self._last_error = str(exc)
+            error_kind, error_backoff_s = self._classify_run_error(exc)
+            self._last_error_kind = error_kind
+            if error_backoff_s > 0.0:
+                self._provider_backoff_until = max(self._provider_backoff_until, now + error_backoff_s)
             bind_event("autonomy.tick", session=self.session_id).error("autonomy run failed error={}", exc)
         return self.status()
 
@@ -715,6 +756,7 @@ class AutonomyService:
 
     def status(self) -> dict[str, Any]:
         cooldown_remaining_s = max(0.0, self._cooldown_until - self._now_monotonic())
+        provider_backoff_remaining_s = max(0.0, self._provider_backoff_until - self._now_monotonic())
         task_state, task_error = self._task_snapshot()
         return {
             "running": bool(self._running and task_state == "running"),
@@ -731,11 +773,14 @@ class AutonomyService:
             "run_failures": self._run_failures,
             "skipped_backlog": self._skipped_backlog,
             "skipped_cooldown": self._skipped_cooldown,
+            "skipped_provider_backoff": self._skipped_provider_backoff,
             "skipped_disabled": self._skipped_disabled,
             "last_run_at": self._last_run_at,
             "last_result_excerpt": self._last_result_excerpt,
             "last_error": task_error or self._last_error,
+            "last_error_kind": self._last_error_kind,
             "consecutive_error_count": self._consecutive_error_count,
             "last_snapshot": dict(self._last_snapshot),
             "cooldown_remaining_s": round(cooldown_remaining_s, 3),
+            "provider_backoff_remaining_s": round(provider_backoff_remaining_s, 3),
         }

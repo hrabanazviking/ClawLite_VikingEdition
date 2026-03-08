@@ -1316,19 +1316,23 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "run_failures",
             "skipped_backlog",
             "skipped_cooldown",
+            "skipped_provider_backoff",
             "skipped_disabled",
             "last_run_at",
             "last_result_excerpt",
             "last_error",
+            "last_error_kind",
             "consecutive_error_count",
             "last_snapshot",
             "cooldown_remaining_s",
+            "provider_backoff_remaining_s",
         }
         assert payload["autonomy"]["enabled"] is True
         assert payload["autonomy"]["running"] is True
         assert payload["autonomy"]["run_attempts"] >= 1
         assert payload["autonomy"]["run_success"] >= 1
         assert payload["autonomy"]["last_result_excerpt"] == "AUTONOMY_IDLE"
+        assert payload["autonomy"]["last_snapshot"]["provider"]["state"] == "healthy"
         assert set(payload["autonomy_wake"].keys()) >= {
             "running",
             "worker_state",
@@ -1569,6 +1573,63 @@ def test_gateway_supervisor_reports_provider_circuit_open_once_per_cooldown(tmp_
             assert metadata["component"] == "provider"
             assert metadata["incident_reason"] == "provider_circuit_open:failover"
             assert metadata["autonomy_notice"] is True
+
+    asyncio.run(_scenario())
+
+
+def test_gateway_autonomy_respects_provider_backoff_without_calling_model(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "autonomy": {"enabled": True, "interval_s": 9999, "cooldown_s": 0, "timeout_s": 5},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+        provider_complete = AsyncMock(side_effect=AssertionError("provider should not be called while cooling down"))
+        app.state.runtime.engine.provider = SimpleNamespace(
+            provider_name="failover",
+            model="openai/gpt-4.1-mini",
+            complete=provider_complete,
+            diagnostics=lambda: {
+                "provider": "failover",
+                "model": "openai/gpt-4.1-mini",
+                "candidate_count": 2,
+                "candidates": [
+                    {
+                        "role": "primary",
+                        "model": "openai/gpt-4.1-mini",
+                        "in_cooldown": True,
+                        "cooldown_remaining_s": 30.0,
+                    }
+                ],
+                "counters": {"fallback_attempts": 1, "last_error_class": "rate_limit"},
+            },
+        )
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.autonomy is not None
+            baseline_calls = provider_complete.await_count
+            runtime.autonomy.cooldown_s = 0.0
+            runtime.autonomy._cooldown_until = 0.0
+            runtime.autonomy._provider_backoff_until = 0.0
+
+            first = await runtime.autonomy.run_once(force=True)
+            second = await runtime.autonomy.run_once(force=False)
+
+            assert first["run_attempts"] >= 1
+            assert first["run_failures"] >= 1
+            assert first["last_error_kind"] == "provider_backoff"
+            assert first["provider_backoff_remaining_s"] >= 29.0
+            assert first["last_snapshot"]["provider"]["state"] == "cooldown"
+            assert first["last_snapshot"]["provider"]["provider"] == "failover"
+            assert second["skipped_provider_backoff"] >= 1
+            assert provider_complete.await_count == baseline_calls
 
     asyncio.run(_scenario())
 

@@ -107,7 +107,7 @@ def test_autonomy_failed_run_updates_failure_counters_and_error() -> None:
         service = AutonomyService(
             enabled=True,
             interval_s=10,
-            cooldown_s=1,
+            cooldown_s=0,
             timeout_s=5,
             max_queue_backlog=10,
             snapshot_callback=_snapshot,
@@ -120,6 +120,63 @@ def test_autonomy_failed_run_updates_failure_counters_and_error() -> None:
         assert status["run_failures"] == 1
         assert status["consecutive_error_count"] == 1
         assert "autonomy_boom" in status["last_error"]
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_provider_backoff_skips_until_window_expires() -> None:
+    clock = _Clock()
+    calls = {"run": 0}
+
+    async def _snapshot() -> dict[str, dict[str, object]]:
+        return {
+            "queue": {"outbound_size": 0, "dead_letter_size": 0},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+            "provider": {
+                "provider": "failover",
+                "state": "cooldown",
+                "cooldown_remaining_s": 45.0,
+                "last_error_class": "rate_limit",
+            },
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        calls["run"] += 1
+        if calls["run"] == 1:
+            raise RuntimeError("autonomy_provider_backoff:failover:cooldown:45")
+        return "AUTONOMY_IDLE"
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=0,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+
+        first = await service.run_once(force=False)
+        assert first["run_attempts"] == 1
+        assert first["run_failures"] == 1
+        assert first["last_error_kind"] == "provider_backoff"
+        assert first["provider_backoff_remaining_s"] == 45.0
+
+        second = await service.run_once(force=False)
+        assert second["run_attempts"] == 1
+        assert second["skipped_provider_backoff"] == 1
+        assert calls["run"] == 1
+
+        clock.now += 46.0
+        third = await service.run_once(force=False)
+        assert third["run_attempts"] == 2
+        assert third["run_success"] == 1
+        assert third["last_error_kind"] == ""
+        assert third["provider_backoff_remaining_s"] == 0.0
+        assert calls["run"] == 2
 
     asyncio.run(_scenario())
 
