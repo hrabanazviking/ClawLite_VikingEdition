@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from clawlite.providers.base import LLMProvider
-from clawlite.providers.codex import CodexProvider
+from clawlite.providers.codex import CODEX_DEFAULT_BASE_URL, CodexProvider
 from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.custom import CustomProvider
 from clawlite.providers.discovery import detect_local_runtime, normalize_local_runtime_base_url
@@ -263,7 +263,7 @@ SPECS: tuple[ProviderSpec, ...] = (
         keywords=("openai-codex",),
         model_prefixes=("openai-codex/", "openai_codex/"),
         key_envs=(),
-        default_base_url=OPENAI_DEFAULT_BASE_URL,
+        default_base_url=CODEX_DEFAULT_BASE_URL,
         openai_compatible=True,
         is_oauth=True,
     ),
@@ -626,7 +626,20 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
     if model_lower.startswith(("openai-codex/", "openai_codex/")):
         model_name = model.split("/", 1)[1] if "/" in model else model
         token, account_id = _resolve_codex_oauth(config)
-        return CodexProvider(model=model_name, access_token=token, account_id=account_id, **reliability)
+        codex_cfg = _provider_cfg(providers_cfg, "openai_codex")
+        codex_base_url = (
+            _cfg_value(codex_cfg, "api_base", "apiBase")
+            or _cfg_value(codex_cfg, "base_url", "baseUrl")
+            or os.getenv("CLAWLITE_CODEX_BASE_URL", "").strip()
+            or CODEX_DEFAULT_BASE_URL
+        )
+        return CodexProvider(
+            model=model_name,
+            access_token=token,
+            account_id=account_id,
+            base_url=codex_base_url,
+            **reliability,
+        )
 
     if model_lower.startswith("custom/"):
         custom_cfg = _provider_cfg(providers_cfg, "custom")

@@ -38,6 +38,15 @@ def test_hint_unknown_model() -> None:
     assert any("openai/gpt-missing" in hint for hint in hints)
 
 
+def test_hint_openai_codex_transport_mentions_responses_backend() -> None:
+    hints = provider_probe_hints(
+        provider="openai_codex",
+        transport="oauth_codex_responses",
+    )
+
+    assert any("/codex/responses" in hint for hint in hints)
+
+
 def test_hints_empty_for_unknown_error() -> None:
     hints = provider_probe_hints(
         provider="custom",

@@ -10,14 +10,22 @@ from clawlite.providers.codex import CodexProvider
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: dict, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: dict,
+        headers: dict[str, str] | None = None,
+        *,
+        request_url: str = "https://api.openai.com/v1/chat/completions",
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.headers = dict(headers or {})
+        self.request_url = request_url
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            request = httpx.Request("POST", self.request_url)
             response = httpx.Response(self.status_code, request=request, headers=self.headers)
             raise httpx.HTTPStatusError("err", request=request, response=response)
 
@@ -30,6 +38,7 @@ def test_codex_provider_retries_5xx_then_success() -> None:
         provider = CodexProvider(
             model="codex-5.3",
             access_token="token",
+            base_url="https://api.openai.com/v1",
             retry_max_attempts=3,
             retry_initial_backoff_s=0,
             retry_max_backoff_s=0,
@@ -54,9 +63,100 @@ def test_codex_provider_retries_5xx_then_success() -> None:
     asyncio.run(_scenario())
 
 
+def test_codex_provider_uses_responses_backend_by_default() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(
+            model="gpt-5.3-codex",
+            access_token="token",
+            retry_max_attempts=1,
+        )
+
+        post_mock = AsyncMock(
+            side_effect=[
+                _FakeResponse(
+                    200,
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "ok"}],
+                            }
+                        ]
+                    },
+                    request_url="https://chatgpt.com/backend-api/codex/responses",
+                )
+            ]
+        )
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            out = await provider.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                reasoning_effort="medium",
+            )
+
+        assert out.text == "ok"
+        assert post_mock.call_args.args[0] == "https://chatgpt.com/backend-api/codex/responses"
+        payload = post_mock.call_args.kwargs["json"]
+        assert payload["store"] is False
+        assert payload["reasoning"] == {"effort": "medium"}
+        assert payload["input"] == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_codex_provider_parses_responses_function_calls() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(
+            model="gpt-5.3-codex",
+            access_token="token",
+            retry_max_attempts=1,
+        )
+
+        post_mock = AsyncMock(
+            side_effect=[
+                _FakeResponse(
+                    200,
+                    {
+                        "output": [
+                            {
+                                "type": "function_call",
+                                "id": "fc_1",
+                                "call_id": "call_123",
+                                "name": "lookup_user",
+                                "arguments": '{"user_id": 42}',
+                            }
+                        ]
+                    },
+                    request_url="https://chatgpt.com/backend-api/codex/responses",
+                )
+            ]
+        )
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0].id == "call_123"
+        assert out.tool_calls[0].name == "lookup_user"
+        assert out.tool_calls[0].arguments == {"user_id": 42}
+
+    asyncio.run(_scenario())
+
+
 def test_codex_provider_retries_429_with_retry_after() -> None:
     async def _scenario() -> None:
-        provider = CodexProvider(model="codex-5.3", access_token="token", retry_max_attempts=2)
+        provider = CodexProvider(
+            model="codex-5.3",
+            access_token="token",
+            base_url="https://api.openai.com/v1",
+            retry_max_attempts=2,
+        )
 
         post_mock = AsyncMock(
             side_effect=[
@@ -80,6 +180,7 @@ def test_codex_provider_circuit_opens_then_cooldown_closes() -> None:
         provider = CodexProvider(
             model="codex-5.3",
             access_token="token",
+            base_url="https://api.openai.com/v1",
             retry_max_attempts=1,
             circuit_failure_threshold=2,
             circuit_cooldown_s=30.0,
@@ -115,7 +216,12 @@ def test_codex_provider_circuit_opens_then_cooldown_closes() -> None:
 
 def test_codex_provider_passes_reasoning_effort() -> None:
     async def _scenario() -> None:
-        provider = CodexProvider(model="codex-5.3", access_token="token", retry_max_attempts=1)
+        provider = CodexProvider(
+            model="codex-5.3",
+            access_token="token",
+            base_url="https://api.openai.com/v1",
+            retry_max_attempts=1,
+        )
 
         post_mock = AsyncMock(side_effect=[_FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]})])
         with patch("httpx.AsyncClient.post", new=post_mock):
@@ -133,7 +239,12 @@ def test_codex_provider_passes_reasoning_effort() -> None:
 
 def test_codex_provider_parses_tool_calls_from_response() -> None:
     async def _scenario() -> None:
-        provider = CodexProvider(model="codex-5.3", access_token="token", retry_max_attempts=1)
+        provider = CodexProvider(
+            model="codex-5.3",
+            access_token="token",
+            base_url="https://api.openai.com/v1",
+            retry_max_attempts=1,
+        )
 
         post_mock = AsyncMock(
             side_effect=[
@@ -195,6 +306,7 @@ def test_codex_provider_diagnostics_contract_and_secret_safety() -> None:
     assert diag["provider"] == "codex"
     assert diag["provider_name"] == "openai_codex"
     assert diag["model"] == "codex-5.3"
+    assert diag["transport"] == "codex_responses"
     assert isinstance(diag["counters"], dict)
     assert "requests" in diag["counters"]
     assert "last_error_class" in diag["counters"]
@@ -209,6 +321,7 @@ def test_codex_provider_reuses_single_async_client_across_retries() -> None:
         provider = CodexProvider(
             model="codex-5.3",
             access_token="token",
+            base_url="https://api.openai.com/v1",
             retry_max_attempts=3,
             retry_initial_backoff_s=0,
             retry_max_backoff_s=0,
@@ -239,5 +352,26 @@ def test_codex_provider_reuses_single_async_client_across_retries() -> None:
 
         assert out.text == "ok"
         assert _Client.instances == 1
+
+    asyncio.run(_scenario())
+
+
+def test_codex_provider_openai_compatible_override_keeps_chat_completions() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(
+            model="codex-5.3",
+            access_token="token",
+            account_id="org-abc",
+            base_url="https://api.openai.com/v1",
+            retry_max_attempts=1,
+        )
+
+        post_mock = AsyncMock(side_effect=[_FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]})])
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "ok"
+        assert post_mock.call_args.args[0] == "https://api.openai.com/v1/chat/completions"
+        assert post_mock.call_args.kwargs["headers"]["openai-organization"] == "org-abc"
 
     asyncio.run(_scenario())

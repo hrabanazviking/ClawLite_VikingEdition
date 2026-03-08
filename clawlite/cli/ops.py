@@ -16,6 +16,7 @@ from clawlite.config.schema import AppConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor
 from clawlite.providers.catalog import default_provider_model, provider_profile
+from clawlite.providers.codex import CODEX_DEFAULT_BASE_URL
 from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.discovery import probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_status_hints, provider_transport_name
@@ -341,6 +342,27 @@ def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
     }
 
 
+def _resolve_codex_base_url(config: AppConfig) -> tuple[str, str]:
+    codex_override = _provider_override(config, "openai_codex")
+    cfg_base = str(getattr(codex_override, "api_base", "") or getattr(codex_override, "base_url", "") or "").strip()
+    env_base = str(os.getenv("CLAWLITE_CODEX_BASE_URL", "") or "").strip()
+    if cfg_base:
+        return cfg_base.rstrip("/"), "config:providers.openai_codex.api_base"
+    if env_base:
+        return env_base.rstrip("/"), "env:CLAWLITE_CODEX_BASE_URL"
+    return CODEX_DEFAULT_BASE_URL, "spec:openai_codex.default_base_url"
+
+
+def _resolve_codex_probe_endpoint(base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    lowered = normalized.lower()
+    if lowered.endswith("/codex/responses") or lowered.endswith("/responses"):
+        return ""
+    if "chatgpt.com/backend-api" in lowered:
+        return "/codex/responses"
+    return "/responses"
+
+
 def _parse_oauth_result(payload: Any) -> tuple[str, str]:
     if isinstance(payload, str):
         return payload.strip(), ""
@@ -453,6 +475,7 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
     if provider_norm in {"openai-codex", "codex"}:
         status = resolve_codex_auth(config)
         transport = provider_transport_name(provider="openai_codex", auth_mode="oauth")
+        codex_base_url, codex_base_url_source = _resolve_codex_base_url(config)
         return {
             "ok": True,
             "provider": "openai_codex",
@@ -462,7 +485,9 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
             "source": status["source"],
             "model": str(config.agents.defaults.model or config.provider.model),
             "transport": transport,
-            "default_base_url": "https://api.openai.com/v1",
+            "default_base_url": CODEX_DEFAULT_BASE_URL,
+            "base_url": codex_base_url,
+            "base_url_source": codex_base_url_source,
             "key_envs": [],
             **_provider_profile_payload("openai_codex"),
             "hints": provider_status_hints(
@@ -470,7 +495,7 @@ def provider_status(config: AppConfig, provider: str = "openai-codex") -> dict[s
                 configured=bool(status["configured"]),
                 auth_mode="oauth",
                 transport=transport,
-                default_base_url="https://api.openai.com/v1",
+                default_base_url=CODEX_DEFAULT_BASE_URL,
             ),
         }
 
@@ -600,17 +625,7 @@ def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dic
 
     if provider_key == "openai_codex":
         codex = resolve_codex_auth(config)
-        openai_override = _provider_override(config, "openai")
-        cfg_openai_base = str(getattr(openai_override, "api_base", "") or "").strip()
-        global_base = str(config.provider.litellm_base_url or "").strip()
-        base_url = cfg_openai_base or global_base or "https://api.openai.com/v1"
-        base_url_source = (
-            "config:providers.openai.api_base"
-            if cfg_openai_base
-            else "config:provider.litellm_base_url"
-            if global_base
-            else "spec:openai.default_base_url"
-        )
+        base_url, base_url_source = _resolve_codex_base_url(config)
         return {
             "ok": True,
             "provider": provider_key,
@@ -620,6 +635,7 @@ def _resolve_provider_probe_target(config: AppConfig, provider_name: str) -> dic
             "base_url": base_url,
             "base_url_source": base_url_source,
             "auth_mode": "oauth",
+            "account_id": str(codex.get("account_id", "") or "").strip(),
         }
 
     if provider_key in {"ollama", "vllm"}:
@@ -785,6 +801,56 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
 
     if provider == "ollama":
         endpoint = "/api/tags"
+    elif provider == "openai_codex":
+        endpoint = _resolve_codex_probe_endpoint(base_url)
+        probe_method = "POST"
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": provider,
+                "provider_detected": detected,
+                "model": model,
+                "status_code": 0,
+                "error": "api_key_missing",
+                "api_key_masked": str(target.get("api_key_masked", "") or ""),
+                "api_key_source": str(target.get("api_key_source", "") or ""),
+                "base_url": base_url,
+                "base_url_source": str(target.get("base_url_source", "") or ""),
+                "endpoint": endpoint,
+                "transport": transport,
+                "probe_method": probe_method,
+                "error_detail": "",
+                "error_class": "auth",
+                "default_base_url": default_base_url,
+                "key_envs": key_envs,
+                "model_check": {"checked": False, "ok": True},
+                **profile_payload,
+                "hints": provider_probe_hints(
+                    provider=provider,
+                    error="api_key_missing",
+                    error_detail="",
+                    status_code=0,
+                    auth_mode=auth_mode,
+                    transport=transport,
+                    endpoint=endpoint,
+                    default_base_url=default_base_url,
+                    key_envs=key_envs,
+                    model=model,
+                ),
+            }
+        headers["Authorization"] = f"Bearer {api_key}"
+        payload = {
+            "model": model.split("/", 1)[1] if "/" in model else model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "ping"}],
+                }
+            ],
+            "max_output_tokens": 1,
+            "store": False,
+        }
     elif provider == "anthropic":
         endpoint = "/models"
         if not api_key:

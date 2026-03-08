@@ -1596,6 +1596,9 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
     assert status_payload["configured"] is True
     assert status_payload["provider"] == "openai_codex"
     assert status_payload["model"] == "openai-codex/gpt-5.3-codex"
+    assert status_payload["transport"] == "oauth_codex_responses"
+    assert status_payload["default_base_url"] == "https://chatgpt.com/backend-api"
+    assert status_payload["base_url"] == "https://chatgpt.com/backend-api"
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["auth"]["providers"]["openai_codex"]["access_token"] == "codex-token-1234"
@@ -1787,6 +1790,78 @@ def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: P
     assert payload["probe_method"] == "GET"
     assert payload["error_class"] == "network"
     assert any("Inicie o servidor vLLM" in row for row in payload["hints"])
+
+
+def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+                "agents": {"defaults": {"model": "openai-codex/gpt-5.3-codex"}},
+                "auth": {"providers": {"openai_codex": {"access_token": "tok-codex-1234"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        status_code = 200
+        is_success = True
+
+        def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ]
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = dict(headers or {})
+            captured["json"] = dict(json or {})
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _Client)
+
+    from clawlite.config.loader import load_config
+
+    payload = provider_live_probe(load_config(config_path), timeout=0.1)
+    assert payload["ok"] is True
+    assert payload["provider"] == "openai_codex"
+    assert payload["transport"] == "oauth_codex_responses"
+    assert payload["probe_method"] == "POST"
+    assert payload["endpoint"] == "/codex/responses"
+    assert payload["base_url"] == "https://chatgpt.com/backend-api"
+    assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert captured["headers"]["Authorization"] == "Bearer tok-codex-1234"
+    assert captured["json"]["store"] is False
+    assert captured["json"]["max_output_tokens"] == 1
+    assert captured["json"]["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ping"}],
+        }
+    ]
 
 
 def test_provider_live_probe_ollama_success_detects_missing_model(tmp_path: Path, monkeypatch) -> None:

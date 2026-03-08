@@ -8,6 +8,8 @@ from clawlite.providers.catalog import default_provider_model, provider_profile
 def provider_transport_name(*, provider: str, spec: Any | None = None, auth_mode: str = "") -> str:
     provider_name = str(provider or "").strip().lower().replace("-", "_")
     auth_kind = str(auth_mode or "").strip().lower()
+    if provider_name == "openai_codex" and auth_kind == "oauth":
+        return "oauth_codex_responses"
     if auth_kind == "oauth":
         return "oauth_openai_compatible"
     if provider_name in {"ollama", "vllm"}:
@@ -71,6 +73,8 @@ def provider_probe_hints(
         _append_hint(hints, "Este provider usa transporte Anthropic-compatible; o probe consulta /messages ou /models.")
     elif transport == "openai_compatible":
         _append_hint(hints, "Este provider usa transporte OpenAI-compatible; o probe consulta /models.")
+    elif transport == "oauth_codex_responses":
+        _append_hint(hints, "Este provider usa Codex Responses com OAuth; o probe consulta /codex/responses.")
     elif transport == "oauth_openai_compatible":
         _append_hint(hints, "Este provider usa transporte OpenAI-compatible com autenticacao OAuth.")
     elif transport == "local_runtime" and provider_name == "ollama":
@@ -152,6 +156,7 @@ def provider_probe_hints(
         "byteplus": "BytePlus Ark normalmente responde em https://ark.ap-southeast.bytepluses.com/api/v3.",
         "doubao": "Doubao Ark normalmente responde em https://ark.cn-beijing.volces.com/api/v3.",
         "volcengine": "Volcengine Ark normalmente responde em https://ark.cn-beijing.volces.com/api/v3.",
+        "openai_codex": "OpenAI Codex OAuth normalmente responde em https://chatgpt.com/backend-api/codex/responses.",
     }
     if status_code >= 400 or error_text:
         if provider_name in provider_base_url_hints:
