@@ -876,6 +876,69 @@ def test_channel_manager_startup_replays_persisted_dead_letters_after_restart(tm
     asyncio.run(_scenario())
 
 
+def test_channel_manager_startup_suppresses_duplicate_dead_letter_replay_with_persisted_idempotency(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        state_path = tmp_path / "state"
+        key = "dup-restart-key"
+        original = OutboundEvent(
+            channel="fake",
+            session_id="fake:dup-restart",
+            target="dup-restart",
+            text="already-delivered",
+            metadata={"_delivery_idempotency_key": key},
+        )
+
+        first_bus = MessageQueue()
+        first_mgr = ChannelManager(bus=first_bus, engine=FakeEngine())
+        first_mgr.register("fake", FakeChannel)
+        await first_mgr.start({"state_path": str(state_path), "channels": {"fake": {"enabled": True}}})
+
+        await first_mgr._publish_and_send(event=original)
+        first_fake = first_mgr._channels["fake"]
+        assert len(first_fake.sent) == 1
+
+        await first_mgr._persist_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="fake:dup-restart",
+                target="dup-restart",
+                text="already-delivered",
+                metadata={"_delivery_idempotency_key": key},
+                attempt=1,
+                max_attempts=1,
+                retryable=True,
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+                last_error="crash-after-send",
+            )
+        )
+        await first_mgr.stop()
+
+        second_bus = MessageQueue()
+        second_mgr = ChannelManager(bus=second_bus, engine=FakeEngine())
+        second_mgr.register("fake", FakeChannel)
+        await second_mgr.start({"state_path": str(state_path), "channels": {"fake": {"enabled": True}}})
+
+        second_fake = second_mgr._channels["fake"]
+        assert second_fake.sent == []
+
+        diagnostics = second_mgr.delivery_diagnostics()
+        assert diagnostics["total"]["idempotency_suppressed"] == 1
+        assert diagnostics["total"]["replayed"] == 0
+        assert diagnostics["persistence"]["pending"] == 0
+        assert diagnostics["persistence"]["idempotency"]["enabled"] is True
+        assert diagnostics["persistence"]["idempotency"]["active"] >= 1
+        assert diagnostics["persistence"]["startup_replay"]["restored_idempotency_keys"] >= 1
+        assert diagnostics["persistence"]["startup_replay"]["suppressed"] == 1
+        assert diagnostics["persistence"]["startup_replay"]["suppressed_by_channel"] == {"fake": 1}
+        assert second_bus.stats()["dead_letter_size"] == 0
+        assert second_bus.stats()["dead_letter_restored"] == 1
+
+        await second_mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_startup_replays_persisted_inbound_after_restart(tmp_path: Path) -> None:
     async def _scenario() -> None:
         state_path = tmp_path / "state"

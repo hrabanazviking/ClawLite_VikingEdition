@@ -95,6 +95,9 @@ class ChannelManager:
         self._delivery_recent: deque[dict[str, Any]] = deque(maxlen=self._delivery_recent_limit)
         self._delivery_idempotency_cache: dict[str, float] = {}
         self._delivery_idempotency_order: deque[tuple[str, float]] = deque()
+        self._delivery_idempotency_persistence_path: Path | None = None
+        self._delivery_idempotency_persistence_lock = asyncio.Lock()
+        self._delivery_idempotency_persistence_pending = 0
         self._dispatch_slots = asyncio.Semaphore(self._dispatcher_max_concurrency)
         self._session_slots: dict[str, _SessionDispatchSlot] = {}
         self._session_slots_max_entries = 2048
@@ -269,9 +272,10 @@ class ChannelManager:
         if self._delivery_idempotency_max_entries <= 0:
             self._delivery_idempotency_cache.clear()
             self._delivery_idempotency_order.clear()
+            self._delivery_idempotency_persistence_pending = 0
             return
 
-        current = time.monotonic() if now is None else now
+        current = time.time() if now is None else now
         while self._delivery_idempotency_order:
             key, expiry = self._delivery_idempotency_order[0]
             if expiry > current:
@@ -284,9 +288,10 @@ class ChannelManager:
             key, expiry = self._delivery_idempotency_order.popleft()
             if self._delivery_idempotency_cache.get(key) == expiry:
                 self._delivery_idempotency_cache.pop(key, None)
+        self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
 
     def _is_delivery_idempotency_suppressed(self, key: str) -> bool:
-        current = time.monotonic()
+        current = time.time()
         self._prune_delivery_idempotency_cache(now=current)
         expiry = self._delivery_idempotency_cache.get(key)
         if expiry is None:
@@ -298,11 +303,105 @@ class ChannelManager:
 
     def _remember_delivery_idempotency(self, key: str) -> None:
         ttl = max(0.0, float(self._delivery_idempotency_ttl_s))
-        current = time.monotonic()
+        current = time.time()
         expiry = current + ttl
         self._delivery_idempotency_cache[key] = expiry
         self._delivery_idempotency_order.append((key, expiry))
         self._prune_delivery_idempotency_cache(now=current)
+
+    def _load_delivery_idempotency_persistence_locked(self) -> dict[str, float]:
+        path = self._delivery_idempotency_persistence_path
+        if path is None or not path.exists():
+            self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            bind_event("channel.delivery").warning("delivery idempotency journal read failed path={} error={}", path, exc)
+            self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+            return {}
+
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        current = time.time()
+        restored: dict[str, float] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "") or "").strip()
+            if not key:
+                continue
+            try:
+                expiry = float(item.get("expires_at_epoch", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if expiry <= current:
+                continue
+            prior = float(restored.get(key, 0.0) or 0.0)
+            restored[key] = max(prior, expiry)
+        self._delivery_idempotency_persistence_pending = len(restored)
+        return restored
+
+    def _write_delivery_idempotency_persistence_locked(self) -> None:
+        path = self._delivery_idempotency_persistence_path
+        if path is None:
+            self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+            return
+        self._prune_delivery_idempotency_cache()
+        self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+        if not self._delivery_idempotency_cache:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        items = [
+            {"key": key, "expires_at_epoch": float(expiry)}
+            for key, expiry in sorted(self._delivery_idempotency_cache.items(), key=lambda item: item[1])
+        ]
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "items": items,
+        }
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+
+    async def _sync_delivery_idempotency_persistence(self) -> None:
+        if self._delivery_idempotency_persistence_path is None:
+            self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+            return
+        async with self._delivery_idempotency_persistence_lock:
+            self._write_delivery_idempotency_persistence_locked()
+
+    async def _restore_delivery_idempotency_persistence(self) -> int:
+        if self._delivery_idempotency_persistence_path is None:
+            self._delivery_idempotency_persistence_pending = len(self._delivery_idempotency_cache)
+            return 0
+        async with self._delivery_idempotency_persistence_lock:
+            restored = self._load_delivery_idempotency_persistence_locked()
+            if not restored:
+                self._write_delivery_idempotency_persistence_locked()
+                return 0
+            current = time.time()
+            self._prune_delivery_idempotency_cache(now=current)
+            merged = dict(self._delivery_idempotency_cache)
+            for key, expiry in restored.items():
+                prior = float(merged.get(key, 0.0) or 0.0)
+                merged[key] = max(prior, float(expiry))
+            ordered = sorted(merged.items(), key=lambda item: item[1])
+            self._delivery_idempotency_cache = dict(ordered)
+            self._delivery_idempotency_order = deque(ordered)
+            self._prune_delivery_idempotency_cache(now=current)
+            restored_count = len(restored)
+            self._write_delivery_idempotency_persistence_locked()
+            bind_event("channel.delivery").info(
+                "delivery idempotency journal restored path={} restored={}",
+                self._delivery_idempotency_persistence_path,
+                restored_count,
+            )
+            return restored_count
 
     @staticmethod
     def _serialize_delivery_event(event: OutboundEvent) -> dict[str, Any]:
@@ -467,18 +566,22 @@ class ChannelManager:
             "enabled": bool(self._delivery_replay_on_startup),
             "running": True,
             "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
+            "restored_idempotency_keys": 0,
             "restored": 0,
             "replayed": 0,
             "failed": 0,
             "skipped": 0,
+            "suppressed": 0,
             "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
             "last_error": "",
             "replayed_by_channel": {},
             "failed_by_channel": {},
             "skipped_by_channel": {},
+            "suppressed_by_channel": {},
         }
         self._delivery_startup_replay = dict(summary)
         try:
+            summary["restored_idempotency_keys"] = await self._restore_delivery_idempotency_persistence()
             summary["restored"] = await self._restore_persisted_dead_letters()
             if self._delivery_replay_on_startup:
                 replay = await self.replay_dead_letters(
@@ -489,10 +592,12 @@ class ChannelManager:
                     "replayed",
                     "failed",
                     "skipped",
+                    "suppressed",
                     "remaining",
                     "replayed_by_channel",
                     "failed_by_channel",
                     "skipped_by_channel",
+                    "suppressed_by_channel",
                 ):
                     summary[key] = replay.get(key, summary.get(key))
         except Exception as exc:
@@ -977,6 +1082,7 @@ class ChannelManager:
                 self._inc_delivery(channel=event.channel, key="success")
                 self._inc_delivery(channel=event.channel, key="delivery_confirmed")
                 self._remember_delivery_idempotency(idempotency_key)
+                await self._sync_delivery_idempotency_persistence()
                 self._record_delivery_recent(
                     event=attempt_event,
                     outcome="delivery_confirmed",
@@ -1124,9 +1230,11 @@ class ChannelManager:
         replayed = 0
         failed = 0
         skipped = 0
+        suppressed = 0
         replayed_by_channel: dict[str, int] = {}
         failed_by_channel: dict[str, int] = {}
         skipped_by_channel: dict[str, int] = {}
+        suppressed_by_channel: dict[str, int] = {}
         skipped_events: list[OutboundEvent] = []
 
         for event in matched_events[:bounded_limit]:
@@ -1156,7 +1264,13 @@ class ChannelManager:
                 dead_letter_reason="",
                 last_error="",
             )
+            suppressed_before = int(self._delivery_total.get("idempotency_suppressed", 0) or 0)
             delivered = await self._publish_and_send(event=replay_event)
+            suppressed_delta = int(self._delivery_total.get("idempotency_suppressed", 0) or 0) - suppressed_before
+            if suppressed_delta > 0:
+                suppressed += 1
+                suppressed_by_channel[pending.channel] = suppressed_by_channel.get(pending.channel, 0) + 1
+                continue
             if delivered:
                 replayed += 1
                 replayed_by_channel[pending.channel] = replayed_by_channel.get(pending.channel, 0) + 1
@@ -1175,12 +1289,14 @@ class ChannelManager:
             "replayed": replayed,
             "failed": failed,
             "skipped": skipped,
+            "suppressed": suppressed,
             "kept": remaining,
             "dropped": 0,
             "remaining": remaining,
             "replayed_by_channel": dict(sorted(replayed_by_channel.items())),
             "failed_by_channel": dict(sorted(failed_by_channel.items())),
             "skipped_by_channel": dict(sorted(skipped_by_channel.items())),
+            "suppressed_by_channel": dict(sorted(suppressed_by_channel.items())),
             "dry_run": False,
             "limit": bounded_limit,
         }
@@ -1194,6 +1310,15 @@ class ChannelManager:
                 "enabled": self._delivery_persistence_path is not None,
                 "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
                 "pending": int(self._delivery_persistence_pending),
+                "idempotency": {
+                    "enabled": self._delivery_idempotency_persistence_path is not None,
+                    "path": (
+                        str(self._delivery_idempotency_persistence_path)
+                        if self._delivery_idempotency_persistence_path is not None
+                        else ""
+                    ),
+                    "active": int(self._delivery_idempotency_persistence_pending),
+                },
                 "startup_replay": dict(self._delivery_startup_replay),
             },
         }
@@ -1443,16 +1568,26 @@ class ChannelManager:
         else:
             replay_reasons = ["send_failed", "channel_unavailable"]
         self._delivery_replay_reasons = tuple(replay_reasons or ["send_failed", "channel_unavailable"])
+        idempotency_persistence_path_raw = channels_cfg.get(
+            "delivery_idempotency_persistence_path",
+            channels_cfg.get("deliveryIdempotencyPersistencePath", ""),
+        )
         persistence_path_raw = channels_cfg.get(
             "delivery_persistence_path",
             channels_cfg.get("deliveryPersistencePath", ""),
         )
+        state_path_raw = str(config.get("state_path", "") or "").strip()
+        state_root = Path(state_path_raw).expanduser() if state_path_raw else None
+        if idempotency_persistence_path_raw:
+            self._delivery_idempotency_persistence_path = Path(str(idempotency_persistence_path_raw)).expanduser()
+        elif state_root is not None:
+            self._delivery_idempotency_persistence_path = state_root / "channels" / "delivery-idempotency.json"
+        else:
+            self._delivery_idempotency_persistence_path = None
         if persistence_path_raw:
             self._delivery_persistence_path = Path(str(persistence_path_raw)).expanduser()
         else:
-            state_path_raw = str(config.get("state_path", "") or "").strip()
-            if state_path_raw:
-                state_root = Path(state_path_raw).expanduser()
+            if state_root is not None:
                 self._delivery_persistence_path = state_root / "channels" / "delivery-dead-letters.json"
             else:
                 self._delivery_persistence_path = None
@@ -1473,9 +1608,7 @@ class ChannelManager:
         if inbound_persistence_path_raw:
             self._inbound_persistence_path = Path(str(inbound_persistence_path_raw)).expanduser()
         else:
-            state_path_raw = str(config.get("state_path", "") or "").strip()
-            if state_path_raw:
-                state_root = Path(state_path_raw).expanduser()
+            if state_root is not None:
                 self._inbound_persistence_path = state_root / "channels" / "inbound-pending.json"
             else:
                 self._inbound_persistence_path = None
@@ -1494,15 +1627,18 @@ class ChannelManager:
             "enabled": bool(self._delivery_replay_on_startup),
             "running": False,
             "path": str(self._delivery_persistence_path) if self._delivery_persistence_path is not None else "",
+            "restored_idempotency_keys": 0,
             "restored": 0,
             "replayed": 0,
             "failed": 0,
             "skipped": 0,
+            "suppressed": 0,
             "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
             "last_error": "",
             "replayed_by_channel": {},
             "failed_by_channel": {},
             "skipped_by_channel": {},
+            "suppressed_by_channel": {},
         }
         self._inbound_startup_replay = {
             "enabled": bool(self._inbound_replay_on_startup),
