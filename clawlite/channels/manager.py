@@ -1464,6 +1464,13 @@ class ChannelManager:
     async def _dispatch_event(self, event: InboundEvent) -> None:
         bind_event("channel.dispatch", session=event.session_id, channel=event.channel).debug("dispatch processing target={}", event.user_id)
         target = self._target_from_event(event)
+        activity_channel, activity_chat_id, activity_thread_id = self._dispatch_typing_context(event)
+        if activity_channel is not None and activity_chat_id:
+            self._start_dispatch_typing(
+                channel=activity_channel,
+                chat_id=activity_chat_id,
+                message_thread_id=activity_thread_id,
+            )
 
         async def _progress_hook(progress) -> None:
             stage = str(getattr(progress, "stage", "progress") or "progress")
@@ -1527,6 +1534,12 @@ class ChannelManager:
             if (event.channel, target) in sent_targets:
                 suppress_final_reply = True
             self._dispatch_context.reset(dispatch_token)
+            if activity_channel is not None and activity_chat_id:
+                await self._stop_dispatch_typing(
+                    channel=activity_channel,
+                    chat_id=activity_chat_id,
+                    message_thread_id=activity_thread_id,
+                )
 
         if suppress_final_reply:
             bind_event("channel.dispatch", session=event.session_id, channel=event.channel).debug(
@@ -1826,6 +1839,52 @@ class ChannelManager:
         if thread_id <= 0:
             return target
         return f"{target}:{thread_id}"
+
+    def _dispatch_typing_context(
+        self,
+        event: InboundEvent,
+    ) -> tuple[BaseChannel | None, str, int | None]:
+        channel = self._channels.get(event.channel)
+        if channel is None:
+            return None, "", None
+        if not callable(getattr(channel, "_start_typing_keepalive", None)):
+            return None, "", None
+        if not callable(getattr(channel, "_stop_typing_keepalive", None)):
+            return None, "", None
+
+        chat_id = str(event.metadata.get("chat_id") or event.user_id or "").strip()
+        if not chat_id:
+            return None, "", None
+        thread_raw = event.metadata.get("message_thread_id")
+        try:
+            thread_id = int(thread_raw)
+        except (TypeError, ValueError):
+            thread_id = None
+        if thread_id is not None and thread_id <= 0:
+            thread_id = None
+        return channel, chat_id, thread_id
+
+    @staticmethod
+    def _start_dispatch_typing(
+        *,
+        channel: BaseChannel,
+        chat_id: str,
+        message_thread_id: int | None,
+    ) -> None:
+        start_fn = getattr(channel, "_start_typing_keepalive", None)
+        if callable(start_fn):
+            start_fn(chat_id=chat_id, message_thread_id=message_thread_id)
+
+    @staticmethod
+    async def _stop_dispatch_typing(
+        *,
+        channel: BaseChannel,
+        chat_id: str,
+        message_thread_id: int | None,
+    ) -> None:
+        stop_fn = getattr(channel, "_stop_typing_keepalive", None)
+        if callable(stop_fn):
+            await stop_fn(chat_id=chat_id, message_thread_id=message_thread_id)
 
     def status(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}

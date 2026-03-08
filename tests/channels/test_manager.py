@@ -132,6 +132,27 @@ class ExceptionEngine(FakeEngine):
         raise RuntimeError("boom")
 
 
+class TypingLifecycleEngine(FakeEngine):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(
+        self,
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        progress_hook=None,
+        stop_event=None,
+    ):
+        del channel, chat_id, progress_hook, stop_event
+        self.started.set()
+        await self.release.wait()
+        return _Result(text=f"reply:{session_id}:{user_text}")
+
+
 class SubagentStub:
     def __init__(self, cancelled: int) -> None:
         self.cancelled = cancelled
@@ -194,6 +215,24 @@ class FakeChannel(BaseChannel):
 class FakeChannelWithSignals(FakeChannel):
     def signals(self) -> dict[str, Any]:
         return {"foo": 1, "bar": 2}
+
+
+class FakeTelegramTypingChannel(FakeChannel):
+    def __init__(
+        self,
+        *,
+        config: dict[str, Any],
+        on_message=None,
+    ):
+        super().__init__(config=config, on_message=on_message)
+        self.typing_started: list[tuple[str, int | None]] = []
+        self.typing_stopped: list[tuple[str, int | None]] = []
+
+    def _start_typing_keepalive(self, *, chat_id: str, message_thread_id: int | None = None) -> None:
+        self.typing_started.append((chat_id, message_thread_id))
+
+    async def _stop_typing_keepalive(self, *, chat_id: str, message_thread_id: int | None = None) -> None:
+        self.typing_stopped.append((chat_id, message_thread_id))
 
 
 class RecoveringChannel(FakeChannel):
@@ -547,6 +586,40 @@ def test_channel_manager_dispatch_preserves_telegram_thread_target() -> None:
 
         assert telegram.sent
         assert telegram.sent[0][0] == "42:9"
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_keeps_telegram_typing_active_for_full_dispatch() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        engine = TypingLifecycleEngine()
+        mgr = ChannelManager(bus=bus, engine=engine)
+        mgr.register("telegram", FakeTelegramTypingChannel)
+        await mgr.start({"channels": {"telegram": {"enabled": True}}})
+
+        telegram = mgr._channels["telegram"]
+        await telegram.emit(
+            session_id="telegram:42",
+            user_id="u1",
+            text="hello",
+            metadata={"channel": "telegram", "chat_id": "42", "message_thread_id": 9},
+        )
+
+        await asyncio.wait_for(engine.started.wait(), timeout=1.0)
+        await asyncio.sleep(0.05)
+
+        assert telegram.typing_started == [("42", 9)]
+        assert telegram.typing_stopped == []
+
+        engine.release.set()
+        await asyncio.sleep(0.1)
+
+        assert telegram.sent
+        assert telegram.sent[0][0] == "42:9"
+        assert telegram.typing_stopped == [("42", 9)]
 
         await mgr.stop()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ from rich.prompt import Prompt
 from clawlite.config.loader import save_config
 from clawlite.config.schema import AppConfig
 from clawlite.providers.catalog import ONBOARDING_PROVIDER_ORDER, default_provider_model, provider_profile
+from clawlite.providers.codex import CODEX_DEFAULT_BASE_URL
+from clawlite.providers.codex_auth import load_codex_auth_file
 from clawlite.providers.discovery import normalize_local_runtime_base_url, probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_transport_name
 from clawlite.providers.model_probe import evaluate_remote_model_check, model_check_hints
@@ -33,14 +36,17 @@ def _provider_spec(name: str) -> Any:
             row
             for row in SPECS
             if provider_name in _provider_name_variants(row.name, row.aliases)
-            and row.name not in {"custom", "openai_codex"}
+            and row.name not in {"custom"}
         ),
         None,
     )
 
 
+_ONBOARDING_PROVIDER_IDS: list[str] = ["openai-codex", *ONBOARDING_PROVIDER_ORDER]
 SUPPORTED_PROVIDERS: tuple[str, ...] = tuple(
-    provider_id for provider_id in ONBOARDING_PROVIDER_ORDER if _provider_spec(provider_id) is not None
+    provider_id
+    for provider_id in _ONBOARDING_PROVIDER_IDS
+    if _provider_spec(provider_id) is not None
 )
 
 DEFAULT_PROVIDER_BASE_URLS: dict[str, str] = {}
@@ -83,6 +89,120 @@ def _provider_profile_payload(provider_name: str) -> dict[str, Any]:
     }
 
 
+def _parse_oauth_result(payload: Any) -> tuple[str, str]:
+    if isinstance(payload, str):
+        return payload.strip(), ""
+    if isinstance(payload, dict):
+        token = str(payload.get("access_token", payload.get("accessToken", payload.get("token", ""))) or "").strip()
+        account = str(
+            payload.get(
+                "account_id",
+                payload.get("accountId", payload.get("org_id", payload.get("orgId", payload.get("organization", "")))),
+            )
+            or ""
+        ).strip()
+        return token, account
+    return "", ""
+
+
+def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
+    codex = config.auth.providers.openai_codex
+    cfg_token = str(codex.access_token or "").strip()
+    cfg_account = str(codex.account_id or "").strip()
+    cfg_source = str(codex.source or "").strip()
+    file_auth = load_codex_auth_file()
+
+    env_token_candidates: tuple[tuple[str, str], ...] = (
+        ("CLAWLITE_CODEX_ACCESS_TOKEN", os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()),
+        ("OPENAI_CODEX_ACCESS_TOKEN", os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()),
+        ("OPENAI_ACCESS_TOKEN", os.getenv("OPENAI_ACCESS_TOKEN", "").strip()),
+    )
+    env_account_candidates: tuple[tuple[str, str], ...] = (
+        ("CLAWLITE_CODEX_ACCOUNT_ID", os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip()),
+        ("OPENAI_ORG_ID", os.getenv("OPENAI_ORG_ID", "").strip()),
+    )
+
+    env_token_name = ""
+    env_token = ""
+    for name, value in env_token_candidates:
+        if value:
+            env_token_name = name
+            env_token = value
+            break
+
+    env_account = ""
+    for _, value in env_account_candidates:
+        if value:
+            env_account = value
+            break
+
+    file_token = str(file_auth.get("access_token", "") or "").strip()
+    file_account = str(file_auth.get("account_id", "") or "").strip()
+
+    token = cfg_token or env_token or file_token
+    account_id = cfg_account or env_account or file_account
+    if cfg_token:
+        source = cfg_source or "config"
+    elif env_token_name:
+        source = f"env:{env_token_name}"
+    elif file_token:
+        source = str(file_auth.get("source", "") or "")
+    else:
+        source = ""
+
+    return {
+        "configured": bool(token),
+        "access_token": token,
+        "account_id": account_id,
+        "source": source,
+        "token_masked": _mask_secret(token),
+        "account_id_masked": _mask_secret(account_id),
+    }
+
+
+def _resolve_codex_auth_interactive(config: AppConfig) -> dict[str, Any]:
+    token = ""
+    account_id = ""
+    source = ""
+
+    try:
+        import oauth_cli_kit  # type: ignore
+
+        get_token = getattr(oauth_cli_kit, "get_token", None)
+        login_oauth_interactive = getattr(oauth_cli_kit, "login_oauth_interactive", None)
+        if callable(get_token):
+            oauth_result = get_token()
+            token, account_id = _parse_oauth_result(oauth_result)
+            if token:
+                source = "oauth_cli_kit:get_token"
+        if (not token) and callable(login_oauth_interactive):
+            oauth_result: Any = None
+            try:
+                oauth_result = login_oauth_interactive(provider="openai-codex")
+            except TypeError:
+                oauth_result = login_oauth_interactive("openai-codex")
+            token, account_id = _parse_oauth_result(oauth_result)
+            if token:
+                source = "oauth_cli_kit:interactive"
+    except Exception:
+        pass
+
+    if not token:
+        status = resolve_codex_auth(config)
+        token = str(status.get("access_token", "") or "").strip()
+        account_id = str(status.get("account_id", "") or "").strip()
+        source = str(status.get("source", "") or "").strip()
+
+    return {
+        "configured": bool(token),
+        "access_token": token,
+        "account_id": account_id,
+        "source": source or "config",
+        "token_masked": _mask_secret(token),
+        "account_id_masked": _mask_secret(account_id),
+    }
+
+
 def _join_base(base_url: str, path: str) -> str:
     base = str(base_url or "").strip().rstrip("/")
     suffix = str(path or "").strip()
@@ -107,6 +227,9 @@ def apply_provider_selection(
     api_key: str,
     base_url: str,
     model: str = "",
+    oauth_access_token: str = "",
+    oauth_account_id: str = "",
+    oauth_source: str = "",
 ) -> dict[str, Any]:
     spec = _provider_spec(provider)
     provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
@@ -114,6 +237,29 @@ def apply_provider_selection(
         raise ValueError(f"unsupported_provider:{provider_key}")
 
     selected_model = str(model or "").strip() or default_provider_model(provider_key)
+    if provider_key == "openai_codex":
+        selected_token = str(oauth_access_token or "").strip()
+        selected_account_id = str(oauth_account_id or "").strip()
+        config.provider.model = selected_model
+        config.agents.defaults.model = selected_model
+        config.provider.litellm_api_key = ""
+        config.provider.litellm_base_url = ""
+        config.auth.providers.openai_codex.access_token = selected_token
+        config.auth.providers.openai_codex.account_id = selected_account_id
+        config.auth.providers.openai_codex.source = str(oauth_source or "config").strip() or "config"
+
+        selected_override = config.providers.ensure(provider_key)
+        selected_override.api_key = ""
+        selected_override.api_base = CODEX_DEFAULT_BASE_URL
+        return {
+            "provider": provider_key,
+            "model": selected_model,
+            "base_url": CODEX_DEFAULT_BASE_URL,
+            "api_key_masked": _mask_secret(selected_token),
+            "account_id_masked": _mask_secret(selected_account_id),
+            "source": str(config.auth.providers.openai_codex.source or ""),
+        }
+
     raw_base_url = str(base_url or "").strip() or DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
     selected_base_url = (
         normalize_local_runtime_base_url(provider_key, raw_base_url)
@@ -146,6 +292,8 @@ def probe_provider(
     base_url: str,
     model: str = "",
     timeout_s: float = 8.0,
+    oauth_access_token: str = "",
+    oauth_account_id: str = "",
 ) -> dict[str, Any]:
     spec = _provider_spec(provider)
     provider_key = spec.name if spec is not None else str(provider or "").strip().lower().replace("-", "_")
@@ -181,7 +329,65 @@ def probe_provider(
     key_envs = list(spec.key_envs)
     model_check: dict[str, Any] = {"checked": False, "ok": True, "enforced": False}
 
-    if provider_key == "ollama":
+    if provider_key == "openai_codex":
+        endpoint = "/codex/responses"
+        probe_method = "POST"
+        transport = provider_transport_name(provider=provider_key, spec=spec, auth_mode="oauth")
+        key = str(oauth_access_token or "").strip()
+        if not key:
+            return {
+                "ok": False,
+                "provider": provider_key,
+                "error": "codex_access_token_missing",
+                "api_key_masked": "",
+                "base_url": CODEX_DEFAULT_BASE_URL,
+                "transport": transport,
+                "probe_method": probe_method,
+                "error_detail": "",
+                "default_base_url": CODEX_DEFAULT_BASE_URL,
+                "key_envs": [],
+                "model_check": {"checked": False, "ok": True, "enforced": False},
+                **profile_payload,
+                "hints": provider_probe_hints(
+                    provider=provider_key,
+                    error="codex_access_token_missing",
+                    error_detail="",
+                    status_code=0,
+                    auth_mode="oauth",
+                    transport=transport,
+                    endpoint=endpoint,
+                    default_base_url=CODEX_DEFAULT_BASE_URL,
+                    key_envs=[],
+                    model=selected_model,
+                ),
+            }
+        resolved_base = str(base_url or "").strip() or CODEX_DEFAULT_BASE_URL
+        url = _join_base(resolved_base, endpoint)
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Accept": "text/event-stream",
+        }
+        resolved_model = selected_model.split("/", 1)[1] if "/" in selected_model else selected_model
+        payload = {
+            "model": resolved_model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "ping"}],
+                }
+            ],
+            "instructions": "You are a concise assistant. Reply briefly.",
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "store": False,
+            "stream": True,
+        }
+        key_envs = []
+        default_base_url = CODEX_DEFAULT_BASE_URL
+        model_check = {"checked": False, "ok": True, "enforced": False}
+    elif provider_key == "ollama":
         url = _join_base(resolved_base, "/api/tags")
     elif provider_key == "vllm":
         url = _join_base(resolved_base, "/models")
@@ -529,8 +735,8 @@ def _configure_model(
     config: AppConfig,
     *,
     allow_continue_on_probe_failure: bool = True,
-) -> tuple[str, str, str, str, dict[str, Any]]:
-    """Interactive model section. Returns (provider, api_key, base_url, model, probe)."""
+) -> tuple[str, str, str, str, dict[str, Any], dict[str, Any]]:
+    """Interactive model section. Returns (provider, api_key, base_url, model, probe, oauth)."""
     _section_header(console, "Model / Provider", "pick your AI backend")
 
     # Show provider table
@@ -566,7 +772,24 @@ def _configure_model(
     model_default = current_model or default_provider_model(provider_key)
 
     api_key = ""
-    if provider_key not in {"ollama", "vllm"}:
+    oauth_payload: dict[str, Any] = {"access_token": "", "account_id": "", "source": ""}
+    if provider_key == "openai_codex":
+        console.print("\n  [dim]Codex uses your local OAuth session (for example ~/.codex/auth.json).[/]")
+        console.print("  [dim]ClawLite will reuse it or trigger interactive login if needed.[/]\n")
+        oauth_status = _resolve_codex_auth_interactive(config)
+        if bool(oauth_status.get("configured", False)):
+            source_label = str(oauth_status.get("source", "") or "").strip()
+            source_suffix = f"  [dim]({source_label})[/]" if source_label else ""
+            console.print(f"  [green]✓[/] Codex auth found: {oauth_status.get('token_masked', '')}{source_suffix}")
+        else:
+            console.print("  [red]✗[/] Codex auth not found.")
+        oauth_payload = {
+            "access_token": str(oauth_status.get("access_token", "") or "").strip(),
+            "account_id": str(oauth_status.get("account_id", "") or "").strip(),
+            "source": str(oauth_status.get("source", "") or "").strip(),
+        }
+        base_url = CODEX_DEFAULT_BASE_URL
+    elif provider_key not in {"ollama", "vllm"}:
         api_key = Prompt.ask(f"  {provider} API key", password=True)
     else:
         base_url = Prompt.ask(f"  {provider} base URL", default=base_url)
@@ -574,7 +797,14 @@ def _configure_model(
     selected_model = Prompt.ask("  Model", default=model_default)
 
     console.print("\n  [dim]Probing provider...[/]")
-    probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
+    probe = probe_provider(
+        provider,
+        api_key=api_key,
+        base_url=base_url,
+        model=selected_model,
+        oauth_access_token=str(oauth_payload.get("access_token", "") or ""),
+        oauth_account_id=str(oauth_payload.get("account_id", "") or ""),
+    )
     _probe_result(console, probe, label=provider)
 
     if not bool(probe.get("ok", False)):
@@ -582,7 +812,7 @@ def _configure_model(
             raise KeyboardInterrupt
         if not Confirm.ask("\n  Probe failed — continue anyway?", default=False):
             raise KeyboardInterrupt
-    return provider, api_key, base_url, selected_model, probe
+    return provider, api_key, base_url, selected_model, probe, oauth_payload
 
 
 def _configure_gateway(console: Console, config: AppConfig) -> None:
@@ -705,7 +935,7 @@ def _run_quickstart_flow(
     provider_persisted: dict[str, Any] = {}
     telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
 
-    prov, api_key, base_url, sel_model, provider_probe = _configure_model(
+    prov, api_key, base_url, sel_model, provider_probe, oauth_payload = _configure_model(
         console,
         config,
         allow_continue_on_probe_failure=False,
@@ -717,6 +947,9 @@ def _run_quickstart_flow(
         api_key=api_key,
         base_url=base_url,
         model=sel_model,
+        oauth_access_token=str(oauth_payload.get("access_token", "") or ""),
+        oauth_account_id=str(oauth_payload.get("account_id", "") or ""),
+        oauth_source=str(oauth_payload.get("source", "") or ""),
     )
 
     _configure_gateway_quickstart(console, config)
@@ -764,7 +997,7 @@ def _run_advanced_flow(
 
         if choice == "model":
             try:
-                prov, api_key, base_url, sel_model, probe = _configure_model(console, config)
+                prov, api_key, base_url, sel_model, probe, oauth_payload = _configure_model(console, config)
                 provider_key = prov
                 provider_probe = probe
                 provider_persisted = apply_provider_selection(
@@ -773,6 +1006,9 @@ def _run_advanced_flow(
                     api_key=api_key,
                     base_url=base_url,
                     model=sel_model,
+                    oauth_access_token=str(oauth_payload.get("access_token", "") or ""),
+                    oauth_account_id=str(oauth_payload.get("account_id", "") or ""),
+                    oauth_source=str(oauth_payload.get("source", "") or ""),
                 )
                 visited.add("model")
                 console.print("  [green]✓[/] Model section saved.\n")

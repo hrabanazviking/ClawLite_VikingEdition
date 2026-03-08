@@ -58,6 +58,29 @@ def test_apply_provider_selection_xai_updates_dynamic_provider_block() -> None:
     assert cfg.providers.get("xai").api_base == "https://api.x.ai/v1"
 
 
+def test_apply_provider_selection_openai_codex_updates_auth_and_model() -> None:
+    cfg = AppConfig.from_dict({})
+    persisted = apply_provider_selection(
+        cfg,
+        provider="openai-codex",
+        api_key="",
+        base_url="",
+        oauth_access_token="codex-token-123456",
+        oauth_account_id="org-1234",
+        oauth_source="oauth_cli_kit:get_token",
+    )
+
+    assert persisted["provider"] == "openai_codex"
+    assert persisted["model"] == "openai-codex/gpt-5.3-codex"
+    assert persisted["api_key_masked"].endswith("3456")
+    assert persisted["account_id_masked"].endswith("1234")
+    assert cfg.auth.providers.openai_codex.access_token == "codex-token-123456"
+    assert cfg.auth.providers.openai_codex.account_id == "org-1234"
+    assert cfg.auth.providers.openai_codex.source == "oauth_cli_kit:get_token"
+    assert cfg.provider.model == "openai-codex/gpt-5.3-codex"
+    assert cfg.agents.defaults.model == "openai-codex/gpt-5.3-codex"
+
+
 def test_ensure_gateway_token_generates_when_missing() -> None:
     cfg = AppConfig.from_dict({"gateway": {"auth": {"mode": "required", "token": ""}}})
     generated = ensure_gateway_token(cfg)
@@ -105,6 +128,51 @@ def test_probe_provider_openai_success(monkeypatch) -> None:
     assert payload["model_check"]["checked"] is True
     assert payload["model_check"]["ok"] is True
     assert any("OpenAI-compatible" in row for row in payload["hints"])
+
+
+def test_probe_provider_openai_codex_success(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        is_success = True
+        text = "data: {\"type\":\"response.completed\"}\n\n"
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            raise AssertionError("responses probe should be handled as SSE text")
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            assert url.endswith("/codex/responses")
+            assert str(headers.get("Authorization", "")).startswith("Bearer codex-")
+            assert headers.get("Accept") == "text/event-stream"
+            assert json["instructions"] == "You are a concise assistant. Reply briefly."
+            assert json["stream"] is True
+            assert json["model"] == "gpt-5.3-codex"
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    payload = probe_provider(
+        "openai-codex",
+        api_key="",
+        base_url="https://chatgpt.com/backend-api",
+        model="openai-codex/gpt-5.3-codex",
+        oauth_access_token="codex-123456",
+    )
+    assert payload["ok"] is True
+    assert payload["status_code"] == 200
+    assert payload["provider"] == "openai_codex"
+    assert payload["transport"] == "oauth_codex_responses"
+    assert payload["probe_method"] == "POST"
+    assert payload["api_key_masked"].endswith("3456")
 
 
 def test_probe_telegram_handles_network_error(monkeypatch) -> None:
@@ -301,7 +369,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
     monkeypatch.setattr(
         "clawlite.cli.onboarding.probe_provider",
-        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0, oauth_access_token="", oauth_account_id="": {
             "ok": True,
             "status_code": 200,
             "provider": provider,
@@ -430,7 +498,7 @@ def test_run_onboarding_wizard_quickstart_uses_guided_defaults(monkeypatch, tmp_
     monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
     monkeypatch.setattr(
         "clawlite.cli.onboarding.probe_provider",
-        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0, oauth_access_token="", oauth_account_id="": {
             "ok": True,
             "status_code": 200,
             "provider": provider,
@@ -471,3 +539,81 @@ def test_run_onboarding_wizard_quickstart_uses_guided_defaults(monkeypatch, tmp_
     assert payload["persisted"]["telegram"]["enabled"] is False
     assert len(payload["workspace"]["created_files"]) == 2
     assert payload["final"]["gateway_token"]
+
+
+def test_run_onboarding_wizard_quickstart_supports_openai_codex(monkeypatch, tmp_path) -> None:
+    cfg = AppConfig.from_dict(
+        {
+            "workspace_path": str(tmp_path / "workspace"),
+            "provider": {"model": "openai/gpt-4o-mini"},
+        }
+    )
+
+    prompt_answers = iter([
+        "1",
+        "openai-codex",
+        "openai-codex/gpt-5.3-codex",
+    ])
+    confirm_answers = iter([False])
+
+    def _fake_prompt_ask(*args, **kwargs):
+        return next(prompt_answers)
+
+    def _fake_confirm_ask(*args, **kwargs):
+        return next(confirm_answers)
+
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
+    monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding._resolve_codex_auth_interactive",
+        lambda config: {
+            "configured": True,
+            "access_token": "codex-token-123456",
+            "account_id": "org-1234",
+            "source": "file:/tmp/.codex/auth.json",
+            "token_masked": "********3456",
+            "account_id_masked": "****1234",
+        },
+    )
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_provider",
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0, oauth_access_token="", oauth_account_id="": {
+            "ok": True,
+            "status_code": 200,
+            "provider": "openai_codex",
+            "family": "oauth",
+            "recommended_model": "openai-codex/gpt-5.3-codex",
+            "recommended_models": ["openai-codex/gpt-5.3-codex"],
+            "onboarding_hint": "OpenAI Codex usa OAuth local.",
+            "base_url": base_url,
+            "api_key_masked": "********3456",
+            "error": "",
+            "transport": "oauth_codex_responses",
+            "probe_method": "POST",
+            "hints": [],
+        },
+    )
+
+    class _FakeWorkspaceLoader:
+        def __init__(self, workspace_path):
+            self.workspace_path = workspace_path
+
+        def bootstrap(self, *, overwrite, variables):
+            return [Path(self.workspace_path) / "IDENTITY.md"]
+
+    monkeypatch.setattr("clawlite.cli.onboarding.WorkspaceLoader", _FakeWorkspaceLoader)
+
+    payload = run_onboarding_wizard(
+        cfg,
+        config_path=tmp_path / "config.json",
+        overwrite=True,
+        variables={},
+    )
+
+    assert payload["ok"] is True
+    assert payload["flow"] == "quickstart"
+    assert payload["persisted"]["provider"]["provider"] == "openai_codex"
+    assert payload["persisted"]["provider"]["model"] == "openai-codex/gpt-5.3-codex"
+    assert payload["persisted"]["provider"]["source"] == "file:/tmp/.codex/auth.json"
+    assert cfg.auth.providers.openai_codex.access_token == "codex-token-123456"
+    assert payload["persisted"]["telegram"]["enabled"] is False
