@@ -1317,6 +1317,7 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "skipped_backlog",
             "skipped_cooldown",
             "skipped_provider_backoff",
+            "skipped_no_progress",
             "skipped_disabled",
             "last_run_at",
             "last_result_excerpt",
@@ -1324,10 +1325,13 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
             "last_error_kind",
             "provider_backoff_reason",
             "provider_backoff_provider",
+            "no_progress_reason",
+            "no_progress_streak",
             "consecutive_error_count",
             "last_snapshot",
             "cooldown_remaining_s",
             "provider_backoff_remaining_s",
+            "no_progress_backoff_remaining_s",
         }
         assert payload["autonomy"]["enabled"] is True
         assert payload["autonomy"]["running"] is True

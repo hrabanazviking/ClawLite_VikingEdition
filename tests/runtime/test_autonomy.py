@@ -188,6 +188,108 @@ def test_autonomy_provider_backoff_skips_until_window_expires() -> None:
     asyncio.run(_scenario())
 
 
+def test_autonomy_repeated_idle_snapshot_enters_no_progress_backoff() -> None:
+    clock = _Clock()
+    calls = {"run": 0}
+
+    async def _snapshot() -> dict[str, dict[str, int]]:
+        return {
+            "queue": {"outbound_size": 0, "dead_letter_size": 0},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        calls["run"] += 1
+        return "AUTONOMY_IDLE"
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=0,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+
+        first = await service.run_once(force=False)
+        assert first["run_attempts"] == 1
+        assert first["run_success"] == 1
+        assert first["no_progress_streak"] == 1
+        assert first["no_progress_reason"] == ""
+        assert first["no_progress_backoff_remaining_s"] == 0.0
+
+        second = await service.run_once(force=False)
+        assert second["run_attempts"] == 2
+        assert second["run_success"] == 2
+        assert second["no_progress_streak"] == 2
+        assert second["no_progress_reason"] == "repeated_idle_snapshot"
+        assert second["no_progress_backoff_remaining_s"] == 30.0
+
+        third = await service.run_once(force=False)
+        assert third["run_attempts"] == 2
+        assert third["skipped_no_progress"] == 1
+        assert third["no_progress_reason"] == "repeated_idle_snapshot"
+        assert calls["run"] == 2
+
+        clock.now += 31.0
+        fourth = await service.run_once(force=False)
+        assert fourth["run_attempts"] == 3
+        assert fourth["run_success"] == 3
+        assert fourth["no_progress_streak"] == 3
+        assert calls["run"] == 3
+
+    asyncio.run(_scenario())
+
+
+def test_autonomy_snapshot_change_clears_no_progress_backoff() -> None:
+    clock = _Clock()
+    calls = {"run": 0}
+    snapshot_state = {"outbound_size": 0}
+
+    async def _snapshot() -> dict[str, dict[str, int]]:
+        return {
+            "queue": {"outbound_size": snapshot_state["outbound_size"], "dead_letter_size": 0},
+            "supervisor": {"running": True, "incident_count": 0, "consecutive_error_count": 0},
+            "channels": {"enabled_count": 1, "running_count": 1},
+        }
+
+    async def _run(_snapshot_payload: dict[str, object]) -> str:
+        calls["run"] += 1
+        return "AUTONOMY_IDLE"
+
+    async def _scenario() -> None:
+        service = AutonomyService(
+            enabled=True,
+            interval_s=10,
+            cooldown_s=0,
+            timeout_s=5,
+            max_queue_backlog=10,
+            snapshot_callback=_snapshot,
+            run_callback=_run,
+            now_monotonic=clock.monotonic,
+        )
+
+        await service.run_once(force=False)
+        second = await service.run_once(force=False)
+        assert second["no_progress_reason"] == "repeated_idle_snapshot"
+        assert second["no_progress_backoff_remaining_s"] == 30.0
+
+        snapshot_state["outbound_size"] = 1
+        third = await service.run_once(force=False)
+        assert third["run_attempts"] == 3
+        assert third["run_success"] == 3
+        assert third["skipped_no_progress"] == 0
+        assert third["no_progress_streak"] == 1
+        assert third["no_progress_reason"] == ""
+        assert calls["run"] == 3
+
+    asyncio.run(_scenario())
+
+
 def test_autonomy_start_restarts_when_previous_task_crashed() -> None:
     async def _scenario() -> None:
         service = AutonomyService(enabled=True, interval_s=60)

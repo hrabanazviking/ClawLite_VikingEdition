@@ -537,8 +537,12 @@ class AutonomyService:
         self._running = False
         self._cooldown_until = 0.0
         self._provider_backoff_until = 0.0
+        self._no_progress_until = 0.0
         self._provider_backoff_reason = ""
         self._provider_backoff_provider = ""
+        self._no_progress_reason = ""
+        self._last_no_progress_signature = ""
+        self._last_no_progress_snapshot_signature = ""
 
         self._ticks = 0
         self._run_attempts = 0
@@ -547,6 +551,7 @@ class AutonomyService:
         self._skipped_backlog = 0
         self._skipped_cooldown = 0
         self._skipped_provider_backoff = 0
+        self._skipped_no_progress = 0
         self._skipped_disabled = 0
         self._last_run_at = ""
         self._last_result_excerpt = ""
@@ -554,6 +559,7 @@ class AutonomyService:
         self._last_error_kind = ""
         self._consecutive_error_count = 0
         self._last_snapshot: dict[str, Any] = {}
+        self._no_progress_streak = 0
 
     def _task_snapshot(self) -> tuple[str, str]:
         task = self._task
@@ -581,6 +587,49 @@ class AutonomyService:
         if len(text) <= max_chars:
             return text
         return f"{text[: max_chars - 3]}..."
+
+    @staticmethod
+    def _stable_signature(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            return repr(value)
+
+    def _no_progress_backoff_s(self) -> float:
+        return max(30.0, min(300.0, max(self.cooldown_s, self.interval_s)))
+
+    def _clear_no_progress(self) -> None:
+        self._no_progress_until = 0.0
+        self._no_progress_reason = ""
+        self._last_no_progress_signature = ""
+        self._last_no_progress_snapshot_signature = ""
+        self._no_progress_streak = 0
+
+    def _track_no_progress(self, *, snapshot_signature: str, result: Any, now: float) -> None:
+        excerpt = self._excerpt(result)
+        if excerpt != "AUTONOMY_IDLE" and not excerpt.startswith("AUTONOMY_IDLE\n"):
+            self._clear_no_progress()
+            return
+
+        signature = self._stable_signature(
+            {
+                "snapshot": snapshot_signature,
+                "result_excerpt": "AUTONOMY_IDLE",
+            }
+        )
+        if signature == self._last_no_progress_signature:
+            self._no_progress_streak += 1
+        else:
+            self._no_progress_streak = 1
+
+        self._last_no_progress_signature = signature
+        self._last_no_progress_snapshot_signature = snapshot_signature
+        if self._no_progress_streak >= 2:
+            self._no_progress_until = max(self._no_progress_until, now + self._no_progress_backoff_s())
+            self._no_progress_reason = "repeated_idle_snapshot"
+            return
+        self._no_progress_until = 0.0
+        self._no_progress_reason = ""
 
     @staticmethod
     def _trim_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -667,6 +716,7 @@ class AutonomyService:
         try:
             now = self._now_monotonic()
             snapshot = await self._read_snapshot()
+            snapshot_signature = self._stable_signature(snapshot)
             queue = snapshot.get("queue", {}) if isinstance(snapshot.get("queue"), dict) else {}
             backlog = int(queue.get("outbound_size", 0) or 0) + int(queue.get("dead_letter_size", 0) or 0)
 
@@ -682,6 +732,11 @@ class AutonomyService:
             if not force and now < self._provider_backoff_until:
                 self._skipped_provider_backoff += 1
                 return self.status()
+            if not force and now < self._no_progress_until:
+                if snapshot_signature == self._last_no_progress_snapshot_signature:
+                    self._skipped_no_progress += 1
+                    return self.status()
+                self._clear_no_progress()
 
             if self._run_callback is None:
                 self._run_failures += 1
@@ -690,6 +745,7 @@ class AutonomyService:
                 self._last_error_kind = "error"
                 self._provider_backoff_reason = ""
                 self._provider_backoff_provider = ""
+                self._clear_no_progress()
                 self._cooldown_until = now + self.cooldown_s
                 return self.status()
 
@@ -705,6 +761,7 @@ class AutonomyService:
             self._provider_backoff_until = 0.0
             self._provider_backoff_reason = ""
             self._provider_backoff_provider = ""
+            self._track_no_progress(snapshot_signature=snapshot_signature, result=result, now=now)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -713,6 +770,7 @@ class AutonomyService:
             self._last_error = str(exc)
             error_kind, error_backoff_s, error_reason, error_provider = self._classify_run_error(exc)
             self._last_error_kind = error_kind
+            self._clear_no_progress()
             if error_backoff_s > 0.0:
                 self._provider_backoff_until = max(self._provider_backoff_until, now + error_backoff_s)
             self._provider_backoff_reason = error_reason if error_kind == "provider_backoff" else ""
@@ -770,6 +828,7 @@ class AutonomyService:
     def status(self) -> dict[str, Any]:
         cooldown_remaining_s = max(0.0, self._cooldown_until - self._now_monotonic())
         provider_backoff_remaining_s = max(0.0, self._provider_backoff_until - self._now_monotonic())
+        no_progress_backoff_remaining_s = max(0.0, self._no_progress_until - self._now_monotonic())
         task_state, task_error = self._task_snapshot()
         return {
             "running": bool(self._running and task_state == "running"),
@@ -787,6 +846,7 @@ class AutonomyService:
             "skipped_backlog": self._skipped_backlog,
             "skipped_cooldown": self._skipped_cooldown,
             "skipped_provider_backoff": self._skipped_provider_backoff,
+            "skipped_no_progress": self._skipped_no_progress,
             "skipped_disabled": self._skipped_disabled,
             "last_run_at": self._last_run_at,
             "last_result_excerpt": self._last_result_excerpt,
@@ -794,8 +854,11 @@ class AutonomyService:
             "last_error_kind": self._last_error_kind,
             "provider_backoff_reason": self._provider_backoff_reason,
             "provider_backoff_provider": self._provider_backoff_provider,
+            "no_progress_reason": self._no_progress_reason,
+            "no_progress_streak": self._no_progress_streak,
             "consecutive_error_count": self._consecutive_error_count,
             "last_snapshot": dict(self._last_snapshot),
             "cooldown_remaining_s": round(cooldown_remaining_s, 3),
             "provider_backoff_remaining_s": round(provider_backoff_remaining_s, 3),
+            "no_progress_backoff_remaining_s": round(no_progress_backoff_remaining_s, 3),
         }

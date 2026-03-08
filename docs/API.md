@@ -73,6 +73,7 @@ Scheduler diagnostics/status payloads are additive and include reliability telem
 - `heartbeat` may include trigger/reason counters, state-save counters, `consecutive_error_count`, and `state_last_error`.
 - `cron` may include load/save durability counters plus service-level execution/schedule counters; cron jobs include per-job health fields (`last_status`, `last_error`, `consecutive_failures`, `run_count`).
 - `autonomy` may include `last_error_kind`, `skipped_provider_backoff`, `provider_backoff_remaining_s`, `provider_backoff_reason`, `provider_backoff_provider`, and a trimmed provider snapshot in `last_snapshot.provider`.
+- `autonomy` may also include `skipped_no_progress`, `no_progress_reason`, `no_progress_streak`, and `no_progress_backoff_remaining_s` when the continuous loop is intentionally paused after repeated identical `AUTONOMY_IDLE` outcomes on an unchanged runtime snapshot.
 - `last_snapshot.provider` may include `suppression_reason`, `suppression_backoff_s`, and `suppression_hint` when autonomy is intentionally holding off on provider calls.
 - `supervisor` may include per-component recovery budgets and cooldown telemetry in `component_recovery`, plus aggregate `recovery_skipped_budget` counters.
 - control-plane `components` may include `subagent_maintenance`, a background sweeper loop that keeps subagent queue/run state fresh and recoverable.
@@ -125,6 +126,8 @@ Provider telemetry keys are additive and may include: `requests`, `successes`, `
 Supervisor telemetry is additive under `supervisor` and may include: `ticks`, `incident_count`, `recovery_attempts`, `recovery_success`, `recovery_failures`, `recovery_skipped_cooldown`, `component_incidents`, `last_incident`, `last_recovery_at`, `last_error`, `consecutive_error_count`, and `cooldown_active`.
 
 Autonomy telemetry is additive under `autonomy` and may include: `running`, `enabled`, `session_id`, `ticks`, `run_attempts`, `run_success`, `run_failures`, `skipped_backlog`, `skipped_cooldown`, `skipped_disabled`, `last_run_at`, `last_result_excerpt`, `last_error`, `consecutive_error_count`, `last_snapshot`, and `cooldown_remaining_s`.
+
+Autonomy telemetry may also include no-progress guard fields: `skipped_no_progress`, `no_progress_reason`, `no_progress_streak`, and `no_progress_backoff_remaining_s`.
 
 Autonomy action execution telemetry is additive under top-level `autonomy_actions` and may include: policy/profile settings (`policy`, `environment_profile`, `min_action_confidence`, degraded thresholds, audit path/limits), `totals` (`proposed`, `executed`, `succeeded`, `failed`, `blocked`, `simulated_runs`, `simulated_actions`, `explain_runs`, `policy_switches`, `parse_errors`, `rate_limited`, `cooldown_blocked`, `unknown_blocked`, `quality_blocked`, `quality_penalty_applied`, `degraded_blocked`, `audit_writes`, `audit_write_failures`), `per_action`, `last_run`, and bounded `recent_audits`.
 
