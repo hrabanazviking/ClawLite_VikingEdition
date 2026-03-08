@@ -211,6 +211,9 @@ Notes:
 - Bot/self messages are ignored.
 - Attachments are surfaced as placeholders in the forwarded text; ClawLite does not download them.
 - Discord-specific send retry knobs exist in code but are not part of the typed schema.
+- For proactive sends, prefer typed targets: `channel:<discord_channel_id>` for guild channels/threads and `user:<discord_user_id>` for DMs.
+- Bare numeric Discord targets are ambiguous. ClawLite now tries them as channel IDs first and only falls back to DM creation if Discord returns `404`.
+- Automatic replies to inbound Discord messages now route back to the originating `channel_id` and preserve native reply references when Discord provides a `message_id`.
 
 ## Email
 

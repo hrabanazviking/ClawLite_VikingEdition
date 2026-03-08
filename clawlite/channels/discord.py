@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -14,6 +15,12 @@ DISCORD_DEFAULT_API_BASE = "https://discord.com/api/v10"
 DISCORD_DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 DISCORD_DEFAULT_GATEWAY_INTENTS = 37377
 DISCORD_TYPING_INTERVAL_S = 8.0
+
+
+@dataclass(slots=True, frozen=True)
+class _DiscordSendTarget:
+    kind: str
+    value: str
 
 
 class DiscordChannel(BaseChannel):
@@ -110,6 +117,7 @@ class DiscordChannel(BaseChannel):
         self._gateway_task: asyncio.Task[Any] | None = None
         self._heartbeat_task: asyncio.Task[Any] | None = None
         self._typing_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._dm_channel_ids: dict[str, str] = {}
         self._sequence: int | None = None
         self._session_id: str = ""
         self._resume_url: str = ""
@@ -136,6 +144,54 @@ class DiscordChannel(BaseChannel):
             candidates.add(f"@{normalized_username}")
         allowed = {item.strip() for item in self.allow_from if str(item or "").strip()}
         return any(candidate in allowed for candidate in candidates)
+
+    @staticmethod
+    def _looks_like_snowflake(value: str) -> bool:
+        raw = str(value or "").strip()
+        return raw.isdigit() and len(raw) >= 5
+
+    @classmethod
+    def _parse_send_target(cls, raw: str) -> _DiscordSendTarget:
+        target = str(raw or "").strip()
+        if not target:
+            return _DiscordSendTarget(kind="", value="")
+
+        if target.startswith("<#") and target.endswith(">"):
+            return _DiscordSendTarget(kind="channel", value=target[2:-1].strip())
+        if target.startswith("<@") and target.endswith(">"):
+            return _DiscordSendTarget(
+                kind="user",
+                value=target[2:-1].strip().lstrip("!"),
+            )
+
+        lowered = target.lower()
+        if lowered.startswith("discord:"):
+            target = target.split(":", 1)[1].strip()
+            lowered = target.lower()
+
+        for prefix, kind in (
+            ("channel:", "channel"),
+            ("group:", "channel"),
+            ("user:", "user"),
+            ("dm:", "user"),
+            ("direct:", "user"),
+        ):
+            if lowered.startswith(prefix):
+                value = target[len(prefix) :].strip()
+                if kind == "channel" and ":thread:" in value:
+                    _, _, thread_id = value.partition(":thread:")
+                    thread = thread_id.strip()
+                    if thread:
+                        value = thread
+                return _DiscordSendTarget(kind=kind, value=value)
+
+        if ":thread:" in target:
+            _, _, thread_id = target.partition(":thread:")
+            thread = thread_id.strip()
+            if thread:
+                return _DiscordSendTarget(kind="channel", value=thread)
+
+        return _DiscordSendTarget(kind="ambiguous", value=target)
 
     @staticmethod
     def _parse_retry_after(raw: str) -> float | None:
@@ -195,6 +251,7 @@ class DiscordChannel(BaseChannel):
         for task in list(self._typing_tasks.values()):
             await cancel_task(task)
         self._typing_tasks.clear()
+        self._dm_channel_ids.clear()
         ws = self._ws
         self._ws = None
         if ws is not None:
@@ -210,6 +267,61 @@ class DiscordChannel(BaseChannel):
             if callable(close_fn):
                 await close_fn()
 
+    async def _post_json(
+        self,
+        *,
+        url: str,
+        payload: dict[str, Any],
+        error_prefix: str,
+    ) -> httpx.Response:
+        client = self._client
+        if client is None:
+            raise RuntimeError("discord_not_running")
+        for attempt in range(1, self.send_retry_attempts + 1):
+            try:
+                response = await client.post(url, json=payload)
+            except httpx.HTTPError as exc:
+                self._last_error = str(exc)
+                raise RuntimeError(f"{error_prefix}_request_error") from exc
+
+            if response.status_code == 429:
+                self._last_error = "http:429"
+                if attempt >= self.send_retry_attempts:
+                    raise RuntimeError(f"{error_prefix}_rate_limited")
+                retry_after = self._extract_retry_after(response)
+                await asyncio.sleep(retry_after)
+                continue
+
+            if response.status_code < 200 or response.status_code >= 300:
+                self._last_error = f"http:{response.status_code}"
+                raise RuntimeError(f"{error_prefix}_http_{response.status_code}")
+
+            return response
+
+        raise RuntimeError(f"{error_prefix}_rate_limited")
+
+    async def _ensure_dm_channel_id(self, user_id: str) -> str:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("discord user target is required")
+        cached = self._dm_channel_ids.get(normalized_user_id, "")
+        if cached:
+            return cached
+        response = await self._post_json(
+            url=f"{self.api_base}/users/@me/channels",
+            payload={"recipient_id": normalized_user_id},
+            error_prefix="discord_dm_channel",
+        )
+        try:
+            data = response.json() if response.content else {}
+        except Exception:
+            data = {}
+        channel_id = str(data.get("id", "") or "").strip()
+        if not channel_id:
+            raise RuntimeError("discord_dm_channel_invalid_response")
+        self._dm_channel_ids[normalized_user_id] = channel_id
+        return channel_id
+
     async def send(
         self,
         *,
@@ -220,14 +332,9 @@ class DiscordChannel(BaseChannel):
         if not self._running:
             raise RuntimeError("discord_not_running")
 
-        channel_id = str(target or "").strip()
-        if not channel_id:
+        resolved_target = self._parse_send_target(target)
+        if not resolved_target.value:
             raise ValueError("discord target(channel_id) is required")
-
-        url = f"{self.api_base}/channels/{channel_id}/messages"
-        client = self._client
-        if client is None:
-            raise RuntimeError("discord_not_running")
 
         payload: dict[str, Any] = {"content": str(text or "")}
         metadata_payload = dict(metadata or {})
@@ -239,48 +346,62 @@ class DiscordChannel(BaseChannel):
             or ""
         ).strip()
         if reply_to_message_id:
-            payload["message_reference"] = {"message_id": reply_to_message_id}
+            payload["message_reference"] = {
+                "message_id": reply_to_message_id,
+                "fail_if_not_exists": False,
+            }
             payload["allowed_mentions"] = {"replied_user": False}
 
+        channel_id = ""
         try:
-            for attempt in range(1, self.send_retry_attempts + 1):
+            if resolved_target.kind == "user":
+                channel_id = await self._ensure_dm_channel_id(resolved_target.value)
+            else:
+                channel_id = resolved_target.value
+
+            try:
+                response = await self._post_json(
+                    url=f"{self.api_base}/channels/{channel_id}/messages",
+                    payload=payload,
+                    error_prefix="discord_send",
+                )
+            except RuntimeError as exc:
+                should_fallback_to_dm = (
+                    str(exc) == "discord_send_http_404"
+                    and resolved_target.kind == "ambiguous"
+                    and self._looks_like_snowflake(resolved_target.value)
+                )
+                if not should_fallback_to_dm:
+                    raise
+                original_exc = exc
                 try:
-                    response = await client.post(url, json=payload)
-                except httpx.HTTPError as exc:
-                    self._last_error = str(exc)
-                    raise RuntimeError("discord_send_request_error") from exc
+                    channel_id = await self._ensure_dm_channel_id(resolved_target.value)
+                except Exception:
+                    raise original_exc
+                response = await self._post_json(
+                    url=f"{self.api_base}/channels/{channel_id}/messages",
+                    payload=payload,
+                    error_prefix="discord_send",
+                )
 
-                if response.status_code == 429:
-                    self._last_error = "http:429"
-                    if attempt >= self.send_retry_attempts:
-                        raise RuntimeError("discord_send_rate_limited")
-                    retry_after = self._extract_retry_after(response)
-                    await asyncio.sleep(retry_after)
-                    continue
-
-                if response.status_code < 200 or response.status_code >= 300:
-                    self._last_error = f"http:{response.status_code}"
-                    raise RuntimeError(f"discord_send_http_{response.status_code}")
-
-                if response.content:
-                    try:
-                        data = response.json()
-                    except Exception:
-                        data = {}
-                else:
+            if response.content:
+                try:
+                    data = response.json()
+                except Exception:
                     data = {}
-                message_id = str(data.get("id", "") or "").strip()
-                if not message_id:
-                    digest = hashlib.sha256(
-                        f"{channel_id}:{text}".encode("utf-8")
-                    ).hexdigest()[:16]
-                    message_id = f"fallback-{digest}"
-                self._last_error = ""
-                return f"discord:sent:{message_id}"
+            else:
+                data = {}
+            message_id = str(data.get("id", "") or "").strip()
+            if not message_id:
+                digest = hashlib.sha256(
+                    f"{channel_id}:{text}".encode("utf-8")
+                ).hexdigest()[:16]
+                message_id = f"fallback-{digest}"
+            self._last_error = ""
+            return f"discord:sent:{message_id}"
         finally:
-            await self._stop_typing(channel_id)
-
-        raise RuntimeError("discord_send_rate_limited")
+            if channel_id:
+                await self._stop_typing(channel_id)
 
     async def _gateway_runner(self) -> None:
         backoff_s = self.gateway_backoff_base_s

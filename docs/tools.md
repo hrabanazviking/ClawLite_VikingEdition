@@ -241,6 +241,16 @@ Send a proactive Telegram reply:
 
 ```json
 {"name":"message","arguments":{"channel":"telegram","target":"123456789","text":"Build finished.","action":"send"}}
+
+For Discord, prefer typed targets:
+
+```json
+{"name":"message","arguments":{"channel":"discord","target":"channel:112233445566778899","text":"Build finished.","action":"send"}}
+```
+
+```json
+{"name":"message","arguments":{"channel":"discord","target":"user:746561804100042812","text":"Can you review this?","action":"send"}}
+```
 ```
 
 Call an MCP tool:

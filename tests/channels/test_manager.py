@@ -568,6 +568,35 @@ def test_channel_manager_target_from_session_id_parses_telegram_private_thread_f
     assert target == "42:7"
 
 
+def test_channel_manager_dispatch_uses_discord_channel_id_and_reply_metadata() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("discord", FakeChannel)
+        await mgr.start({"channels": {"discord": {"enabled": True}}})
+
+        discord = mgr._channels["discord"]
+        await discord.emit(
+            session_id="discord:746561804100042812",
+            user_id="owner-user",
+            text="hello",
+            metadata={
+                "channel": "discord",
+                "channel_id": "112233445566778899",
+                "message_id": "998877665544332211",
+            },
+        )
+        await asyncio.sleep(0.1)
+
+        assert discord.sent
+        assert discord.sent[0][0] == "112233445566778899"
+        assert discord.sent[0][2]["reply_to_message_id"] == "998877665544332211"
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_dispatch_preserves_telegram_thread_target() -> None:
     async def _scenario() -> None:
         bus = MessageQueue()
@@ -586,6 +615,36 @@ def test_channel_manager_dispatch_preserves_telegram_thread_target() -> None:
 
         assert telegram.sent
         assert telegram.sent[0][0] == "42:9"
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_keeps_discord_typing_active_for_full_dispatch() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        engine = TypingLifecycleEngine()
+        mgr = ChannelManager(bus=bus, engine=engine)
+        mgr.register("discord", FakeTelegramTypingChannel)
+        await mgr.start({"channels": {"discord": {"enabled": True}}})
+
+        discord = mgr._channels["discord"]
+        await discord.emit(
+            session_id="discord:746561804100042812",
+            user_id="owner-user",
+            text="hello",
+            metadata={"channel": "discord", "channel_id": "112233445566778899"},
+        )
+        await asyncio.wait_for(engine.started.wait(), timeout=1.0)
+
+        assert discord.typing_started == [("112233445566778899", None)]
+        assert discord.typing_stopped == []
+
+        engine.release.set()
+        await asyncio.sleep(0.1)
+
+        assert discord.typing_stopped == [("112233445566778899", None)]
 
         await mgr.stop()
 

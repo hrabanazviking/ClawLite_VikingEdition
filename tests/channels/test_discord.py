@@ -141,6 +141,125 @@ def test_discord_send_retries_429_using_retry_after(monkeypatch) -> None:
     asyncio.run(_scenario())
 
 
+def test_discord_send_user_target_creates_dm_channel(monkeypatch) -> None:
+    async def _scenario() -> None:
+        client = _FakeClient(
+            [
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/users/@me/channels",
+                    payload={"id": "dm-123"},
+                ),
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/channels/dm-123/messages",
+                    payload={"id": "m-dm-1"},
+                ),
+            ]
+        )
+
+        def _factory(*args, **kwargs):
+            del args, kwargs
+            return client
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+
+        channel = DiscordChannel(config={"token": "bot-token"})
+        await channel.start()
+
+        out = await channel.send(target="user:746561804100042812", text="hello")
+
+        await channel.stop()
+
+        assert out == "discord:sent:m-dm-1"
+        assert client.posts[0] == (
+            "https://discord.com/api/v10/users/@me/channels",
+            {"recipient_id": "746561804100042812"},
+        )
+        assert client.posts[1][0] == "https://discord.com/api/v10/channels/dm-123/messages"
+        assert client.posts[1][1]["content"] == "hello"
+
+    asyncio.run(_scenario())
+
+
+def test_discord_send_channel_target_accepts_prefix(monkeypatch) -> None:
+    async def _scenario() -> None:
+        client = _FakeClient(
+            [
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/channels/123/messages",
+                    payload={"id": "m-chan-1"},
+                )
+            ]
+        )
+
+        def _factory(*args, **kwargs):
+            del args, kwargs
+            return client
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+
+        channel = DiscordChannel(config={"token": "bot-token"})
+        await channel.start()
+
+        out = await channel.send(target="channel:123", text="hello")
+
+        await channel.stop()
+
+        assert out == "discord:sent:m-chan-1"
+        assert client.posts == [
+            ("https://discord.com/api/v10/channels/123/messages", {"content": "hello"})
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_discord_send_ambiguous_target_404_falls_back_to_dm(monkeypatch) -> None:
+    async def _scenario() -> None:
+        client = _FakeClient(
+            [
+                _response(
+                    status=404,
+                    url="https://discord.com/api/v10/channels/746561804100042812/messages",
+                ),
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/users/@me/channels",
+                    payload={"id": "dm-404"},
+                ),
+                _response(
+                    status=200,
+                    url="https://discord.com/api/v10/channels/dm-404/messages",
+                    payload={"id": "m-fallback"},
+                ),
+            ]
+        )
+
+        def _factory(*args, **kwargs):
+            del args, kwargs
+            return client
+
+        monkeypatch.setattr(httpx, "AsyncClient", _factory)
+
+        channel = DiscordChannel(config={"token": "bot-token"})
+        await channel.start()
+
+        out = await channel.send(target="746561804100042812", text="hello")
+
+        await channel.stop()
+
+        assert out == "discord:sent:m-fallback"
+        assert client.posts[0][0] == "https://discord.com/api/v10/channels/746561804100042812/messages"
+        assert client.posts[1] == (
+            "https://discord.com/api/v10/users/@me/channels",
+            {"recipient_id": "746561804100042812"},
+        )
+        assert client.posts[2][0] == "https://discord.com/api/v10/channels/dm-404/messages"
+
+    asyncio.run(_scenario())
+
+
 def test_discord_gateway_loop_identifies_and_emits_message() -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict[str, Any]]] = []

@@ -1446,6 +1446,7 @@ class ChannelManager:
                 pass
 
         target = self._target_from_event(event)
+        reply_metadata = self._reply_metadata_from_event(event)
         text = f"Stopped {cancelled} active task(s); cancelled {cancelled_subagents} subagent run(s)."
         await self._publish_and_send(
             event=OutboundEvent(
@@ -1457,13 +1458,15 @@ class ChannelManager:
                     "_control": "stop",
                     "cancelled_tasks": cancelled,
                     "cancelled_subagents": cancelled_subagents,
-                },
+                }
+                | reply_metadata,
             )
         )
 
     async def _dispatch_event(self, event: InboundEvent) -> None:
         bind_event("channel.dispatch", session=event.session_id, channel=event.channel).debug("dispatch processing target={}", event.user_id)
         target = self._target_from_event(event)
+        reply_metadata = self._reply_metadata_from_event(event)
         activity_channel, activity_chat_id, activity_thread_id = self._dispatch_typing_context(event)
         if activity_channel is not None and activity_chat_id:
             self._start_dispatch_typing(
@@ -1495,7 +1498,7 @@ class ChannelManager:
                     session_id=event.session_id,
                     target=target,
                     text=message,
-                    metadata=metadata,
+                    metadata=metadata | reply_metadata,
                 )
             )
 
@@ -1523,7 +1526,8 @@ class ChannelManager:
                     metadata={
                         "_error": "dispatch_engine_exception",
                         "error_type": type(exc).__name__,
-                    },
+                    }
+                    | reply_metadata,
                 )
             )
             return
@@ -1554,7 +1558,7 @@ class ChannelManager:
                 session_id=event.session_id,
                 target=target,
                 text=result.text,
-                metadata={"model": getattr(result, "model", "")},
+                metadata={"model": getattr(result, "model", "")} | reply_metadata,
             )
         )
 
@@ -1827,8 +1831,29 @@ class ChannelManager:
         return self._channels.get(str(name or "").strip().lower())
 
     @staticmethod
+    def _base_target_from_event(event: InboundEvent) -> str:
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        target = str(
+            metadata.get("chat_id")
+            or metadata.get("channel_id")
+            or event.user_id
+            or ""
+        ).strip()
+        return target
+
+    @staticmethod
+    def _reply_metadata_from_event(event: InboundEvent) -> dict[str, Any]:
+        if str(event.channel or "").strip().lower() != "discord":
+            return {}
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        message_id = str(metadata.get("message_id", "") or "").strip()
+        if not message_id:
+            return {}
+        return {"reply_to_message_id": message_id}
+
+    @staticmethod
     def _target_from_event(event: InboundEvent) -> str:
-        target = str(event.metadata.get("chat_id") or event.user_id)
+        target = ChannelManager._base_target_from_event(event)
         if event.channel != "telegram":
             return target
         thread_raw = event.metadata.get("message_thread_id")
@@ -1852,7 +1877,7 @@ class ChannelManager:
         if not callable(getattr(channel, "_stop_typing_keepalive", None)):
             return None, "", None
 
-        chat_id = str(event.metadata.get("chat_id") or event.user_id or "").strip()
+        chat_id = self._base_target_from_event(event)
         if not chat_id:
             return None, "", None
         thread_raw = event.metadata.get("message_thread_id")
