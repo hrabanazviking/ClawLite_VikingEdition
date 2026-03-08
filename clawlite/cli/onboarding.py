@@ -446,6 +446,15 @@ _SECTIONS = [
     ("done",      "Done",              "Save config and exit"),
 ]
 
+_FLOW_CHOICES = {
+    "1": "quickstart",
+    "quickstart": "quickstart",
+    "quick-start": "quickstart",
+    "2": "advanced",
+    "advanced": "advanced",
+    "manual": "advanced",
+}
+
 
 def _print_banner(console: Console) -> None:
     console.print("")
@@ -472,6 +481,19 @@ def _section_menu(console: Console, done_label: str = "Done") -> str:
         console.print(f"  [red]Invalid choice:[/] {raw!r}  (enter a number 1-{len(_SECTIONS)})")
 
 
+def _flow_menu(console: Console) -> str:
+    console.print("  [bold]Choose your setup flow:[/]\n")
+    console.print("  [dim]1.[/]  [bold]QuickStart[/]  [dim]- provider, secure local gateway, optional Telegram, workspace[/]")
+    console.print("  [dim]2.[/]  [bold]Advanced[/]    [dim]- configure sections manually[/]")
+    console.print("")
+    while True:
+        raw = Prompt.ask("  Flow", default="1").strip().lower()
+        flow = _FLOW_CHOICES.get(raw)
+        if flow is not None:
+            return flow
+        console.print("  [red]Invalid choice:[/] enter 1 for QuickStart or 2 for Advanced")
+
+
 def _probe_result(console: Console, probe: dict[str, Any], *, label: str) -> None:
     ok = bool(probe.get("ok", False))
     icon = "[green]✓[/]" if ok else "[red]✗[/]"
@@ -494,7 +516,12 @@ def _section_header(console: Console, title: str, hint: str = "") -> None:
     console.print(f"  [bold cyan]{sep}[/]\n")
 
 
-def _configure_model(console: Console, config: AppConfig) -> tuple[str, str, str, str, dict[str, Any]]:
+def _configure_model(
+    console: Console,
+    config: AppConfig,
+    *,
+    allow_continue_on_probe_failure: bool = True,
+) -> tuple[str, str, str, str, dict[str, Any]]:
     """Interactive model section. Returns (provider, api_key, base_url, model, probe)."""
     _section_header(console, "Model / Provider", "pick your AI backend")
 
@@ -536,13 +563,15 @@ def _configure_model(console: Console, config: AppConfig) -> tuple[str, str, str
     else:
         base_url = Prompt.ask(f"  {provider} base URL", default=base_url)
 
-    selected_model = Prompt.ask(f"  Model", default=model_default)
+    selected_model = Prompt.ask("  Model", default=model_default)
 
     console.print("\n  [dim]Probing provider...[/]")
     probe = probe_provider(provider, api_key=api_key, base_url=base_url, model=selected_model)
     _probe_result(console, probe, label=provider)
 
     if not bool(probe.get("ok", False)):
+        if not allow_continue_on_probe_failure:
+            raise KeyboardInterrupt
         if not Confirm.ask("\n  Probe failed — continue anyway?", default=False):
             raise KeyboardInterrupt
     return provider, api_key, base_url, selected_model, probe
@@ -580,7 +609,34 @@ def _configure_gateway(console: Console, config: AppConfig) -> None:
     console.print(f"  [dim]Gateway URL:[/]   http://{config.gateway.host}:{config.gateway.port}\n")
 
 
-def _configure_channels(console: Console, config: AppConfig) -> dict[str, Any]:
+def _configure_gateway_quickstart(console: Console, config: AppConfig) -> None:
+    _section_header(console, "Gateway", "QuickStart defaults")
+
+    host = str(config.gateway.host or "").strip() or "127.0.0.1"
+    port = int(config.gateway.port or 8787)
+    auth_mode = str(config.gateway.auth.mode or "").strip().lower()
+    if auth_mode not in {"optional", "required"}:
+        auth_mode = "required"
+
+    config.gateway.host = host
+    config.gateway.port = max(1, port)
+    config.gateway.auth.mode = auth_mode
+    token = ensure_gateway_token(config)
+
+    console.print("  [green]✓[/] QuickStart keeps the gateway local and token-protected.")
+    console.print(f"  [dim]Host:[/]          {config.gateway.host}")
+    console.print(f"  [dim]Port:[/]          {config.gateway.port}")
+    console.print(f"  [dim]Auth mode:[/]     {config.gateway.auth.mode}")
+    console.print(f"  [dim]Gateway token:[/] {_mask_secret(token, keep=8)}")
+    console.print(f"  [dim]Gateway URL:[/]   http://{config.gateway.host}:{config.gateway.port}\n")
+
+
+def _configure_channels(
+    console: Console,
+    config: AppConfig,
+    *,
+    allow_continue_on_probe_failure: bool = True,
+) -> dict[str, Any]:
     _section_header(console, "Channels", "messaging integrations")
 
     telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
@@ -594,6 +650,8 @@ def _configure_channels(console: Console, config: AppConfig) -> dict[str, Any]:
         telegram_probe = probe_telegram(telegram_token)
         _probe_result(console, telegram_probe, label="Telegram")
         if not bool(telegram_probe.get("ok", False)):
+            if not allow_continue_on_probe_failure:
+                raise KeyboardInterrupt
             if not Confirm.ask("\n  Probe failed — continue anyway?", default=False):
                 raise KeyboardInterrupt
         config.channels.telegram.enabled = True
@@ -614,8 +672,139 @@ def _configure_workspace(console: Console, config: AppConfig, *, overwrite: bool
         for f in generated_files[:5]:
             console.print(f"    [dim]{f}[/]")
     else:
-        console.print(f"  [dim]Workspace already exists — no files changed.[/]")
+        console.print("  [dim]Workspace already exists — no files changed.[/]")
     return generated_files
+
+
+def _run_quickstart_flow(
+    console: Console,
+    config: AppConfig,
+    *,
+    overwrite: bool,
+    variables: dict[str, str],
+) -> dict[str, Any]:
+    console.print(
+        Panel(
+            "[bold]QuickStart[/] sets up a local gateway, validates your provider live, "
+            "offers Telegram, and generates the workspace files in one guided pass.",
+            border_style="cyan",
+            padding=(0, 2),
+        )
+    )
+
+    provider_key = ""
+    provider_probe: dict[str, Any] = {}
+    provider_persisted: dict[str, Any] = {}
+    telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
+
+    prov, api_key, base_url, sel_model, provider_probe = _configure_model(
+        console,
+        config,
+        allow_continue_on_probe_failure=False,
+    )
+    provider_key = prov
+    provider_persisted = apply_provider_selection(
+        config,
+        provider=prov,
+        api_key=api_key,
+        base_url=base_url,
+        model=sel_model,
+    )
+
+    _configure_gateway_quickstart(console, config)
+    telegram_probe = _configure_channels(
+        console,
+        config,
+        allow_continue_on_probe_failure=False,
+    )
+    generated_files = _configure_workspace(console, config, overwrite=overwrite, variables=variables)
+
+    return {
+        "provider_key": provider_key,
+        "provider_probe": provider_probe,
+        "provider_persisted": provider_persisted,
+        "telegram_probe": telegram_probe,
+        "generated_files": generated_files,
+        "visited_sections": ["model", "gateway", "channels", "workspace"],
+    }
+
+
+def _run_advanced_flow(
+    console: Console,
+    config: AppConfig,
+    *,
+    overwrite: bool,
+    variables: dict[str, str],
+) -> dict[str, Any]:
+    provider_key: str = ""
+    provider_probe: dict[str, Any] = {}
+    telegram_probe: dict[str, Any] = {"ok": True, "status_code": 0, "token_masked": "", "error": ""}
+    generated_files: list[Any] = []
+    provider_persisted: dict[str, Any] = {}
+    visited: set[str] = set()
+
+    while True:
+        console.print("")
+        choice = _section_menu(console)
+
+        if choice == "done":
+            if not visited:
+                console.print("  [yellow]No sections configured yet.[/]")
+                if not Confirm.ask("  Exit without saving?", default=False):
+                    continue
+            break
+
+        if choice == "model":
+            try:
+                prov, api_key, base_url, sel_model, probe = _configure_model(console, config)
+                provider_key = prov
+                provider_probe = probe
+                provider_persisted = apply_provider_selection(
+                    config,
+                    provider=prov,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=sel_model,
+                )
+                visited.add("model")
+                console.print("  [green]✓[/] Model section saved.\n")
+            except KeyboardInterrupt:
+                console.print("  [yellow]Model section cancelled.[/]")
+            continue
+
+        if choice == "gateway":
+            _configure_gateway(console, config)
+            visited.add("gateway")
+            console.print("  [green]✓[/] Gateway section saved.\n")
+            continue
+
+        if choice == "channels":
+            try:
+                telegram_probe = _configure_channels(console, config)
+                visited.add("channels")
+                console.print("  [green]✓[/] Channels section saved.\n")
+            except KeyboardInterrupt:
+                console.print("  [yellow]Channels section cancelled.[/]")
+            continue
+
+        if choice == "workspace":
+            generated_files = _configure_workspace(
+                console,
+                config,
+                overwrite=overwrite,
+                variables=variables,
+            )
+            visited.add("workspace")
+            console.print("  [green]✓[/] Workspace section saved.\n")
+
+    return {
+        "provider_key": provider_key,
+        "provider_probe": provider_probe,
+        "provider_persisted": provider_persisted,
+        "telegram_probe": telegram_probe,
+        "generated_files": generated_files,
+        "visited_sections": sorted(visited),
+    }
 
 
 def run_onboarding_wizard(
@@ -642,61 +831,34 @@ def run_onboarding_wizard(
         console.print(
             Panel(
                 "[bold]Welcome to ClawLite![/]  This wizard helps you configure your agent.\n"
-                "[dim]Navigate sections below. Press Ctrl+C at any time to cancel.[/]",
+                "[dim]Choose QuickStart for the guided path or Advanced to configure sections manually. "
+                "Press Ctrl+C at any time to cancel.[/]",
                 border_style="cyan",
                 padding=(0, 2),
             )
         )
-
-        while True:
-            console.print("")
-            choice = _section_menu(console)
-
-            if choice == "done":
-                if not visited:
-                    console.print("  [yellow]No sections configured yet.[/]")
-                    if not Confirm.ask("  Exit without saving?", default=False):
-                        continue
-                break
-
-            elif choice == "model":
-                try:
-                    prov, api_key, base_url, sel_model, probe = _configure_model(console, config)
-                    provider_key = prov
-                    provider_probe = probe
-                    provider_persisted = apply_provider_selection(
-                        config,
-                        provider=prov,
-                        api_key=api_key,
-                        base_url=base_url,
-                        model=sel_model,
-                    )
-                    visited.add("model")
-                    console.print("  [green]✓[/] Model section saved.\n")
-                except KeyboardInterrupt:
-                    console.print("  [yellow]Model section cancelled.[/]")
-
-            elif choice == "gateway":
-                _configure_gateway(console, config)
-                visited.add("gateway")
-                console.print("  [green]✓[/] Gateway section saved.\n")
-
-            elif choice == "channels":
-                try:
-                    telegram_probe = _configure_channels(console, config)
-                    visited.add("channels")
-                    console.print("  [green]✓[/] Channels section saved.\n")
-                except KeyboardInterrupt:
-                    console.print("  [yellow]Channels section cancelled.[/]")
-
-            elif choice == "workspace":
-                generated_files = _configure_workspace(
-                    console, config,
-                    overwrite=overwrite,
-                    variables=variables or {},
-                )
-                visited.add("workspace")
-                console.print("  [green]✓[/] Workspace section saved.\n")
+        flow = _flow_menu(console)
+        flow_result = (
+            _run_quickstart_flow(
+                console,
+                config,
+                overwrite=overwrite,
+                variables=variables or {},
+            )
+            if flow == "quickstart"
+            else _run_advanced_flow(
+                console,
+                config,
+                overwrite=overwrite,
+                variables=variables or {},
+            )
+        )
+        provider_key = str(flow_result.get("provider_key", "") or "")
+        provider_probe = dict(flow_result.get("provider_probe", {}) or {})
+        telegram_probe = dict(flow_result.get("telegram_probe", telegram_probe) or {})
+        generated_files = list(flow_result.get("generated_files", []) or [])
+        provider_persisted = dict(flow_result.get("provider_persisted", {}) or {})
+        visited = set(flow_result.get("visited_sections", []) or [])
 
         # Ensure gateway token always exists
         generated_token = ensure_gateway_token(config)
@@ -715,6 +877,7 @@ def run_onboarding_wizard(
                 f"[bold green]🦊 ClawLite is ready![/]\n\n"
                 f"  [bold]Gateway URL:[/]   {gateway_url}\n"
                 f"  [bold]Token:[/]         {token_display}\n"
+                f"  [bold]Flow:[/]          {flow}\n"
                 f"  [bold]Provider:[/]      {provider_display} / {model_display}\n"
                 f"  [bold]Telegram:[/]      {tg_status}\n"
                 f"  [bold]Sections:[/]      {sections_done}\n"
@@ -730,6 +893,7 @@ def run_onboarding_wizard(
         return {
             "ok": True,
             "mode": "wizard",
+            "flow": flow,
             "saved_path": str(saved_path),
             "visited_sections": sorted(visited),
             "persisted": {
@@ -776,5 +940,6 @@ def run_onboarding_wizard(
         return {
             "ok": False,
             "mode": "wizard",
+            "flow": "cancelled",
             "error": "cancelled",
         }

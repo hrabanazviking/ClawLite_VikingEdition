@@ -273,10 +273,12 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     )
 
     # New section-menu flow:
+    # Flow -> "2" (advanced)
     # Menu → "1" (model), then provider/key/model prompts
     # Menu → "2" (gateway), then host/port/auth prompts
     # Menu → "5" (done)
     prompt_answers = iter([
+        "2",                      # flow menu: advanced
         "1",                      # section menu: model
         "openai",                 # provider
         "sk-openai-123456",       # api key
@@ -331,6 +333,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
     )
 
     assert payload["ok"] is True
+    assert payload["flow"] == "advanced"
     assert "model" in payload["visited_sections"]
     assert "gateway" in payload["visited_sections"]
     assert payload["persisted"]["provider"]["model"] == "openai/gpt-4.1-mini"
@@ -357,9 +360,11 @@ def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(mon
     )
 
     # New section-menu flow:
+    # Flow -> "2" (advanced)
     # Menu → "3" (channels), Confirm "Enable Telegram?" → False
     # Menu → "5" (done)
     prompt_answers = iter([
+        "2",   # flow menu: advanced
         "3",   # section menu: channels
         "5",   # section menu: done
     ])
@@ -391,8 +396,78 @@ def test_run_onboarding_wizard_disables_existing_telegram_when_user_declines(mon
     )
 
     assert payload["ok"] is True
+    assert payload["flow"] == "advanced"
     assert "channels" in payload["visited_sections"]
     assert payload["persisted"]["telegram"]["enabled"] is False
     assert cfg.channels.telegram.enabled is False
     # token preserved — user only disabled, didn't clear it
     assert cfg.channels.telegram.token == "123:ABC"
+
+
+def test_run_onboarding_wizard_quickstart_uses_guided_defaults(monkeypatch, tmp_path) -> None:
+    cfg = AppConfig.from_dict(
+        {
+            "workspace_path": str(tmp_path / "workspace"),
+            "provider": {"model": "openai/gpt-4o-mini", "litellm_base_url": "https://api.openai.com/v1"},
+        }
+    )
+
+    prompt_answers = iter([
+        "1",                    # flow menu: quickstart
+        "openai",               # provider
+        "sk-openai-123456",     # api key
+        "openai/gpt-4.1-mini",  # model
+    ])
+    confirm_answers = iter([False])
+
+    def _fake_prompt_ask(*args, **kwargs):
+        return next(prompt_answers)
+
+    def _fake_confirm_ask(*args, **kwargs):
+        return next(confirm_answers)
+
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
+    monkeypatch.setattr("clawlite.cli.onboarding.Confirm.ask", _fake_confirm_ask)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_provider",
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0: {
+            "ok": True,
+            "status_code": 200,
+            "provider": provider,
+            "family": "openai_compatible",
+            "recommended_model": "openai/gpt-4o-mini",
+            "recommended_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
+            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
+            "base_url": base_url,
+            "api_key_masked": "********3456",
+            "error": "",
+            "hints": [],
+        },
+    )
+
+    class _FakeWorkspaceLoader:
+        def __init__(self, workspace_path):
+            self.workspace_path = workspace_path
+
+        def bootstrap(self, *, overwrite, variables):
+            return [Path(self.workspace_path) / "IDENTITY.md", Path(self.workspace_path) / "BOOTSTRAP.md"]
+
+    monkeypatch.setattr("clawlite.cli.onboarding.WorkspaceLoader", _FakeWorkspaceLoader)
+
+    payload = run_onboarding_wizard(
+        cfg,
+        config_path=tmp_path / "config.json",
+        overwrite=True,
+        variables={"assistant_name": "Fox"},
+    )
+
+    assert payload["ok"] is True
+    assert payload["flow"] == "quickstart"
+    assert payload["visited_sections"] == ["channels", "gateway", "model", "workspace"]
+    assert payload["persisted"]["provider"]["model"] == "openai/gpt-4.1-mini"
+    assert payload["persisted"]["gateway"]["host"] == "127.0.0.1"
+    assert payload["persisted"]["gateway"]["port"] == 8787
+    assert payload["persisted"]["gateway"]["auth_mode"] == "required"
+    assert payload["persisted"]["telegram"]["enabled"] is False
+    assert len(payload["workspace"]["created_files"]) == 2
+    assert payload["final"]["gateway_token"]
