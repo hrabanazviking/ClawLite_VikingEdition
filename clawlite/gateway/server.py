@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hmac
+import html
 import json
 import time
 import uuid
@@ -479,24 +480,123 @@ class WebSocketTelemetry:
             }
 
 
-ROOT_ENTRYPOINT_HTML = """<!doctype html>
+def _render_root_entrypoint_html(*, ready: bool, phase: str, auth: dict[str, Any]) -> str:
+    safe_phase = html.escape(str(phase or "created"))
+    auth_mode = html.escape(str(auth.get("mode", "off") or "off"))
+    auth_posture = html.escape(str(auth.get("posture", "open") or "open"))
+    header_name = html.escape(str(auth.get("header_name", "Authorization") or "Authorization"))
+    query_param = html.escape(str(auth.get("query_param", "token") or "token"))
+    ready_label = "ready" if ready else "starting"
+    ready_class = "ready" if ready else "pending"
+    token_configured = bool(auth.get("token_configured", False))
+    loopback_open = bool(auth.get("allow_loopback_without_auth", False))
+
+    return f"""<!doctype html>
 <html lang=\"en\">
   <head>
     <meta charset=\"utf-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>ClawLite Gateway</title>
+    <style>
+      :root {{
+        color-scheme: light;
+        --bg: #f6f7f2;
+        --panel: rgba(255, 255, 255, 0.9);
+        --text: #1c261d;
+        --muted: #556257;
+        --line: rgba(28, 38, 29, 0.12);
+        --accent: #2e6b4f;
+        --accent-soft: rgba(46, 107, 79, 0.1);
+        --warn: #8b5e1a;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(119, 160, 103, 0.18), transparent 28%),
+          linear-gradient(180deg, #fbfcf8 0%, var(--bg) 100%);
+      }}
+      main {{ max-width: 960px; margin: 0 auto; padding: 32px 20px 48px; }}
+      .hero {{
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 24px;
+        box-shadow: 0 20px 60px rgba(28, 38, 29, 0.08);
+      }}
+      h1, h2, p {{ margin: 0; }}
+      h1 {{ font-family: "IBM Plex Serif", Georgia, serif; font-size: clamp(2rem, 4vw, 3rem); }}
+      .lede {{ margin-top: 12px; color: var(--muted); max-width: 48rem; line-height: 1.55; }}
+      .status-grid, .endpoint-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+        margin-top: 22px;
+      }}
+      .card {{
+        background: rgba(255, 255, 255, 0.78);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+      }}
+      .label {{ font-size: 0.82rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }}
+      .value {{ margin-top: 8px; font-size: 1.1rem; font-weight: 600; }}
+      .ready {{ color: var(--accent); }}
+      .pending {{ color: var(--warn); }}
+      section {{ margin-top: 22px; }}
+      h2 {{ font-size: 1.05rem; margin-bottom: 12px; }}
+      code {{
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+        background: rgba(28, 38, 29, 0.05);
+        padding: 0.1rem 0.35rem;
+        border-radius: 6px;
+      }}
+      a {{ color: var(--accent); text-decoration: none; }}
+      a:hover {{ text-decoration: underline; }}
+      .endpoint-card code {{ display: inline-block; margin-bottom: 8px; }}
+      .endpoint-card p {{ color: var(--muted); line-height: 1.45; }}
+      .hint {{
+        margin-top: 18px;
+        padding: 14px 16px;
+        background: var(--accent-soft);
+        border-radius: 16px;
+        color: var(--muted);
+      }}
+    </style>
   </head>
   <body>
-    <h1>ClawLite Gateway</h1>
-    <p>Available endpoints:</p>
-    <ul>
-      <li>GET /health</li>
-      <li>GET /v1/status, GET /api/status</li>
-      <li>GET /v1/tools/catalog, GET /api/tools/catalog</li>
-      <li>POST /v1/chat, POST /api/message</li>
-      <li>GET /api/token</li>
-      <li>WS /v1/ws, WS /ws</li>
-    </ul>
+    <main>
+      <div class=\"hero\">
+        <p class=\"label\">Gateway Control Plane</p>
+        <h1>ClawLite Gateway</h1>
+        <p class=\"lede\">Lightweight operational entrypoint for health, status, tools, chat, and WebSocket access. Use this page as the local hatch before opening the dashboard or scripting against the API.</p>
+
+        <div class=\"status-grid\">
+          <div class=\"card\"><div class=\"label\">Phase</div><div class=\"value\">{safe_phase}</div></div>
+          <div class=\"card\"><div class=\"label\">Readiness</div><div class=\"value {ready_class}\">{ready_label}</div></div>
+          <div class=\"card\"><div class=\"label\">Auth Mode</div><div class=\"value\">{auth_mode}</div></div>
+          <div class=\"card\"><div class=\"label\">Auth Posture</div><div class=\"value\">{auth_posture}</div></div>
+        </div>
+
+        <section>
+          <h2>Available endpoints</h2>
+          <div class=\"endpoint-grid\">
+            <div class=\"card endpoint-card\"><code>GET /health</code><p>Fast readiness probe for local checks and process supervision.</p></div>
+            <div class=\"card endpoint-card\"><code>GET /v1/status</code>, <code>GET /api/status</code><p>Control-plane status, component state, and auth posture.</p></div>
+            <div class=\"card endpoint-card\"><code>GET /v1/tools/catalog</code>, <code>GET /api/tools/catalog</code><p>Registered tool catalog for clients and dashboards.</p></div>
+            <div class=\"card endpoint-card\"><code>POST /v1/chat</code>, <code>POST /api/message</code><p>HTTP chat entrypoint for request/response agent calls.</p></div>
+            <div class=\"card endpoint-card\"><code>GET /api/token</code><p>Masked token metadata and auth transport names after control auth passes.</p></div>
+            <div class=\"card endpoint-card\"><code>WS /v1/ws</code>, <code>WS /ws</code><p>Main WebSocket channel for the dashboard and live clients.</p></div>
+          </div>
+        </section>
+
+        <div class=\"hint\">
+          Auth transport: header <code>{header_name}</code> or query param <code>{query_param}</code>. Token configured: <code>{str(token_configured).lower()}</code>. Loopback bypass: <code>{str(loopback_open).lower()}</code>.
+        </div>
+      </div>
+    </main>
   </body>
 </html>
 """
@@ -4486,7 +4586,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def root() -> HTMLResponse:
-        return HTMLResponse(content=ROOT_ENTRYPOINT_HTML, status_code=200)
+        control_plane = _control_plane_payload()
+        return HTMLResponse(
+            content=_render_root_entrypoint_html(
+                ready=bool(control_plane.ready),
+                phase=str(control_plane.phase),
+                auth=dict(control_plane.auth),
+            ),
+            status_code=200,
+        )
 
     return app
 

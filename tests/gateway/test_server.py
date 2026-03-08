@@ -1750,10 +1750,20 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert root.status_code == 200
         body = root.text
         assert "<h1>ClawLite Gateway</h1>" in body
-        assert "GET /v1/status, GET /api/status" in body
-        assert "GET /v1/tools/catalog, GET /api/tools/catalog" in body
-        assert "POST /v1/chat, POST /api/message" in body
-        assert "WS /v1/ws, WS /ws" in body
+        assert "Gateway Control Plane" in body
+        assert "Lightweight operational entrypoint" in body
+        assert "Phase" in body
+        assert "Readiness" in body
+        assert "Auth transport" in body
+        assert "GET /v1/status" in body
+        assert "GET /api/status" in body
+        assert "GET /v1/tools/catalog" in body
+        assert "GET /api/tools/catalog" in body
+        assert "POST /v1/chat" in body
+        assert "POST /api/message" in body
+        assert "GET /api/token" in body
+        assert "WS /v1/ws" in body
+        assert "WS /ws" in body
 
 
 def test_gateway_tools_catalog_http_endpoints_return_expected_shape(tmp_path: Path) -> None:
