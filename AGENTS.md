@@ -1,5 +1,11 @@
-# AGENTS.md - ClawLite Repo Guide
-This guide is for coding agents working in `/root/projetos/ClawLite`.
+# AGENTS.md — ClawLite Repo Guide
+
+- Repo: https://github.com/renan/ClawLite (update with real URL)
+- In chat replies, file references must be repo-root relative only (example: `clawlite/channels/telegram.py:80`); never absolute paths.
+- GitHub issues/comments/PR bodies: use literal multiline strings or `-F - <<'EOF'` for real newlines; never embed `\n` as text.
+- GitHub comment footgun: never use `gh issue/pr comment -b "..."` when body contains backticks or shell chars. Always use `-F - <<'EOF'` heredoc.
+- When working on a GitHub Issue or PR, print the full URL at the end of the task.
+- When answering questions, respond with high-confidence answers only: verify in code; do not guess.
 It captures the repo's actual commands, validation workflow, and coding style.
 
 ## Priority
@@ -188,3 +194,98 @@ Do not do large formatting-only rewrites unless requested.
 - Report milestones for longer work: start, progress, completion, blocker.
 
 When in doubt, match the surrounding code instead of introducing a new style.
+
+---
+
+## Commit & Pull Request Guidelines
+
+- Follow concise, action-oriented commit messages (e.g., `channels: add Email IMAP receive`, `cli: add memory-doctor command`).
+- Group related changes; avoid bundling unrelated refactors in one commit.
+- Create commits scoped to your changes only; when asked to commit all, group in logical chunks.
+- PR body: use `-F - <<'EOF'` heredoc for multiline bodies so newlines survive shell escaping.
+- PR submission: reference the issue number as plain `#123` (no backticks) for auto-linking.
+- PR landing comments: make commit SHAs clickable with full commit links.
+- Changelog: user-facing changes only; no internal/meta notes.
+- Pure test additions generally do **not** need a changelog entry unless they alter user-facing behavior.
+- Before opening a PR, always run the full test suite: `python -m pytest tests -q --tb=short`.
+
+## Shorthand Commands
+
+- `sync`: if working tree is dirty, commit all changes with a sensible message, then `git pull --rebase`; if rebase conflicts and cannot resolve, stop; otherwise `git push`.
+- `preflight`: run `clawlite validate preflight` + full pytest suite and report results.
+- `doctor`: run `clawlite validate config && clawlite validate channels && clawlite validate onboarding` to diagnose config issues.
+
+## GitHub Search (`gh`)
+
+- Prefer targeted keyword search before proposing new work or duplicating fixes.
+- Use `--repo <owner>/ClawLite` + `--match title,body` first; add `--match comments` when triaging follow-up threads.
+- PRs: `gh search prs --repo <owner>/ClawLite --match title,body --limit 50 -- "<keyword>"`
+- Issues: `gh search issues --repo <owner>/ClawLite --match title,body --limit 50 -- "<keyword>"`
+- Structured output example:
+  ```bash
+  gh search issues --repo <owner>/ClawLite --match title,body --limit 50 \
+    --json number,title,state,url,updatedAt -- "keyword" \
+    --jq '.[] | "\(.number) | \(.state) | \(.title) | \(.url)"'
+  ```
+- Do not limit yourself to the first page; keep paginating when searching exhaustively.
+
+## Multi-Agent Safety
+
+- Do **not** create/apply/drop `git stash` entries unless explicitly requested (other agents may be working).
+- When asked to "push", you may `git pull --rebase` to integrate latest changes; never discard other agents' work.
+- When asked to "commit", scope to your changes only. When asked to "commit all", group in logical chunks.
+- Do **not** switch branches unless explicitly requested.
+- Do **not** create/remove `git worktree` checkouts unless explicitly requested.
+- Running multiple agents is OK as long as each agent has its own session key.
+- When you see unrecognized files in the working tree, keep going; focus on your changes.
+- Lint/format churn: if staged+unstaged diffs are formatting-only, auto-resolve without asking. Only ask when changes are semantic (logic/data/behavior).
+- Focus reports on your edits; end with a brief "other files present" note only if relevant.
+
+## Self-Improvement Loop
+
+ClawLite has the full toolchain for autonomous self-improvement. When asked to improve itself:
+
+1. **Understand** — use `exec` + `files` tools to read the relevant module and its tests.
+2. **Search** — use `web` tool to research best practices or OpenClaw/Nanobot implementations.
+3. **Plan** — write the plan in `ROADMAP.md` or as a GitHub Issue before touching code.
+4. **Implement** — edit files using `files` + `apply_patch` tools.
+5. **Test** — run `python -m pytest tests -q --tb=short -x`; only proceed if green.
+6. **Commit** — `git add -p` scoped to your changes + `git commit`.
+7. **Notify** — send a Telegram message to the owner with what was done.
+
+Rules for self-improvement:
+- Never commit if tests are red.
+- Never push secrets, tokens, or private keys.
+- Never change gateway contracts or config semantics silently — create a GitHub Issue first.
+- Use `skills/github` tool for creating Issues and PRs.
+- Use `skills/gh-issues` to track progress.
+- When unsure about scope, create a draft PR and ask via Telegram instead of proceeding.
+
+## Security Notes
+
+- Never commit or publish real tokens, phone numbers, or live configuration values.
+- Use obviously fake placeholders in docs, tests, and examples.
+- Never leak secrets, authorization headers, or raw tokens in errors or logs.
+- Before triaging security issues, read `SECURITY.md`.
+
+## Troubleshooting
+
+- Config/validation issues: `clawlite validate preflight` + `clawlite diagnostics`.
+- Provider auth failures: `clawlite provider status` + `clawlite validate provider`.
+- Telegram bot not responding: `clawlite validate preflight --telegram-live` to test token.
+- Gateway not starting: check `~/.clawlite/` for config, run `clawlite validate config`.
+- Memory corruption: `clawlite memory doctor --repair`.
+- Never send streaming/partial replies to external messaging surfaces (WhatsApp, Telegram); only final replies should be delivered there.
+
+## Agent-Specific Notes
+
+- Vocabulary: references to "openclaw" in this repo mean the upstream reference project; ClawLite is this repo.
+- Never edit `.venv/` or installed package files; reinstall with `pip install -e .` if needed.
+- When adding a new `AGENTS.md` anywhere in the repo, also create a `CLAUDE.md` symlink: `ln -s AGENTS.md CLAUDE.md` (or copy on Windows).
+- Connection providers: when adding a new provider, update `clawlite/providers/registry.py`, `clawlite/providers/catalog.py`, docs, and add matching tests.
+- When adding channels/skills/tools, update `docs/` and the relevant `__init__.py` exports.
+- Bug investigations: read source of relevant modules and all related local code before concluding; aim for high-confidence root cause.
+- For OpenClaw parity work, adapt behavior to ClawLite architecture; do not blindly copy files or structure from another repo.
+- Config parsing must preserve explicit zero values (`0`, `0.0`) for cooldown/interval settings; avoid `raw or default` when `0` is a valid input.
+- The autonomy loop already includes provider-aware suppression/backoff and a repeated-idle no-progress guard; preserve those semantics when extending autonomy.
+
