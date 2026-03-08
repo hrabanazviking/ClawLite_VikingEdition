@@ -455,6 +455,8 @@ _FLOW_CHOICES = {
     "manual": "advanced",
 }
 
+_SUPPORTED_FLOWS = {"quickstart", "advanced"}
+
 
 def _print_banner(console: Console) -> None:
     console.print("")
@@ -492,6 +494,12 @@ def _flow_menu(console: Console) -> str:
         if flow is not None:
             return flow
         console.print("  [red]Invalid choice:[/] enter 1 for QuickStart or 2 for Advanced")
+
+
+def _normalize_flow(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return _FLOW_CHOICES.get(str(value).strip().lower())
 
 
 def _probe_result(console: Console, probe: dict[str, Any], *, label: str) -> None:
@@ -813,6 +821,7 @@ def run_onboarding_wizard(
     config_path: str | Path | None,
     overwrite: bool = False,
     variables: dict[str, str] | None = None,
+    flow: str | None = None,
 ) -> dict[str, Any]:
     console = Console(stderr=True, soft_wrap=True)
 
@@ -837,7 +846,10 @@ def run_onboarding_wizard(
                 padding=(0, 2),
             )
         )
-        flow = _flow_menu(console)
+        selected_flow = _normalize_flow(flow)
+        if flow is not None and selected_flow is None:
+            console.print(f"\n  [yellow]Unknown flow override:[/] {flow!r}. Falling back to interactive selection.\n")
+        flow = selected_flow or _flow_menu(console)
         flow_result = (
             _run_quickstart_flow(
                 console,

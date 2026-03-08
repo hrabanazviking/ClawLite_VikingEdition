@@ -55,14 +55,16 @@ def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkey
 
     called: dict[str, bool] = {"ok": False}
 
-    def _fake_wizard(config, *, config_path, overwrite, variables):
+    def _fake_wizard(config, *, config_path, overwrite, variables, flow=None):
         called["ok"] = True
         assert overwrite is True
+        assert flow == "quickstart"
         assert str(config.agents.defaults.model).startswith("openai/")
         assert variables["assistant_name"] == "Fox"
         return {
             "ok": True,
             "mode": "wizard",
+            "flow": flow,
             "final": {"gateway_url": "http://127.0.0.1:8787", "gateway_token": "tok-test-123"},
         }
 
@@ -73,6 +75,8 @@ def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkey
             str(config_path),
             "onboard",
             "--wizard",
+            "--flow",
+            "quickstart",
             "--overwrite",
             "--assistant-name",
             "Fox",
@@ -83,6 +87,49 @@ def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkey
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["mode"] == "wizard"
+    assert payload["flow"] == "quickstart"
+
+
+def test_cli_configure_routes_flow_override_to_wizard(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    called: dict[str, object] = {"flow": None}
+
+    def _fake_wizard(config, *, config_path, overwrite, variables, flow=None):
+        called["flow"] = flow
+        assert overwrite is False
+        assert variables == {}
+        assert str(config.agents.defaults.model).startswith("openai/")
+        return {
+            "ok": True,
+            "mode": "wizard",
+            "flow": flow,
+            "final": {"gateway_url": "http://127.0.0.1:8787", "gateway_token": "tok-test-123"},
+        }
+
+    monkeypatch.setattr("clawlite.cli.commands.run_onboarding_wizard", _fake_wizard)
+    rc = main([
+        "--config",
+        str(config_path),
+        "configure",
+        "--flow",
+        "advanced",
+    ])
+
+    assert rc == 0
+    assert called["flow"] == "advanced"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["flow"] == "advanced"
 
 
 def test_cli_skills_list_and_show(capsys) -> None:

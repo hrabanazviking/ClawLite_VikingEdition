@@ -12,13 +12,13 @@ Or locally:
 pip install -e .
 ```
 
-## 2. Workspace onboarding
+## 2. Guided configure wizard
 
 ```bash
-clawlite onboard
+clawlite configure --flow quickstart
 ```
 
-The loader generates base templates in the workspace (when missing):
+QuickStart validates the provider live, configures a local token-protected gateway, offers Telegram, and generates the base templates in the workspace (when missing):
 - `IDENTITY.md`
 - `SOUL.md`
 - `USER.md`
@@ -27,6 +27,12 @@ The loader generates base templates in the workspace (when missing):
 - `HEARTBEAT.md`
 - `BOOTSTRAP.md`
 - `memory/MEMORY.md`
+
+Use the manual section-by-section flow when you need custom gateway or channel settings:
+
+```bash
+clawlite configure --flow advanced
+```
 
 ## 3. Configure provider
 

@@ -156,6 +156,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
         config_path=args.config,
         overwrite=bool(getattr(args, "overwrite", False)),
         variables={},
+        flow=getattr(args, "flow", None),
     )
     _print_json(payload)
     return 0 if bool(payload.get("ok", False)) else 2
@@ -179,6 +180,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
                 "user_context": args.user_context,
                 "user_preferences": args.user_preferences,
             },
+            flow=getattr(args, "flow", None),
         )
         _print_json(payload)
         return 0 if bool(payload.get("ok", False)) else 2
@@ -897,6 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_configure = sub.add_parser("configure", help="Interactive setup wizard (quickstart/advanced provider, Telegram, gateway)")
     p_configure.add_argument("--overwrite", action="store_true", help="Overwrite existing workspace files")
+    p_configure.add_argument("--flow", choices=["quickstart", "advanced"], help="Choose wizard flow explicitly")
     p_configure.set_defaults(handler=cmd_configure)
 
     p_onboard = sub.add_parser("onboard", help="Generate workspace identity templates")
@@ -911,6 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_onboard.add_argument("--user-preferences", default="Clear answers, direct actions, concise updates")
     p_onboard.add_argument("--overwrite", action="store_true")
     p_onboard.add_argument("--wizard", action="store_true", help="Run interactive onboarding wizard")
+    p_onboard.add_argument("--flow", choices=["quickstart", "advanced"], help="Choose wizard flow explicitly")
     p_onboard.set_defaults(handler=cmd_onboard)
 
     p_validate = sub.add_parser("validate", help="Validate provider/channel/onboarding readiness")

@@ -34,11 +34,13 @@ ClawLite is an autonomous AI assistant written in Python, designed to run entire
 git clone https://github.com/eobarretooo/ClawLite.git
 cd ClawLite
 pip install -e .
-clawlite onboard --wizard
+clawlite configure --flow quickstart
 clawlite gateway
 ```
 
 That's it. Your agent is running at `http://127.0.0.1:8787` and via CLI.
+
+Use `clawlite configure --flow advanced` when you want the manual section-by-section wizard.
 
 ## 📦 Installation
 
