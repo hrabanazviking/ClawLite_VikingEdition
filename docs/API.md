@@ -46,6 +46,7 @@ Example response:
   "phase": "running",
   "components": {
     "channels": {"enabled": true, "running": true, "last_error": ""},
+    "channels_recovery": {"enabled": true, "running": true, "last_error": ""},
     "cron": {"enabled": true, "running": true, "last_error": ""},
     "heartbeat": {"enabled": true, "running": true, "last_error": ""},
     "subagent_maintenance": {"enabled": true, "running": true, "last_error": ""},
@@ -97,6 +98,15 @@ If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostic
 - queue/state: `pending`, `cooldown_seconds`, `suggestions_path`
 
 Purpose: operational visibility for proactive memory suggestions (generation, suppression, and delivery outcomes) without exposing raw memory content.
+
+`channels_recovery` is additive and reports the channel-manager recovery supervisor loop:
+
+- loop state: `enabled`, `running`, `task_state`, `last_error`
+- config: `interval_s`, `cooldown_s`
+- counters: `total` (`attempts`, `success`, `failures`, `skipped_cooldown`)
+- per-channel recovery telemetry: `per_channel`
+
+Purpose: operational visibility for automatic channel worker recovery and whether the recovery supervisor itself is still alive.
 
 `subagents` is additive and reports persisted subagent manager/runtime telemetry:
 
@@ -164,6 +174,7 @@ Example response:
     "per_channel": {},
     "recent": []
   },
+  "channels_recovery": {},
   "cron": {},
   "heartbeat": {},
   "supervisor": {},
@@ -477,7 +488,9 @@ Campos baseline de contrato:
 - `uptime_s`: uptime do processo do gateway em segundos.
 - `contract_version`: versao estavel do contrato HTTP do gateway.
 - `control_plane.components.subagent_maintenance`: estado do loop de manutencao/sweep de subagentes supervisionado pela gateway.
+- `control_plane.components.channels_recovery`: estado do supervisor interno de recuperacao dos canais.
 - `channels_delivery`: contadores de entrega agregados do `ChannelManager` (`total` e `per_channel`).
+- `channels_recovery`: estado do loop de recovery dos canais, com contadores agregados e telemetria por canal.
 - `memory_monitor`: telemetria do monitor proativo de memoria (`enabled`, contadores de scan/geracao/entrega, pendencias, cooldown e path do backlog).
 - `subagents`: snapshot operacional do `SubagentManager`, incluindo limites, contagens por status, telemetria de sweep/manutencao e o estado do runner de manutencao em background.
 - `channels_delivery.recent`: snapshots por mensagem (mais recentes primeiro) com outcome e recibo seguro por envio, sem texto da mensagem.

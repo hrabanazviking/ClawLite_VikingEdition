@@ -1368,6 +1368,10 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
         assert payload["autonomy_wake"]["journal_path"].endswith("autonomy-wake.json")
         assert payload["autonomy_wake"]["kind_policies"]["heartbeat"]["coalesce_mode"] == "replace_latest"
         assert payload["autonomy_wake"]["kind_limits"]["cron"] >= 1
+        assert "channels_recovery" in payload
+        assert payload["channels_recovery"]["enabled"] is True
+        assert payload["channels_recovery"]["running"] is True
+        assert payload["control_plane"]["components"]["channels_recovery"]["running"] is True
         assert set(payload["autonomy_log"].keys()) >= {
             "enabled",
             "path",
@@ -1412,6 +1416,7 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
         assert alias_autonomy == payload_autonomy
         assert abs(alias_cooldown - payload_cooldown) <= 1.0
         assert alias_payload["autonomy_wake"] == payload["autonomy_wake"]
+        assert alias_payload["channels_recovery"] == payload["channels_recovery"]
         assert alias_payload["autonomy_log"] == payload["autonomy_log"]
         assert alias_payload["supervisor"] == payload["supervisor"]
 
@@ -1705,6 +1710,7 @@ def test_gateway_diagnostics_exposes_subagent_status_and_runner(tmp_path: Path) 
         scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
         gateway={
             "heartbeat": {"enabled": False},
+            "supervisor": {"enabled": False},
             "diagnostics": {"enabled": True, "require_auth": False},
         },
         channels={},
@@ -1783,6 +1789,61 @@ def test_gateway_supervisor_recovers_crashed_subagent_maintenance_task(tmp_path:
     asyncio.run(_scenario())
 
 
+def test_gateway_supervisor_recovers_crashed_channels_recovery_task(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "supervisor": {"enabled": False, "interval_s": 60, "cooldown_s": 0},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
+
+            recovery_task = runtime.channels._recovery_task
+            assert recovery_task is not None
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
+
+            assert runtime.channels.recovery_diagnostics()["task_state"] == "cancelled"
+
+            await runtime.supervisor.run_once()
+
+            replacement_task = runtime.channels._recovery_task
+            assert replacement_task is not None
+            assert replacement_task is not recovery_task
+            assert runtime.channels.recovery_diagnostics()["running"] is True
+
+            supervisor_status = runtime.supervisor.status()
+            assert supervisor_status["recovery_attempts"] >= 1
+            assert supervisor_status["recovery_success"] >= 1
+            assert supervisor_status["component_incidents"]["channels_recovery"] >= 1
+            send_kwargs = next(
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_recovery"
+                and dict(call.kwargs.get("metadata", {})).get("component") == "channels_recovery"
+            )
+            assert send_kwargs["metadata"]["source"] == "supervisor"
+            assert send_kwargs["metadata"]["autonomy_notice"] is True
+            assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
+            assert send_kwargs["metadata"]["component"] == "channels_recovery"
+            assert "supervisor recovered component=channels_recovery" in str(send_kwargs["text"])
+
+    asyncio.run(_scenario())
+
+
 def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
@@ -1790,6 +1851,7 @@ def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -
         scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
         gateway={
             "heartbeat": {"enabled": False},
+            "supervisor": {"enabled": False},
             "diagnostics": {"enabled": True, "require_auth": False},
         },
         channels={},
@@ -1840,6 +1902,7 @@ def test_gateway_startup_inbound_replay_sends_autonomy_notice(tmp_path: Path) ->
         scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
         gateway={
             "heartbeat": {"enabled": False},
+            "supervisor": {"enabled": False},
             "diagnostics": {"enabled": True, "require_auth": False},
         },
         channels={},
@@ -1899,6 +1962,7 @@ def test_gateway_startup_wake_replay_sends_autonomy_notice(tmp_path: Path) -> No
         scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
         gateway={
             "heartbeat": {"enabled": False},
+            "supervisor": {"enabled": False},
             "diagnostics": {"enabled": True, "require_auth": False},
         },
         channels={},

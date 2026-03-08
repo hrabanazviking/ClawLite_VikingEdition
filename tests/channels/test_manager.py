@@ -1034,6 +1034,54 @@ def test_channel_manager_recovers_failed_channel_worker_and_notifies() -> None:
     asyncio.run(_scenario())
 
 
+def test_channel_manager_recovery_diagnostics_and_restart_loop(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start(
+            {
+                "state_path": str(tmp_path),
+                "channels": {
+                    "recovery_interval_s": 0.01,
+                    "recovery_cooldown_s": 0.0,
+                    "fake": {"enabled": True},
+                },
+            }
+        )
+
+        diagnostics = mgr.recovery_diagnostics()
+        assert diagnostics["enabled"] is True
+        assert diagnostics["running"] is True
+        assert diagnostics["task_state"] == "running"
+        assert diagnostics["interval_s"] == 0.1
+        assert diagnostics["cooldown_s"] == 0.0
+
+        recovery_task = mgr._recovery_task
+        assert recovery_task is not None
+        recovery_task.cancel()
+        try:
+            await recovery_task
+        except asyncio.CancelledError:
+            pass
+
+        cancelled = mgr.recovery_diagnostics()
+        assert cancelled["running"] is False
+        assert cancelled["task_state"] == "cancelled"
+
+        await mgr.start_recovery_supervisor()
+
+        restarted = mgr.recovery_diagnostics()
+        assert restarted["running"] is True
+        assert restarted["task_state"] == "running"
+        assert mgr._recovery_task is not None
+        assert mgr._recovery_task is not recovery_task
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_session_slots_are_bounded_and_cleanup_idle_entries() -> None:
     async def _scenario() -> None:
         bus = MessageQueue()

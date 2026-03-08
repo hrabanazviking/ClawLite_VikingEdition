@@ -166,6 +166,22 @@ class ChannelManager:
         }
         self._recovery_per_channel: dict[str, dict[str, Any]] = {}
 
+    @staticmethod
+    def _background_task_state(task: asyncio.Task[Any] | None) -> tuple[str, str]:
+        if task is None:
+            return ("stopped", "")
+        if task.cancelled():
+            return ("cancelled", "")
+        if not task.done():
+            return ("running", "")
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return ("cancelled", "")
+        if exc is not None:
+            return ("failed", str(exc))
+        return ("done", "")
+
     def _ensure_delivery_channel(self, channel: str) -> dict[str, int]:
         name = str(channel or "").strip() or "unknown"
         row = self._delivery_per_channel.get(name)
@@ -896,6 +912,25 @@ class ChannelManager:
                 bind_event("channel.recovery").error("channel recovery loop failed error={}", exc)
                 await asyncio.sleep(min(max(self._recovery_interval_s, 1.0), 5.0))
 
+    async def start_dispatcher_loop(self) -> None:
+        task_state, _ = self._background_task_state(self._dispatcher_task)
+        if task_state == "running":
+            return
+        self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
+        bind_event("channel.lifecycle").info("channel dispatcher started")
+
+    async def start_recovery_supervisor(self) -> None:
+        task_state, _ = self._background_task_state(self._recovery_task)
+        if task_state == "running":
+            return
+        self._recovery_task = asyncio.create_task(self._recovery_loop())
+        bind_event("channel.lifecycle").info(
+            "channel recovery supervisor started enabled={} interval_s={} cooldown_s={}",
+            self._recovery_enabled,
+            self._recovery_interval_s,
+            self._recovery_cooldown_s,
+        )
+
     def register(self, name: str, channel_cls: type[BaseChannel]) -> None:
         self._registry[name] = channel_cls
 
@@ -1333,6 +1368,24 @@ class ChannelManager:
             }
         }
 
+    def recovery_diagnostics(self) -> dict[str, Any]:
+        task_state, task_error = self._background_task_state(self._recovery_task)
+        per_channel: dict[str, dict[str, Any]] = {}
+        for name, row in sorted(self._recovery_per_channel.items()):
+            clean_row = dict(row)
+            clean_row.pop("_last_attempt_monotonic", None)
+            per_channel[name] = clean_row
+        return {
+            "enabled": bool(self._recovery_enabled),
+            "running": bool(task_state == "running"),
+            "task_state": task_state,
+            "last_error": task_error,
+            "interval_s": float(self._recovery_interval_s),
+            "cooldown_s": float(self._recovery_cooldown_s),
+            "total": dict(self._recovery_total),
+            "per_channel": per_channel,
+        }
+
     async def _handle_stop(self, event: InboundEvent) -> None:
         session_id = event.session_id
         self.bus.request_stop(session_id)
@@ -1613,13 +1666,15 @@ class ChannelManager:
             else:
                 self._inbound_persistence_path = None
         self._recovery_enabled = bool(channels_cfg.get("recovery_enabled", channels_cfg.get("recoveryEnabled", True)))
+        recovery_interval_raw = channels_cfg.get("recovery_interval_s", channels_cfg.get("recoveryIntervalS", 15.0))
         self._recovery_interval_s = max(
             0.1,
-            float(channels_cfg.get("recovery_interval_s", channels_cfg.get("recoveryIntervalS", 15.0)) or 15.0),
+            float(15.0 if recovery_interval_raw is None else recovery_interval_raw),
         )
+        recovery_cooldown_raw = channels_cfg.get("recovery_cooldown_s", channels_cfg.get("recoveryCooldownS", 30.0))
         self._recovery_cooldown_s = max(
             0.0,
-            float(channels_cfg.get("recovery_cooldown_s", channels_cfg.get("recoveryCooldownS", 30.0)) or 30.0),
+            float(30.0 if recovery_cooldown_raw is None else recovery_cooldown_raw),
         )
         self._prune_delivery_idempotency_cache()
         self._reset_dispatch_controls()
@@ -1670,17 +1725,8 @@ class ChannelManager:
             await channel.start()
             bind_event("channel.lifecycle", channel=name).info("channel started")
 
-        if self._dispatcher_task is None:
-            self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
-            bind_event("channel.lifecycle").info("channel dispatcher started")
-        if self._recovery_task is None:
-            self._recovery_task = asyncio.create_task(self._recovery_loop())
-            bind_event("channel.lifecycle").info(
-                "channel recovery supervisor started enabled={} interval_s={} cooldown_s={}",
-                self._recovery_enabled,
-                self._recovery_interval_s,
-                self._recovery_cooldown_s,
-            )
+        await self.start_dispatcher_loop()
+        await self.start_recovery_supervisor()
 
         await self._run_startup_delivery_replay()
         await self._run_startup_inbound_replay()

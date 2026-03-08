@@ -312,6 +312,7 @@ class DiagnosticsResponse(BaseModel):
     channels: dict[str, Any]
     channels_delivery: dict[str, Any] = {}
     channels_inbound: dict[str, Any] = {}
+    channels_recovery: dict[str, Any] = {}
     cron: dict[str, Any]
     heartbeat: dict[str, Any]
     autonomy: dict[str, Any] = {}
@@ -821,6 +822,7 @@ class GatewayLifecycleState:
         if self.components is None:
             self.components = {
                 "channels": {"enabled": True, "running": False, "last_error": ""},
+                "channels_recovery": {"enabled": True, "running": False, "last_error": ""},
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
                 "autonomy": {"enabled": False, "running": False, "last_error": "disabled"},
@@ -2336,6 +2338,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return ("done", last_error)
 
     def _refresh_runtime_components() -> None:
+        channels_recovery_status = runtime.channels.recovery_diagnostics()
+        lifecycle.components.setdefault("channels_recovery", {"enabled": True, "running": False, "last_error": ""})[
+            "enabled"
+        ] = bool(channels_recovery_status.get("enabled", True))
+        lifecycle.mark_component(
+            "channels_recovery",
+            running=bool(channels_recovery_status.get("enabled", True) and channels_recovery_status.get("running", False)),
+            error=(
+                str(channels_recovery_status.get("last_error", "") or "")
+                or ("disabled" if not channels_recovery_status.get("enabled", True) else "")
+            ),
+        )
+
         heartbeat_status = runtime.heartbeat.status()
         lifecycle.mark_component(
             "heartbeat",
@@ -3287,6 +3302,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _supervisor_incident_checks() -> list[SupervisorIncident]:
         incidents: list[SupervisorIncident] = []
 
+        channels_recovery_status = runtime.channels.recovery_diagnostics()
+        if channels_recovery_status.get("enabled", True) and not channels_recovery_status.get("running", False):
+            worker_state = str(channels_recovery_status.get("task_state", "stopped") or "stopped")
+            incidents.append(SupervisorIncident(component="channels_recovery", reason=f"channels_recovery_{worker_state}"))
+
         if cfg.gateway.heartbeat.enabled:
             heartbeat_status = runtime.heartbeat.status()
             if not heartbeat_status.get("running", False):
@@ -3401,7 +3421,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _recover_supervised_component(component: str, reason: str) -> bool:
         bind_event("supervisor.recover").warning("runtime recover component={} reason={}", component, reason)
         recovered = False
-        if component == "heartbeat":
+        if component == "channels_recovery":
+            await runtime.channels.start_recovery_supervisor()
+            _refresh_runtime_components()
+            recovered = bool(runtime.channels.recovery_diagnostics().get("running", False))
+        elif component == "heartbeat":
             await runtime.heartbeat.start(_submit_heartbeat_wake)
             _refresh_runtime_components()
             recovered = bool(runtime.heartbeat.status().get("running", False))
@@ -3476,6 +3500,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return recovered
 
     supervisor_component_policies = {
+        "channels_recovery": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "heartbeat": SupervisorComponentPolicy(max_recoveries=12, budget_window_s=3600.0),
         "cron": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "autonomy_wake": SupervisorComponentPolicy(max_recoveries=16, budget_window_s=3600.0),
@@ -4335,6 +4360,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             channels=runtime.channels.status(),
             channels_delivery=runtime.channels.delivery_diagnostics(),
             channels_inbound=runtime.channels.inbound_diagnostics(),
+            channels_recovery=runtime.channels.recovery_diagnostics(),
             cron=cron_payload,
             heartbeat=runtime.heartbeat.status(),
             autonomy=runtime.autonomy.status() if runtime.autonomy is not None else {},
