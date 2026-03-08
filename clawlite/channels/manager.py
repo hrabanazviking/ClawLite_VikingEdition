@@ -1358,6 +1358,23 @@ class ChannelManager:
             },
         }
 
+    def dispatcher_diagnostics(self) -> dict[str, Any]:
+        task_state, task_error = self._background_task_state(self._dispatcher_task)
+        active_tasks = sum(len(tasks) for tasks in self._active_tasks.values())
+        active_sessions = sum(1 for tasks in self._active_tasks.values() if tasks)
+        return {
+            "enabled": True,
+            "running": bool(task_state == "running"),
+            "task_state": task_state,
+            "last_error": task_error,
+            "max_concurrency": int(self._dispatcher_max_concurrency),
+            "max_per_session": int(self._dispatcher_max_per_session),
+            "session_slots_max_entries": int(self._session_slots_max_entries),
+            "session_slots": int(len(self._session_slots)),
+            "active_tasks": int(active_tasks),
+            "active_sessions": int(active_sessions),
+        }
+
     def inbound_diagnostics(self) -> dict[str, Any]:
         return {
             "persistence": {

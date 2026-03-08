@@ -46,6 +46,7 @@ Example response:
   "phase": "running",
   "components": {
     "channels": {"enabled": true, "running": true, "last_error": ""},
+    "channels_dispatcher": {"enabled": true, "running": true, "last_error": ""},
     "channels_recovery": {"enabled": true, "running": true, "last_error": ""},
     "cron": {"enabled": true, "running": true, "last_error": ""},
     "heartbeat": {"enabled": true, "running": true, "last_error": ""},
@@ -108,6 +109,14 @@ Purpose: operational visibility for proactive memory suggestions (generation, su
 
 Purpose: operational visibility for automatic channel worker recovery and whether the recovery supervisor itself is still alive.
 
+`channels_dispatcher` is additive and reports the channel-manager dispatcher loop:
+
+- loop state: `enabled`, `running`, `task_state`, `last_error`
+- config/limits: `max_concurrency`, `max_per_session`, `session_slots_max_entries`
+- current load: `session_slots`, `active_tasks`, `active_sessions`
+
+Purpose: operational visibility for whether inbound dispatch is still draining the bus and whether the runtime supervisor had to restart the dispatcher loop.
+
 `subagents` is additive and reports persisted subagent manager/runtime telemetry:
 
 - manager snapshot: `state_path`, concurrency/queue/quota limits, `run_count`, `running_count`, `queued_count`, `resumable_count`, `queue_depth`, `status_counts`
@@ -169,6 +178,7 @@ Example response:
     "stop_sessions": 0
   },
   "channels": {},
+  "channels_dispatcher": {},
   "channels_delivery": {
     "total": {},
     "per_channel": {},
@@ -488,7 +498,9 @@ Campos baseline de contrato:
 - `uptime_s`: uptime do processo do gateway em segundos.
 - `contract_version`: versao estavel do contrato HTTP do gateway.
 - `control_plane.components.subagent_maintenance`: estado do loop de manutencao/sweep de subagentes supervisionado pela gateway.
+- `control_plane.components.channels_dispatcher`: estado do dispatcher de mensagens inbound dos canais.
 - `control_plane.components.channels_recovery`: estado do supervisor interno de recuperacao dos canais.
+- `channels_dispatcher`: estado do loop de dispatch dos canais, com limites e carga atual.
 - `channels_delivery`: contadores de entrega agregados do `ChannelManager` (`total` e `per_channel`).
 - `channels_recovery`: estado do loop de recovery dos canais, com contadores agregados e telemetria por canal.
 - `memory_monitor`: telemetria do monitor proativo de memoria (`enabled`, contadores de scan/geracao/entrega, pendencias, cooldown e path do backlog).

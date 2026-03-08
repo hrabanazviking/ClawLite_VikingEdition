@@ -310,6 +310,7 @@ class DiagnosticsResponse(BaseModel):
     control_plane: ControlPlaneResponse
     queue: dict[str, Any]
     channels: dict[str, Any]
+    channels_dispatcher: dict[str, Any] = {}
     channels_delivery: dict[str, Any] = {}
     channels_inbound: dict[str, Any] = {}
     channels_recovery: dict[str, Any] = {}
@@ -822,6 +823,7 @@ class GatewayLifecycleState:
         if self.components is None:
             self.components = {
                 "channels": {"enabled": True, "running": False, "last_error": ""},
+                "channels_dispatcher": {"enabled": True, "running": False, "last_error": ""},
                 "channels_recovery": {"enabled": True, "running": False, "last_error": ""},
                 "cron": {"enabled": True, "running": False, "last_error": ""},
                 "heartbeat": {"enabled": True, "running": False, "last_error": ""},
@@ -2338,6 +2340,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return ("done", last_error)
 
     def _refresh_runtime_components() -> None:
+        channels_dispatcher_status = runtime.channels.dispatcher_diagnostics()
+        lifecycle.components.setdefault("channels_dispatcher", {"enabled": True, "running": False, "last_error": ""})[
+            "enabled"
+        ] = bool(channels_dispatcher_status.get("enabled", True))
+        lifecycle.mark_component(
+            "channels_dispatcher",
+            running=bool(channels_dispatcher_status.get("enabled", True) and channels_dispatcher_status.get("running", False)),
+            error=(
+                str(channels_dispatcher_status.get("last_error", "") or "")
+                or ("disabled" if not channels_dispatcher_status.get("enabled", True) else "")
+            ),
+        )
+
         channels_recovery_status = runtime.channels.recovery_diagnostics()
         lifecycle.components.setdefault("channels_recovery", {"enabled": True, "running": False, "last_error": ""})[
             "enabled"
@@ -3302,6 +3317,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _supervisor_incident_checks() -> list[SupervisorIncident]:
         incidents: list[SupervisorIncident] = []
 
+        channels_dispatcher_status = runtime.channels.dispatcher_diagnostics()
+        if channels_dispatcher_status.get("enabled", True) and not channels_dispatcher_status.get("running", False):
+            worker_state = str(channels_dispatcher_status.get("task_state", "stopped") or "stopped")
+            incidents.append(SupervisorIncident(component="channels_dispatcher", reason=f"channels_dispatcher_{worker_state}"))
+
         channels_recovery_status = runtime.channels.recovery_diagnostics()
         if channels_recovery_status.get("enabled", True) and not channels_recovery_status.get("running", False):
             worker_state = str(channels_recovery_status.get("task_state", "stopped") or "stopped")
@@ -3421,7 +3441,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _recover_supervised_component(component: str, reason: str) -> bool:
         bind_event("supervisor.recover").warning("runtime recover component={} reason={}", component, reason)
         recovered = False
-        if component == "channels_recovery":
+        if component == "channels_dispatcher":
+            await runtime.channels.start_dispatcher_loop()
+            _refresh_runtime_components()
+            recovered = bool(runtime.channels.dispatcher_diagnostics().get("running", False))
+        elif component == "channels_recovery":
             await runtime.channels.start_recovery_supervisor()
             _refresh_runtime_components()
             recovered = bool(runtime.channels.recovery_diagnostics().get("running", False))
@@ -3500,6 +3524,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return recovered
 
     supervisor_component_policies = {
+        "channels_dispatcher": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "channels_recovery": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "heartbeat": SupervisorComponentPolicy(max_recoveries=12, budget_window_s=3600.0),
         "cron": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
@@ -4358,6 +4383,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             control_plane=_control_plane_payload(generated_at),
             queue=runtime.bus.stats(),
             channels=runtime.channels.status(),
+            channels_dispatcher=runtime.channels.dispatcher_diagnostics(),
             channels_delivery=runtime.channels.delivery_diagnostics(),
             channels_inbound=runtime.channels.inbound_diagnostics(),
             channels_recovery=runtime.channels.recovery_diagnostics(),

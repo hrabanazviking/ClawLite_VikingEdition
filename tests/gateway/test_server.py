@@ -1368,6 +1368,10 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
         assert payload["autonomy_wake"]["journal_path"].endswith("autonomy-wake.json")
         assert payload["autonomy_wake"]["kind_policies"]["heartbeat"]["coalesce_mode"] == "replace_latest"
         assert payload["autonomy_wake"]["kind_limits"]["cron"] >= 1
+        assert "channels_dispatcher" in payload
+        assert payload["channels_dispatcher"]["enabled"] is True
+        assert payload["channels_dispatcher"]["running"] is True
+        assert payload["control_plane"]["components"]["channels_dispatcher"]["running"] is True
         assert "channels_recovery" in payload
         assert payload["channels_recovery"]["enabled"] is True
         assert payload["channels_recovery"]["running"] is True
@@ -1416,6 +1420,7 @@ def test_gateway_diagnostics_includes_autonomy_wake_and_alias_parity(tmp_path: P
         assert alias_autonomy == payload_autonomy
         assert abs(alias_cooldown - payload_cooldown) <= 1.0
         assert alias_payload["autonomy_wake"] == payload["autonomy_wake"]
+        assert alias_payload["channels_dispatcher"] == payload["channels_dispatcher"]
         assert alias_payload["channels_recovery"] == payload["channels_recovery"]
         assert alias_payload["autonomy_log"] == payload["autonomy_log"]
         assert alias_payload["supervisor"] == payload["supervisor"]
@@ -1840,6 +1845,61 @@ def test_gateway_supervisor_recovers_crashed_channels_recovery_task(tmp_path: Pa
             assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
             assert send_kwargs["metadata"]["component"] == "channels_recovery"
             assert "supervisor recovered component=channels_recovery" in str(send_kwargs["text"])
+
+    asyncio.run(_scenario())
+
+
+def test_gateway_supervisor_recovers_crashed_channels_dispatcher_task(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "supervisor": {"enabled": False, "interval_s": 60, "cooldown_s": 0},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
+
+            dispatcher_task = runtime.channels._dispatcher_task
+            assert dispatcher_task is not None
+            dispatcher_task.cancel()
+            try:
+                await dispatcher_task
+            except asyncio.CancelledError:
+                pass
+
+            assert runtime.channels.dispatcher_diagnostics()["task_state"] == "cancelled"
+
+            await runtime.supervisor.run_once()
+
+            replacement_task = runtime.channels._dispatcher_task
+            assert replacement_task is not None
+            assert replacement_task is not dispatcher_task
+            assert runtime.channels.dispatcher_diagnostics()["running"] is True
+
+            supervisor_status = runtime.supervisor.status()
+            assert supervisor_status["recovery_attempts"] >= 1
+            assert supervisor_status["recovery_success"] >= 1
+            assert supervisor_status["component_incidents"]["channels_dispatcher"] >= 1
+            send_kwargs = next(
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_recovery"
+                and dict(call.kwargs.get("metadata", {})).get("component") == "channels_dispatcher"
+            )
+            assert send_kwargs["metadata"]["source"] == "supervisor"
+            assert send_kwargs["metadata"]["autonomy_notice"] is True
+            assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
+            assert send_kwargs["metadata"]["component"] == "channels_dispatcher"
+            assert "supervisor recovered component=channels_dispatcher" in str(send_kwargs["text"])
 
     asyncio.run(_scenario())
 

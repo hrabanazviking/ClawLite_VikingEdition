@@ -1082,6 +1082,56 @@ def test_channel_manager_recovery_diagnostics_and_restart_loop(tmp_path: Path) -
     asyncio.run(_scenario())
 
 
+def test_channel_manager_dispatcher_diagnostics_and_restart_loop(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start(
+            {
+                "state_path": str(tmp_path),
+                "channels": {
+                    "dispatcher_max_concurrency": 2,
+                    "dispatcher_max_per_session": 1,
+                    "dispatcher_session_slots_max_entries": 3,
+                    "fake": {"enabled": True},
+                },
+            }
+        )
+
+        diagnostics = mgr.dispatcher_diagnostics()
+        assert diagnostics["enabled"] is True
+        assert diagnostics["running"] is True
+        assert diagnostics["task_state"] == "running"
+        assert diagnostics["max_concurrency"] == 2
+        assert diagnostics["max_per_session"] == 1
+        assert diagnostics["session_slots_max_entries"] == 3
+
+        dispatcher_task = mgr._dispatcher_task
+        assert dispatcher_task is not None
+        dispatcher_task.cancel()
+        try:
+            await dispatcher_task
+        except asyncio.CancelledError:
+            pass
+
+        cancelled = mgr.dispatcher_diagnostics()
+        assert cancelled["running"] is False
+        assert cancelled["task_state"] == "cancelled"
+
+        await mgr.start_dispatcher_loop()
+
+        restarted = mgr.dispatcher_diagnostics()
+        assert restarted["running"] is True
+        assert restarted["task_state"] == "running"
+        assert mgr._dispatcher_task is not None
+        assert mgr._dispatcher_task is not dispatcher_task
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_session_slots_are_bounded_and_cleanup_idle_entries() -> None:
     async def _scenario() -> None:
         bus = MessageQueue()
