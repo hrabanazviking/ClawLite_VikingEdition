@@ -1694,6 +1694,91 @@ def test_gateway_autonomy_suppresses_provider_quota_without_calling_model(tmp_pa
     asyncio.run(_scenario())
 
 
+def test_gateway_diagnostics_exposes_subagent_status_and_runner(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        payload = client.get("/v1/diagnostics").json()
+        alias_payload = client.get("/api/diagnostics").json()
+
+        assert "subagents" in payload
+        assert payload["subagents"]["maintenance_interval_s"] >= 1.0
+        assert payload["subagents"]["runner"]["enabled"] is True
+        assert payload["subagents"]["runner"]["running"] is True
+        assert payload["subagents"]["runner"]["success_count"] >= 1
+        assert payload["control_plane"]["components"]["subagent_maintenance"]["running"] is True
+        assert alias_payload["subagents"] == payload["subagents"]
+
+
+def test_gateway_supervisor_recovers_crashed_subagent_maintenance_task(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "supervisor": {"enabled": False, "interval_s": 60, "cooldown_s": 0},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
+
+            maintenance_task = next(
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and getattr(task.get_coro(), "cr_code", None) is not None
+                and task.get_coro().cr_code.co_name == "_maintenance_loop"
+            )
+            maintenance_task.cancel()
+            try:
+                await maintenance_task
+            except asyncio.CancelledError:
+                pass
+
+            diagnostics_before = app.state.runtime.engine.subagents.status()
+            assert diagnostics_before["maintenance"]["sweep_runs"] >= 1
+
+            await runtime.supervisor.run_once()
+
+            diagnostics_after = runtime.engine.subagents.status()
+            assert diagnostics_after["maintenance"]["sweep_runs"] >= diagnostics_before["maintenance"]["sweep_runs"]
+
+            supervisor_status = runtime.supervisor.status()
+            assert supervisor_status["recovery_attempts"] >= 1
+            assert supervisor_status["recovery_success"] >= 1
+            assert supervisor_status["component_incidents"]["subagent_maintenance"] >= 1
+            send_kwargs = next(
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_recovery"
+                and dict(call.kwargs.get("metadata", {})).get("component") == "subagent_maintenance"
+            )
+            assert send_kwargs["metadata"]["source"] == "supervisor"
+            assert send_kwargs["metadata"]["autonomy_notice"] is True
+            assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
+            assert send_kwargs["metadata"]["component"] == "subagent_maintenance"
+            assert "supervisor recovered component=subagent_maintenance" in str(send_kwargs["text"])
+
+    asyncio.run(_scenario())
+
+
 def test_gateway_startup_delivery_replay_sends_autonomy_notice(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

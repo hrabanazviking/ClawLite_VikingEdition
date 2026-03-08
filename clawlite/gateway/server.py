@@ -318,6 +318,7 @@ class DiagnosticsResponse(BaseModel):
     supervisor: dict[str, Any] = {}
     autonomy_wake: dict[str, Any] = {}
     autonomy_log: dict[str, Any] = {}
+    subagents: dict[str, Any] = {}
     bootstrap: dict[str, Any]
     workspace: dict[str, Any] = {}
     memory_monitor: dict[str, Any] = {}
@@ -829,6 +830,7 @@ class GatewayLifecycleState:
                 "memory_quality_tuning": {"enabled": False, "running": False, "last_error": ""},
                 "self_evolution": {"enabled": False, "running": False, "last_error": ""},
                 "autonomy_wake": {"enabled": True, "running": False, "last_error": ""},
+                "subagent_maintenance": {"enabled": True, "running": False, "last_error": ""},
                 "wake_pressure": {
                     "enabled": True,
                     "running": False,
@@ -1842,6 +1844,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "action_status_by_layer": {},
         "last_action_metadata": {},
     }
+    subagent_maintenance_interval_seconds = max(1.0, float(runtime.engine.subagents.maintenance_interval_seconds()))
+    subagent_maintenance_task: asyncio.Task[Any] | None = None
+    subagent_maintenance_running = False
+    subagent_maintenance_stop_event = asyncio.Event()
+    subagent_maintenance_state: dict[str, Any] = {
+        "enabled": True,
+        "running": False,
+        "interval_seconds": subagent_maintenance_interval_seconds,
+        "ticks": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "last_result": {},
+        "last_error": "",
+        "last_run_iso": "",
+    }
 
     def _record_autonomy_event(
         source: str,
@@ -2359,6 +2376,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "skills_watcher",
             running=bool(skills_watcher_status.get("running", False)),
             error=str(skills_watcher_status.get("last_error", "") or ""),
+        )
+
+        subagent_maintenance_state_name, subagent_maintenance_error = _background_task_snapshot(
+            subagent_maintenance_task,
+            running=subagent_maintenance_running,
+            last_error=str(subagent_maintenance_state.get("last_error", "") or ""),
+        )
+        lifecycle.mark_component(
+            "subagent_maintenance",
+            running=subagent_maintenance_state_name == "running",
+            error=subagent_maintenance_error,
         )
 
         proactive_state, proactive_error = _background_task_snapshot(
@@ -3177,6 +3205,74 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _stop_self_evolution() -> None:
         lifecycle.mark_component("self_evolution", running=False)
 
+    async def _start_subagent_maintenance() -> None:
+        nonlocal subagent_maintenance_task, subagent_maintenance_running, subagent_maintenance_interval_seconds
+        subagent_maintenance_interval_seconds = max(1.0, float(runtime.engine.subagents.maintenance_interval_seconds()))
+        subagent_maintenance_state["interval_seconds"] = subagent_maintenance_interval_seconds
+        if subagent_maintenance_task is not None and not subagent_maintenance_task.done():
+            subagent_maintenance_running = True
+            subagent_maintenance_state["running"] = True
+            return
+
+        subagent_maintenance_stop_event.clear()
+        subagent_maintenance_running = True
+        subagent_maintenance_state["running"] = True
+        subagent_maintenance_state["last_error"] = ""
+        bind_event("subagents.lifecycle").info(
+            "subagent maintenance loop starting interval_s={}",
+            subagent_maintenance_interval_seconds,
+        )
+
+        async def _maintenance_loop() -> None:
+            while True:
+                try:
+                    swept = await runtime.engine.subagents.sweep_async()
+                    subagent_maintenance_state["ticks"] = int(subagent_maintenance_state.get("ticks", 0) or 0) + 1
+                    subagent_maintenance_state["success_count"] = (
+                        int(subagent_maintenance_state.get("success_count", 0) or 0) + 1
+                    )
+                    subagent_maintenance_state["last_result"] = dict(swept or {})
+                    subagent_maintenance_state["last_error"] = ""
+                    subagent_maintenance_state["last_run_iso"] = _utc_now_iso()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    subagent_maintenance_state["ticks"] = int(subagent_maintenance_state.get("ticks", 0) or 0) + 1
+                    subagent_maintenance_state["error_count"] = int(subagent_maintenance_state.get("error_count", 0) or 0) + 1
+                    subagent_maintenance_state["last_error"] = str(exc)
+                    subagent_maintenance_state["last_run_iso"] = _utc_now_iso()
+                    bind_event("subagents.lifecycle").warning("subagent maintenance tick failed error={}", exc)
+                try:
+                    await asyncio.wait_for(
+                        subagent_maintenance_stop_event.wait(),
+                        timeout=subagent_maintenance_interval_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    continue
+
+        subagent_maintenance_task = asyncio.create_task(_maintenance_loop())
+        lifecycle.mark_component("subagent_maintenance", running=True)
+        bind_event("subagents.lifecycle").info("subagent maintenance loop started")
+
+    async def _stop_subagent_maintenance() -> None:
+        nonlocal subagent_maintenance_task, subagent_maintenance_running
+        subagent_maintenance_running = False
+        subagent_maintenance_stop_event.set()
+        subagent_maintenance_state["running"] = False
+        if subagent_maintenance_task is None:
+            return
+        subagent_maintenance_task.cancel()
+        try:
+            await subagent_maintenance_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            subagent_maintenance_state["last_error"] = str(exc)
+            bind_event("subagents.lifecycle").error("subagent maintenance stop failed error={}", exc)
+        subagent_maintenance_task = None
+        bind_event("subagents.lifecycle").info("subagent maintenance loop stopped")
+
     runtime.autonomy = AutonomyService(
         enabled=bool(cfg.gateway.autonomy.enabled),
         interval_s=float(cfg.gateway.autonomy.interval_s or 900),
@@ -3212,6 +3308,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             if not autonomy_status.get("running", False):
                 worker_state = str(autonomy_status.get("worker_state", "stopped") or "stopped")
                 incidents.append(SupervisorIncident(component="autonomy", reason=f"autonomy_{worker_state}"))
+
+        subagent_maintenance_state_name, _subagent_maintenance_error = _background_task_snapshot(
+            subagent_maintenance_task,
+            running=subagent_maintenance_running,
+            last_error=str(subagent_maintenance_state.get("last_error", "") or ""),
+        )
+        if subagent_maintenance_state_name != "running":
+            incidents.append(
+                SupervisorIncident(
+                    component="subagent_maintenance",
+                    reason=f"subagent_maintenance_{subagent_maintenance_state_name}",
+                )
+            )
 
         skills_watcher_status = runtime.skills_loader.watcher_status()
         if not skills_watcher_status.get("running", False):
@@ -3313,6 +3422,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             await runtime.skills_loader.start_watcher()
             _refresh_runtime_components()
             recovered = bool(runtime.skills_loader.watcher_status().get("running", False))
+        elif component == "subagent_maintenance":
+            await _start_subagent_maintenance()
+            _refresh_runtime_components()
+            maintenance_state, _maintenance_error = _background_task_snapshot(
+                subagent_maintenance_task,
+                running=subagent_maintenance_running,
+                last_error=str(subagent_maintenance_state.get("last_error", "") or ""),
+            )
+            recovered = maintenance_state == "running"
         elif component == "proactive_monitor":
             await _start_proactive_monitor()
             _refresh_runtime_components()
@@ -3363,6 +3481,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "autonomy_wake": SupervisorComponentPolicy(max_recoveries=16, budget_window_s=3600.0),
         "autonomy": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "skills_watcher": SupervisorComponentPolicy(max_recoveries=6, budget_window_s=3600.0),
+        "subagent_maintenance": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "proactive_monitor": SupervisorComponentPolicy(max_recoveries=6, budget_window_s=3600.0),
         "memory_quality_tuning": SupervisorComponentPolicy(max_recoveries=4, budget_window_s=3600.0),
     }
@@ -3495,6 +3614,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("channels", runtime.channels.start, runtime.channels.stop, True),
             ("autonomy_wake", runtime.autonomy_wake.start, runtime.autonomy_wake.stop, True),
             ("cron", runtime.cron.start, runtime.cron.stop, True),
+            ("subagent_maintenance", _start_subagent_maintenance, _stop_subagent_maintenance, True),
             ("heartbeat", runtime.heartbeat.start, runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
             ("autonomy", runtime.autonomy.start, runtime.autonomy.stop, bool(runtime.autonomy is not None and cfg.gateway.autonomy.enabled)),
             ("proactive_monitor", _start_proactive_monitor, _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
@@ -3626,6 +3746,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     await start_fn(_submit_cron_wake)
                 elif name == "skills_watcher":
                     await start_fn()
+                elif name == "subagent_maintenance":
+                    await start_fn()
                 elif name == "autonomy":
                     await start_fn()
                 elif name == "proactive_monitor":
@@ -3696,6 +3818,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             ("supervisor", runtime.supervisor.stop, bool(cfg.gateway.supervisor.enabled)),
             ("autonomy", runtime.autonomy.stop, bool(runtime.autonomy is not None and cfg.gateway.autonomy.enabled)),
             ("heartbeat", runtime.heartbeat.stop, bool(cfg.gateway.heartbeat.enabled)),
+            ("subagent_maintenance", _stop_subagent_maintenance, True),
             ("proactive_monitor", _stop_proactive_monitor, bool(runtime.memory_monitor is not None)),
             ("memory_quality_tuning", _stop_memory_quality_tuning, bool(cfg.gateway.autonomy.tuning_loop_enabled)),
             ("self_evolution", _stop_self_evolution, bool(cfg.gateway.autonomy.self_evolution_enabled and runtime.self_evolution is not None)),
@@ -4199,6 +4322,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             monitor_payload["runner"] = dict(proactive_runner_state)
         cron_payload = dict(runtime.cron.status())
         cron_payload["wake_policy"] = dict(cron_wake_state)
+        subagent_payload = dict(runtime.engine.subagents.status())
+        subagent_payload["runner"] = dict(subagent_maintenance_state)
 
         return DiagnosticsResponse(
             schema_version="2026-03-02",
@@ -4216,6 +4341,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             supervisor=runtime.supervisor.status() if runtime.supervisor is not None else {},
             autonomy_wake=runtime.autonomy_wake.status(),
             autonomy_log=runtime.autonomy_log.snapshot(),
+            subagents=subagent_payload,
             bootstrap=_bootstrap_status_snapshot(),
             workspace=runtime.workspace.runtime_health(),
             memory_monitor=monitor_payload,

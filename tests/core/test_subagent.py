@@ -541,3 +541,58 @@ def test_subagent_manager_concurrent_spawn_cancel_and_synthesize(tmp_path: Path)
         assert all(str(run.updated_at).strip() for run in runs)
 
     asyncio.run(_scenario())
+
+
+def test_subagent_manager_status_reports_maintenance_and_heartbeat(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        gate = asyncio.Event()
+
+        async def _slow_runner(_session_id: str, task: str) -> str:
+            await gate.wait()
+            return f"done:{task}"
+
+        mgr = SubagentManager(
+            state_path=tmp_path / "state",
+            max_concurrent_runs=1,
+            run_ttl_seconds=60,
+            zombie_grace_seconds=5,
+        )
+        run = await mgr.spawn(session_id="s1", task="long", runner=_slow_runner)
+
+        before_heartbeat = str(run.metadata.get("heartbeat_at", "") or "")
+        assert before_heartbeat
+
+        await asyncio.sleep(0)
+        swept = await mgr.sweep_async()
+        current = mgr.get_run(run.run_id)
+        assert current is not None
+        after_heartbeat = str(current.metadata.get("heartbeat_at", "") or "")
+
+        assert swept == {
+            "expired": 0,
+            "orphaned_running": 0,
+            "orphaned_queued": 0,
+            "pruned_completed": 0,
+        }
+        assert after_heartbeat
+        assert after_heartbeat >= before_heartbeat
+
+        status = mgr.status()
+        assert status["run_count"] == 1
+        assert status["running_count"] == 1
+        assert status["queued_count"] == 0
+        assert status["maintenance_interval_s"] == 5.0
+        assert status["maintenance"]["sweep_runs"] >= 1
+        assert status["maintenance"]["last_sweep_stats"] == swept
+        assert status["maintenance"]["totals"] == swept
+
+        gate.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        final = mgr.get_run(run.run_id)
+        assert final is not None
+        assert final.status == "done"
+        assert str(final.metadata.get("heartbeat_at", "") or "") >= after_heartbeat
+
+    asyncio.run(_scenario())

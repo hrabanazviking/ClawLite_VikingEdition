@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Coroutine, TypeVar
+from typing import Any, Awaitable, Callable, Coroutine, TypeVar
 
 
 @dataclass(slots=True)
@@ -93,6 +93,11 @@ class SubagentManager:
         self._pending_runners: dict[str, Runner] = {}
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._sweep_runs = 0
+        self._last_sweep_at = ""
+        self._last_sweep_changed = False
+        self._last_sweep_stats = self._empty_sweep_stats()
+        self._maintenance_totals = self._empty_sweep_stats()
         self._load_state()
 
     @staticmethod
@@ -119,12 +124,40 @@ class SubagentManager:
         current = now_dt or datetime.now(timezone.utc)
         return (current + timedelta(seconds=self.run_ttl_seconds)).isoformat()
 
+    def maintenance_interval_seconds(self) -> float:
+        candidates: list[float] = []
+        if self.run_ttl_seconds is not None:
+            candidates.append(max(5.0, min(60.0, float(self.run_ttl_seconds) / 4.0)))
+        if self.zombie_grace_seconds > 0:
+            candidates.append(max(1.0, min(30.0, float(self.zombie_grace_seconds))))
+        if not candidates:
+            return 15.0
+        return min(candidates)
+
+    @staticmethod
+    def _run_heartbeat_source(run: SubagentRun, *, fallback_iso: str) -> str:
+        return str(
+            run.metadata.get("heartbeat_at")
+            or run.updated_at
+            or run.queued_at
+            or run.started_at
+            or fallback_iso
+        ).strip() or fallback_iso
+
+    def _touch_run_locked(self, run: SubagentRun, *, now_iso: str, update_timestamp: bool = True) -> None:
+        if update_timestamp:
+            run.updated_at = now_iso
+        run.metadata["heartbeat_at"] = now_iso
+
     def _ensure_run_defaults(self, run: SubagentRun, *, now_dt: datetime | None = None, refresh_expiry: bool = False) -> None:
+        current_dt = now_dt or datetime.now(timezone.utc)
         self._sync_retry_metadata(run)
+        if not str(run.metadata.get("heartbeat_at", "") or "").strip():
+            run.metadata["heartbeat_at"] = self._run_heartbeat_source(run, fallback_iso=current_dt.isoformat())
         if self.run_ttl_seconds is None:
             return
         if refresh_expiry or not str(run.metadata.get("expires_at", "") or "").strip():
-            run.metadata["expires_at"] = self._default_expires_at(now_dt=now_dt)
+            run.metadata["expires_at"] = self._default_expires_at(now_dt=current_dt)
 
     def _run_is_expired(self, run: SubagentRun, *, now_dt: datetime) -> bool:
         expires_at = _parse_utc(str(run.metadata.get("expires_at", "") or ""))
@@ -154,6 +187,7 @@ class SubagentManager:
         run.metadata["resumable"] = resumable
         run.metadata["last_status_reason"] = reason
         run.metadata["last_status_at"] = now_iso
+        run.metadata["heartbeat_at"] = now_iso
         self._sync_retry_metadata(run)
 
     _MAX_COMPLETED_RUNS = 500   # hard cap: prune oldest completed when exceeded
@@ -260,6 +294,9 @@ class SubagentManager:
                     stats["orphaned_queued"] += 1
                     changed = True
                     continue
+                if has_pending and in_queue and str(run.metadata.get("heartbeat_at", "") or "") != now_iso:
+                    self._touch_run_locked(run, now_iso=now_iso, update_timestamp=False)
+                    changed = True
 
             if run.status == "running":
                 task = self._tasks.get(run.run_id)
@@ -279,6 +316,10 @@ class SubagentManager:
                     stats["expired"] += 1
                     changed = True
                     continue
+                if task is not None and not task.done():
+                    self._touch_run_locked(run, now_iso=now_iso)
+                    changed = True
+                    continue
                 if (task is None or task.done()) and self._run_is_stale(run, now_dt=now_dt):
                     self._tasks.pop(run.run_id, None)
                     self._pending_runners.pop(run.run_id, None)
@@ -294,6 +335,12 @@ class SubagentManager:
                     changed = True
 
         pruned_changed = self._prune_completed_locked(stats)
+        self._sweep_runs += 1
+        self._last_sweep_at = now_iso
+        self._last_sweep_changed = bool(changed or pruned_changed)
+        self._last_sweep_stats = dict(stats)
+        for key, value in stats.items():
+            self._maintenance_totals[key] = int(self._maintenance_totals.get(key, 0) or 0) + int(value or 0)
         if changed or pruned_changed:
             self._drain_queue_locked()
             self._save_state()
@@ -495,6 +542,7 @@ class SubagentManager:
         run.metadata["resumable"] = False
         run.metadata["last_status_reason"] = reason
         run.metadata["last_status_at"] = now_iso
+        run.metadata["heartbeat_at"] = now_iso
         self._sync_retry_metadata(run)
 
     def _mark_running(self, run: SubagentRun, *, reason: str) -> None:
@@ -509,6 +557,7 @@ class SubagentManager:
         run.metadata["resumable"] = False
         run.metadata["last_status_reason"] = reason
         run.metadata["last_status_at"] = now_iso
+        run.metadata["heartbeat_at"] = now_iso
         self._sync_retry_metadata(run)
 
     @staticmethod
@@ -556,6 +605,7 @@ class SubagentManager:
                     active.error = error
                     active.finished_at = now_iso
                     active.updated_at = now_iso
+                    active.metadata["heartbeat_at"] = now_iso
                     active.metadata["resumable"] = (
                         status in {"error", "cancelled", "interrupted"}
                         and bool(active.metadata.get("retry_budget_remaining", 0))
@@ -702,6 +752,38 @@ class SubagentManager:
         if active_only:
             values = [item for item in values if item.status in {"running", "queued"}]
         return sorted(values, key=lambda item: item.started_at, reverse=True)
+
+    def status(self) -> dict[str, Any]:
+        rows = list(self._runs.values())
+        status_counts: dict[str, int] = {}
+        resumable_count = 0
+        for run in rows:
+            status_counts[run.status] = int(status_counts.get(run.status, 0) or 0) + 1
+            if bool(dict(getattr(run, "metadata", {}) or {}).get("resumable", False)):
+                resumable_count += 1
+        return {
+            "state_path": str(self._state_file),
+            "max_concurrent_runs": self.max_concurrent_runs,
+            "max_queued_runs": self.max_queued_runs,
+            "per_session_quota": self.per_session_quota,
+            "max_resume_attempts": self.max_resume_attempts,
+            "run_ttl_seconds": self.run_ttl_seconds,
+            "zombie_grace_seconds": self.zombie_grace_seconds,
+            "maintenance_interval_s": round(self.maintenance_interval_seconds(), 3),
+            "run_count": len(rows),
+            "running_count": sum(1 for run in rows if run.status == "running"),
+            "queued_count": sum(1 for run in rows if run.status == "queued"),
+            "resumable_count": resumable_count,
+            "queue_depth": len(self._queue),
+            "status_counts": dict(sorted(status_counts.items())),
+            "maintenance": {
+                "sweep_runs": self._sweep_runs,
+                "last_sweep_at": self._last_sweep_at,
+                "last_sweep_changed": self._last_sweep_changed,
+                "last_sweep_stats": dict(self._last_sweep_stats),
+                "totals": dict(self._maintenance_totals),
+            },
+        }
 
     def get_run(self, run_id: str) -> SubagentRun | None:
         clean_run_id = str(run_id or "").strip()
