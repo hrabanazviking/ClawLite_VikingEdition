@@ -1755,6 +1755,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     lifecycle.components["skills_watcher"]["enabled"] = True
     lifecycle.components["proactive_monitor"]["enabled"] = bool(runtime.memory_monitor is not None)
     lifecycle.components["memory_quality_tuning"]["enabled"] = bool(cfg.gateway.autonomy.tuning_loop_enabled)
+    lifecycle.components["self_evolution"]["enabled"] = bool(
+        cfg.gateway.autonomy.self_evolution_enabled and runtime.self_evolution is not None
+    )
     proactive_interval_seconds = max(5, int(cfg.gateway.heartbeat.interval_s or 1800))
     proactive_task: asyncio.Task[Any] | None = None
     proactive_running = False
@@ -1847,6 +1850,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         "actions_by_action": {},
         "action_status_by_layer": {},
         "last_action_metadata": {},
+    }
+    self_evolution_task: asyncio.Task[Any] | None = None
+    self_evolution_running = False
+    self_evolution_stop_event = asyncio.Event()
+    self_evolution_runner_state: dict[str, Any] = {
+        "enabled": bool(cfg.gateway.autonomy.self_evolution_enabled and runtime.self_evolution is not None),
+        "running": False,
+        "cooldown_seconds": (
+            float(getattr(runtime.self_evolution, "cooldown_s", 3600.0)) if runtime.self_evolution is not None else 0.0
+        ),
+        "ticks": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "last_result": "",
+        "last_error": "",
+        "last_run_iso": "",
     }
     subagent_maintenance_interval_seconds = max(1.0, float(runtime.engine.subagents.maintenance_interval_seconds()))
     subagent_maintenance_task: asyncio.Task[Any] | None = None
@@ -2340,6 +2359,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return ("done", last_error)
 
     def _refresh_runtime_components() -> None:
+        self_evolution_state, self_evolution_error = _background_task_snapshot(
+            self_evolution_task,
+            running=self_evolution_running,
+            last_error=str(self_evolution_runner_state.get("last_error", "") or ""),
+        )
+        lifecycle.components.setdefault("self_evolution", {"enabled": False, "running": False, "last_error": "disabled"})[
+            "enabled"
+        ] = bool(self_evolution_runner_state.get("enabled", False))
+        lifecycle.mark_component(
+            "self_evolution",
+            running=bool(self_evolution_runner_state.get("enabled", False) and self_evolution_state == "running"),
+            error=(
+                self_evolution_error
+                or ("disabled" if not self_evolution_runner_state.get("enabled", False) else "")
+            ),
+        )
+
         channels_dispatcher_status = runtime.channels.dispatcher_diagnostics()
         lifecycle.components.setdefault("channels_dispatcher", {"enabled": True, "running": False, "last_error": ""})[
             "enabled"
@@ -3213,27 +3249,80 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         bind_event("proactive.lifecycle").info("proactive monitor stopped")
 
     async def _start_self_evolution() -> None:
+        nonlocal self_evolution_task, self_evolution_running
         if runtime.self_evolution is None:
             return
+        self_evolution_runner_state["enabled"] = bool(getattr(runtime.self_evolution, "enabled", False))
+        self_evolution_runner_state["cooldown_seconds"] = float(getattr(runtime.self_evolution, "cooldown_s", 3600.0))
+        if not self_evolution_runner_state["enabled"]:
+            self_evolution_running = False
+            self_evolution_runner_state["running"] = False
+            lifecycle.mark_component("self_evolution", running=False, error="disabled")
+            return
+        if self_evolution_task is not None and not self_evolution_task.done():
+            self_evolution_running = True
+            self_evolution_runner_state["running"] = True
+            return
+
+        self_evolution_stop_event.clear()
+        self_evolution_running = True
+        self_evolution_runner_state["running"] = True
+        self_evolution_runner_state["last_error"] = ""
         bind_event("self_evolution.lifecycle").info("self_evolution loop starting")
 
         async def _evo_loop() -> None:
             cooldown = float(getattr(runtime.self_evolution, "cooldown_s", 3600.0))
             while True:
                 try:
-                    await runtime.self_evolution.run_once()
+                    self_evolution_runner_state["ticks"] = int(self_evolution_runner_state.get("ticks", 0) or 0) + 1
+                    result = await runtime.self_evolution.run_once()
+                    self_evolution_runner_state["success_count"] = int(
+                        self_evolution_runner_state.get("success_count", 0) or 0
+                    ) + 1
+                    self_evolution_runner_state["last_result"] = str((result or {}).get("last_outcome", "") or "")
+                    self_evolution_runner_state["last_error"] = ""
+                    self_evolution_runner_state["last_run_iso"] = _utc_now_iso()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    self_evolution_runner_state["error_count"] = int(
+                        self_evolution_runner_state.get("error_count", 0) or 0
+                    ) + 1
+                    self_evolution_runner_state["last_result"] = "error"
+                    self_evolution_runner_state["last_error"] = str(exc)
+                    self_evolution_runner_state["last_run_iso"] = _utc_now_iso()
                     bind_event("self_evolution.lifecycle").error("self_evolution tick failed error={}", exc)
-                await asyncio.sleep(cooldown)
+                try:
+                    await asyncio.wait_for(self_evolution_stop_event.wait(), timeout=cooldown)
+                    return
+                except asyncio.TimeoutError:
+                    continue
 
-        _evo_task = asyncio.create_task(_evo_loop())
+        self_evolution_task = asyncio.create_task(_evo_loop())
         lifecycle.mark_component("self_evolution", running=True)
         bind_event("self_evolution.lifecycle").info("self_evolution loop started")
 
     async def _stop_self_evolution() -> None:
-        lifecycle.mark_component("self_evolution", running=False)
+        nonlocal self_evolution_task, self_evolution_running
+        self_evolution_running = False
+        self_evolution_stop_event.set()
+        self_evolution_runner_state["running"] = False
+        if self_evolution_task is not None:
+            self_evolution_task.cancel()
+            try:
+                await self_evolution_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self_evolution_runner_state["last_error"] = str(exc)
+                bind_event("self_evolution.lifecycle").error("self_evolution stop failed error={}", exc)
+            self_evolution_task = None
+        lifecycle.mark_component(
+            "self_evolution",
+            running=False,
+            error=("disabled" if not self_evolution_runner_state.get("enabled", False) else str(self_evolution_runner_state.get("last_error", "") or "")),
+        )
+        bind_event("self_evolution.lifecycle").info("self_evolution loop stopped")
 
     async def _start_subagent_maintenance() -> None:
         nonlocal subagent_maintenance_task, subagent_maintenance_running, subagent_maintenance_interval_seconds
@@ -3316,6 +3405,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     async def _supervisor_incident_checks() -> list[SupervisorIncident]:
         incidents: list[SupervisorIncident] = []
+
+        if self_evolution_runner_state.get("enabled", False):
+            self_evolution_state, _self_evolution_error = _background_task_snapshot(
+                self_evolution_task,
+                running=self_evolution_running,
+                last_error=str(self_evolution_runner_state.get("last_error", "") or ""),
+            )
+            if self_evolution_state != "running":
+                incidents.append(
+                    SupervisorIncident(component="self_evolution", reason=f"self_evolution_{self_evolution_state}")
+                )
 
         channels_dispatcher_status = runtime.channels.dispatcher_diagnostics()
         if channels_dispatcher_status.get("enabled", True) and not channels_dispatcher_status.get("running", False):
@@ -3441,7 +3541,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def _recover_supervised_component(component: str, reason: str) -> bool:
         bind_event("supervisor.recover").warning("runtime recover component={} reason={}", component, reason)
         recovered = False
-        if component == "channels_dispatcher":
+        if component == "self_evolution":
+            await _start_self_evolution()
+            _refresh_runtime_components()
+            self_evolution_state, _self_evolution_error = _background_task_snapshot(
+                self_evolution_task,
+                running=self_evolution_running,
+                last_error=str(self_evolution_runner_state.get("last_error", "") or ""),
+            )
+            recovered = bool(self_evolution_runner_state.get("enabled", False) and self_evolution_state == "running")
+        elif component == "channels_dispatcher":
             await runtime.channels.start_dispatcher_loop()
             _refresh_runtime_components()
             recovered = bool(runtime.channels.dispatcher_diagnostics().get("running", False))
@@ -3524,6 +3633,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return recovered
 
     supervisor_component_policies = {
+        "self_evolution": SupervisorComponentPolicy(max_recoveries=4, budget_window_s=3600.0),
         "channels_dispatcher": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "channels_recovery": SupervisorComponentPolicy(max_recoveries=8, budget_window_s=3600.0),
         "heartbeat": SupervisorComponentPolicy(max_recoveries=12, budget_window_s=3600.0),
@@ -3803,6 +3913,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 elif name == "proactive_monitor":
                     await start_fn()
                 elif name == "memory_quality_tuning":
+                    await start_fn()
+                elif name == "self_evolution":
                     await start_fn()
                 elif name == "supervisor":
                     await start_fn()
@@ -4374,6 +4486,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         cron_payload["wake_policy"] = dict(cron_wake_state)
         subagent_payload = dict(runtime.engine.subagents.status())
         subagent_payload["runner"] = dict(subagent_maintenance_state)
+        self_evolution_payload = runtime.self_evolution.status() if runtime.self_evolution is not None else {}
+        self_evolution_payload["runner"] = dict(self_evolution_runner_state)
 
         return DiagnosticsResponse(
             schema_version="2026-03-02",
@@ -4402,7 +4516,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             environment=environment,
             http=await http_telemetry.snapshot(),
             ws=await ws_telemetry.snapshot(),
-            self_evolution=runtime.self_evolution.status() if runtime.self_evolution is not None else {},
+            self_evolution=self_evolution_payload,
         )
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
@@ -4433,9 +4547,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
         evo = runtime.self_evolution
         if evo is None:
-            return {"enabled": False, "status": {}, "recent": []}
+            return {"enabled": False, "status": {}, "runner": {}, "recent": []}
         recent = evo.log.recent(10)
-        return {"enabled": evo.enabled, "status": evo.status(), "recent": recent}
+        return {"enabled": evo.enabled, "status": evo.status(), "runner": dict(self_evolution_runner_state), "recent": recent}
 
     @app.post("/v1/self-evolution/trigger")
     async def self_evolution_trigger(request: Request) -> dict[str, Any]:
@@ -4444,7 +4558,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if evo is None:
             raise HTTPException(status_code=404, detail="self_evolution_not_configured")
         status = await evo.run_once(force=True)
-        return {"ok": True, "status": status}
+        return {"ok": True, "status": status, "runner": dict(self_evolution_runner_state)}
 
     async def _chat_handler(req: ChatRequest, request: Request) -> ChatResponse:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)

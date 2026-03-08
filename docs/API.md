@@ -117,6 +117,13 @@ Purpose: operational visibility for automatic channel worker recovery and whethe
 
 Purpose: operational visibility for whether inbound dispatch is still draining the bus and whether the runtime supervisor had to restart the dispatcher loop.
 
+`self_evolution` is additive and reports the self-improvement engine plus its background loop runner:
+
+- engine status: `enabled`, `run_count`, `committed_count`, `last_outcome`, `last_error`, `cooldown_remaining_s`, `locked`
+- runner status: nested `runner` map with `enabled`, `running`, `cooldown_seconds`, `ticks`, `success_count`, `error_count`, `last_result`, `last_error`, `last_run_iso`
+
+Purpose: operational visibility for whether the self-evolution worker is actually alive, not just configured.
+
 `subagents` is additive and reports persisted subagent manager/runtime telemetry:
 
 - manager snapshot: `state_path`, concurrency/queue/quota limits, `run_count`, `running_count`, `queued_count`, `resumable_count`, `queue_depth`, `status_counts`
@@ -190,6 +197,7 @@ Example response:
   "supervisor": {},
   "autonomy": {},
   "subagents": {},
+  "self_evolution": {},
   "autonomy_actions": {},
   "environment": {}
 }
@@ -500,9 +508,11 @@ Campos baseline de contrato:
 - `control_plane.components.subagent_maintenance`: estado do loop de manutencao/sweep de subagentes supervisionado pela gateway.
 - `control_plane.components.channels_dispatcher`: estado do dispatcher de mensagens inbound dos canais.
 - `control_plane.components.channels_recovery`: estado do supervisor interno de recuperacao dos canais.
+- `control_plane.components.self_evolution`: estado do loop de self-evolution supervisionado pela gateway.
 - `channels_dispatcher`: estado do loop de dispatch dos canais, com limites e carga atual.
 - `channels_delivery`: contadores de entrega agregados do `ChannelManager` (`total` e `per_channel`).
 - `channels_recovery`: estado do loop de recovery dos canais, com contadores agregados e telemetria por canal.
+- `self_evolution`: estado do motor de self-evolution e do runner em background.
 - `memory_monitor`: telemetria do monitor proativo de memoria (`enabled`, contadores de scan/geracao/entrega, pendencias, cooldown e path do backlog).
 - `subagents`: snapshot operacional do `SubagentManager`, incluindo limites, contagens por status, telemetria de sweep/manutencao e o estado do runner de manutencao em background.
 - `channels_delivery.recent`: snapshots por mensagem (mais recentes primeiro) com outcome e recibo seguro por envio, sem texto da mensagem.

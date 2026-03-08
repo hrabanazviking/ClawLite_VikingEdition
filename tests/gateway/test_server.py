@@ -181,6 +181,34 @@ class RecoveringGatewayChannel(BaseChannel):
         return "ok"
 
 
+class FakeSelfEvolutionEngine:
+    def __init__(self, *, enabled: bool = True, cooldown_s: float = 9999.0) -> None:
+        self.enabled = enabled
+        self.cooldown_s = float(cooldown_s)
+        self._run_count = 0
+        self._committed_count = 0
+        self._last_outcome = ""
+        self._last_error = ""
+        self.log = SimpleNamespace(recent=lambda _n=10: [{"outcome": self._last_outcome}] if self._run_count else [])
+
+    async def run_once(self, *, force: bool = False) -> dict[str, object]:
+        self._run_count += 1
+        self._last_outcome = "forced" if force else "no_gaps"
+        self._last_error = ""
+        return self.status()
+
+    def status(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "run_count": self._run_count,
+            "committed_count": self._committed_count,
+            "last_outcome": self._last_outcome,
+            "last_error": self._last_error,
+            "cooldown_remaining_s": 0.0,
+            "locked": False,
+        }
+
+
 class _FakeTuningMemory:
     def __init__(
         self,
@@ -1735,6 +1763,38 @@ def test_gateway_diagnostics_exposes_subagent_status_and_runner(tmp_path: Path) 
         assert alias_payload["subagents"] == payload["subagents"]
 
 
+def test_gateway_diagnostics_exposes_self_evolution_runner_when_enabled(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "heartbeat": {"enabled": False},
+            "supervisor": {"enabled": False},
+            "autonomy": {"self_evolution_enabled": True, "self_evolution_cooldown_s": 3600},
+            "diagnostics": {"enabled": True, "require_auth": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.self_evolution = FakeSelfEvolutionEngine(enabled=True, cooldown_s=9999.0)
+    app.state.runtime.workspace.should_run = lambda: False
+
+    with TestClient(app) as client:
+        payload = client.get("/v1/diagnostics").json()
+        status_payload = client.get("/v1/self-evolution/status").json()
+
+        assert payload["self_evolution"]["enabled"] is True
+        assert payload["self_evolution"]["run_count"] >= 1
+        assert payload["self_evolution"]["runner"]["enabled"] is True
+        assert payload["self_evolution"]["runner"]["running"] is True
+        assert payload["self_evolution"]["runner"]["success_count"] >= 1
+        assert payload["control_plane"]["components"]["self_evolution"]["running"] is True
+        assert status_payload["enabled"] is True
+        assert status_payload["status"]["run_count"] >= 1
+        assert status_payload["runner"]["running"] is True
+
+
 def test_gateway_supervisor_recovers_crashed_subagent_maintenance_task(tmp_path: Path) -> None:
     async def _scenario() -> None:
         cfg = AppConfig(
@@ -1790,6 +1850,71 @@ def test_gateway_supervisor_recovers_crashed_subagent_maintenance_task(tmp_path:
             assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
             assert send_kwargs["metadata"]["component"] == "subagent_maintenance"
             assert "supervisor recovered component=subagent_maintenance" in str(send_kwargs["text"])
+
+    asyncio.run(_scenario())
+
+
+def test_gateway_supervisor_recovers_crashed_self_evolution_task(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        cfg = AppConfig(
+            workspace_path=str(tmp_path / "workspace"),
+            state_path=str(tmp_path / "state"),
+            scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+            gateway={
+                "heartbeat": {"enabled": False},
+                "autonomy": {"self_evolution_enabled": True, "self_evolution_cooldown_s": 3600},
+                "supervisor": {"enabled": False, "interval_s": 60, "cooldown_s": 0},
+            },
+            channels={},
+        )
+        app = create_app(cfg)
+        app.state.runtime.self_evolution = FakeSelfEvolutionEngine(enabled=True, cooldown_s=9999.0)
+        app.state.runtime.workspace.should_run = lambda: False
+
+        async with app.router.lifespan_context(app):
+            runtime = app.state.runtime
+            assert runtime.supervisor is not None
+            runtime.channels.send = AsyncMock(return_value="ok")
+
+            evolution_task = next(
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and getattr(task.get_coro(), "cr_code", None) is not None
+                and task.get_coro().cr_code.co_name == "_evo_loop"
+            )
+            evolution_task.cancel()
+            try:
+                await evolution_task
+            except asyncio.CancelledError:
+                pass
+
+            await runtime.supervisor.run_once()
+
+            replacement_task = next(
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and getattr(task.get_coro(), "cr_code", None) is not None
+                and task.get_coro().cr_code.co_name == "_evo_loop"
+            )
+            assert replacement_task is not evolution_task
+
+            supervisor_status = runtime.supervisor.status()
+            assert supervisor_status["recovery_attempts"] >= 1
+            assert supervisor_status["recovery_success"] >= 1
+            assert supervisor_status["component_incidents"]["self_evolution"] >= 1
+            send_kwargs = next(
+                call.kwargs
+                for call in runtime.channels.send.await_args_list
+                if dict(call.kwargs.get("metadata", {})).get("autonomy_action") == "component_recovery"
+                and dict(call.kwargs.get("metadata", {})).get("component") == "self_evolution"
+            )
+            assert send_kwargs["metadata"]["source"] == "supervisor"
+            assert send_kwargs["metadata"]["autonomy_notice"] is True
+            assert send_kwargs["metadata"]["autonomy_action"] == "component_recovery"
+            assert send_kwargs["metadata"]["component"] == "self_evolution"
+            assert "supervisor recovered component=self_evolution" in str(send_kwargs["text"])
 
     asyncio.run(_scenario())
 
