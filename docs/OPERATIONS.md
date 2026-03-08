@@ -189,13 +189,15 @@ Saude do monitor proativo:
 ## Codex provider auth lifecycle
 
 ```bash
-clawlite provider login openai-codex --access-token "..." --account-id "org_..." --set-model
+clawlite provider login openai-codex --access-token "..." --account-id "org_..."
 clawlite provider status openai-codex
 clawlite validate provider
 clawlite provider logout openai-codex
 ```
 
 Notas:
+- `provider login openai-codex` agora seleciona automaticamente `openai-codex/gpt-5.3-codex`.
+- Use `--keep-model` se quiser persistir a autenticação sem trocar o modelo ativo.
 - `openai-codex/*` usa caminho dedicado Codex (sem fallback silencioso para OpenAI LiteLLM).
 - Em erro de token ausente/expirado, gateway retorna orientação explícita para `clawlite provider login openai-codex`.
 - `clawlite provider status` também suporta providers de API key (`openai`, `gemini`, `groq`, `deepseek`, `anthropic`, `openrouter`, `custom`) com payload seguro de origem/configuração.

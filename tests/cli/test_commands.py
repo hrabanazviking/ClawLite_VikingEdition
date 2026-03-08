@@ -1582,7 +1582,6 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
             "codex-token-1234",
             "--account-id",
             "org-123",
-            "--set-model",
             "--no-interactive",
         ]
     )
@@ -1601,6 +1600,7 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["auth"]["providers"]["openai_codex"]["access_token"] == "codex-token-1234"
     assert persisted["auth"]["providers"]["openai_codex"]["account_id"] == "org-123"
+    assert persisted["provider"]["model"] == "openai-codex/gpt-5.3-codex"
 
     rc_logout = main(["--config", str(config_path), "provider", "logout", "openai-codex"])
     assert rc_logout == 0
@@ -1647,6 +1647,74 @@ def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, cap
     assert "openai/gpt-4o-mini" in payload["recommended_models"]
     assert "billing" in payload["onboarding_hint"].lower()
     assert any("live probe" in row.lower() for row in payload["hints"])
+
+
+def test_cli_provider_login_openai_codex_keep_model_preserves_active_model(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_login = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "login",
+            "openai-codex",
+            "--access-token",
+            "codex-token-keep-1234",
+            "--keep-model",
+            "--no-interactive",
+        ]
+    )
+    assert rc_login == 0
+    login_payload = json.loads(capsys.readouterr().out)
+    assert login_payload["ok"] is True
+    assert login_payload["model"] == "openai/gpt-4o-mini"
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["provider"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_cli_provider_login_openai_codex_rejects_conflicting_model_flags(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_login = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "login",
+            "openai-codex",
+            "--access-token",
+            "codex-token-conflict-1234",
+            "--set-model",
+            "--keep-model",
+            "--no-interactive",
+        ]
+    )
+    assert rc_login == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "invalid_model_selection_options"
 
 
 def test_cli_provider_status_minimax_reports_anthropic_family(tmp_path: Path, capsys, monkeypatch) -> None:

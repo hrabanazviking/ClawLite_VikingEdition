@@ -223,6 +223,7 @@ def cmd_provider_login(args: argparse.Namespace) -> int:
         access_token=str(args.access_token or ""),
         account_id=str(args.account_id or ""),
         set_model=bool(args.set_model),
+        keep_model=bool(args.keep_model),
         interactive=not bool(args.no_interactive),
     )
     _print_json(payload)
@@ -948,7 +949,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_login.add_argument("provider", choices=["openai-codex"])
     p_provider_login.add_argument("--access-token", default="", help="Explicit Codex access token")
     p_provider_login.add_argument("--account-id", default="", help="Optional OpenAI account/org id")
-    p_provider_login.add_argument("--set-model", action="store_true", help="Set active model to openai-codex/gpt-5.3-codex")
+    p_provider_login.add_argument(
+        "--set-model",
+        action="store_true",
+        help="Deprecated compatibility flag; Codex login now sets the active model automatically.",
+    )
+    p_provider_login.add_argument(
+        "--keep-model",
+        action="store_true",
+        help="Persist Codex auth without switching the active model.",
+    )
     p_provider_login.add_argument("--no-interactive", action="store_true", help="Disable interactive OAuth fallback")
     p_provider_login.set_defaults(handler=cmd_provider_login)
 

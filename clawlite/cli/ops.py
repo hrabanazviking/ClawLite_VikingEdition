@@ -364,6 +364,7 @@ def provider_login_openai_codex(
     access_token: str = "",
     account_id: str = "",
     set_model: bool = False,
+    keep_model: bool = False,
     interactive: bool = True,
 ) -> dict[str, Any]:
     token = str(access_token or "").strip()
@@ -420,7 +421,15 @@ def provider_login_openai_codex(
     config.auth.providers.openai_codex.account_id = resolved_account_id
     config.auth.providers.openai_codex.source = source or "config"
 
-    if set_model:
+    if set_model and keep_model:
+        return {
+            "ok": False,
+            "provider": "openai_codex",
+            "error": "invalid_model_selection_options",
+            "detail": "Cannot combine --set-model with --keep-model.",
+        }
+
+    if (not keep_model) or set_model:
         model = "openai-codex/gpt-5.3-codex"
         config.provider.model = model
         config.agents.defaults.model = model
