@@ -1860,7 +1860,7 @@ def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path,
     assert captured["json"]["tools"] == []
     assert captured["json"]["tool_choice"] == "auto"
     assert captured["json"]["parallel_tool_calls"] is False
-    assert captured["json"]["max_output_tokens"] == 1
+    assert "max_output_tokens" not in captured["json"]
     assert captured["json"]["input"] == [
         {
             "type": "message",

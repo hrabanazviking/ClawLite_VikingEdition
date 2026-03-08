@@ -853,7 +853,6 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": False,
-            "max_output_tokens": 1,
             "store": False,
             "stream": True,
         }

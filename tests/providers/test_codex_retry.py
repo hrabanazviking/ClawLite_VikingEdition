@@ -99,6 +99,8 @@ def test_codex_provider_uses_responses_backend_by_default() -> None:
                     {"role": "user", "content": "hi"},
                 ],
                 tools=[],
+                max_tokens=32,
+                temperature=0.2,
                 reasoning_effort="medium",
             )
 
@@ -113,6 +115,8 @@ def test_codex_provider_uses_responses_backend_by_default() -> None:
         assert payload["tools"] == []
         assert payload["tool_choice"] == "auto"
         assert payload["parallel_tool_calls"] is False
+        assert "max_output_tokens" not in payload
+        assert "temperature" not in payload
         assert headers["Accept"] == "text/event-stream"
         assert payload["input"] == [
             {

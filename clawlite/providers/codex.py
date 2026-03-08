@@ -537,10 +537,6 @@ class CodexProvider(LLMProvider):
                 "store": False,
                 "stream": True,
             }
-            if max_tokens is not None:
-                payload["max_output_tokens"] = max(1, int(max_tokens))
-            if temperature is not None:
-                payload["temperature"] = float(temperature)
             if reasoning_effort is not None:
                 payload["reasoning"] = {"effort": reasoning_effort}
             headers["Accept"] = "text/event-stream"
