@@ -470,9 +470,18 @@ class CodexProvider(LLMProvider):
     @classmethod
     def _decode_responses_payload(cls, response: httpx.Response) -> dict[str, Any]:
         content_type = str(response.headers.get("content-type", "") or "").lower()
-        if "text/event-stream" in content_type:
-            return cls._parse_responses_sse_text(response.text)
-        data = response.json()
+        body_text = str(response.text or "")
+        body_text_stripped = body_text.lstrip()
+        if "text/event-stream" in content_type or body_text_stripped.startswith(("data:", "event:", ":")):
+            return cls._parse_responses_sse_text(body_text)
+        try:
+            data = response.json()
+        except Exception as exc:
+            if body_text_stripped:
+                if "\ndata:" in body_text or "\nevent:" in body_text:
+                    return cls._parse_responses_sse_text(body_text)
+                raise RuntimeError("codex_response_invalid:malformed_payload") from exc
+            raise RuntimeError("codex_response_invalid:empty_payload") from exc
         if isinstance(data, dict):
             return data
         raise RuntimeError("codex_response_invalid:malformed_payload")

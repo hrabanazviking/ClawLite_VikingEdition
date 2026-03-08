@@ -171,6 +171,42 @@ def test_codex_provider_parses_sse_responses_backend() -> None:
     asyncio.run(_scenario())
 
 
+def test_codex_provider_parses_sse_without_event_stream_content_type() -> None:
+    async def _scenario() -> None:
+        provider = CodexProvider(
+            model="openai-codex/gpt-5.3-codex",
+            access_token="token",
+            retry_max_attempts=1,
+        )
+
+        sse_text = "\n".join(
+            [
+                'data: {"type":"response.output_text.delta","delta":"ok"}',
+                "",
+                'data: {"type":"response.completed","response":{"id":"resp_123"}}',
+                "",
+            ]
+        )
+        post_mock = AsyncMock(
+            side_effect=[
+                _FakeResponse(
+                    200,
+                    None,
+                    headers={"content-type": "application/json"},
+                    request_url="https://chatgpt.com/backend-api/codex/responses",
+                    text=sse_text,
+                )
+            ]
+        )
+
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "ok"
+
+    asyncio.run(_scenario())
+
+
 def test_codex_provider_serializes_tools_for_responses_backend() -> None:
     async def _scenario() -> None:
         provider = CodexProvider(
