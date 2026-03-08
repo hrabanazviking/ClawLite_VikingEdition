@@ -20,6 +20,20 @@ def test_exec_tool_runs_command() -> None:
     asyncio.run(_scenario())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="posix shell operators are covered on unix-like runtimes")
+def test_exec_tool_supports_pipe_and_redirect_via_shell_wrapper(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        out = await ExecTool(workspace_path=tmp_path, restrict_to_workspace=True).run(
+            {"command": 'printf "alpha\\nbeta\\n" | tail -n 1 > result.txt && cat result.txt'},
+            ToolContext(session_id="s"),
+        )
+        assert "exit=0" in out
+        assert "stdout=beta" in out
+        assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "beta\n"
+
+    asyncio.run(_scenario())
+
+
 def test_file_tools_roundtrip(tmp_path: Path) -> None:
     async def _scenario() -> None:
         target = tmp_path / "a.txt"

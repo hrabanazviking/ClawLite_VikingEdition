@@ -283,10 +283,35 @@ def split_message(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
     return parts
 
 
+def _normalize_telegram_markdown(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r":\s+-\s+", ":\n- ", normalized)
+    lines: list[str] = []
+    for raw_line in normalized.split("\n"):
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        if stripped.startswith(("- ", "* ")) and " - " in stripped[2:]:
+            bullet = stripped[0]
+            items = [item.strip() for item in stripped[2:].split(" - ") if item.strip()]
+            if len(items) > 1:
+                for item in items:
+                    lines.append(f"{indent}{bullet} {item}")
+                continue
+        lines.append(line)
+    normalized = "\n".join(lines)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized
+
+
 def markdown_to_telegram_html(text: str) -> str:
     if not text:
         return ""
 
+    text = _normalize_telegram_markdown(text)
     original_text = text
     token_map: dict[str, str] = {}
 
@@ -324,7 +349,7 @@ def markdown_to_telegram_html(text: str) -> str:
     text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
     text = re.sub(r"(?<![a-zA-Z0-9])_([^_]+)_(?![a-zA-Z0-9])", r"<i>\1</i>", text)
     text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-    text = re.sub(r"^[-*]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"^[-*]\s+", "&#8226; ", text, flags=re.MULTILINE)
 
     for token, rendered in token_map.items():
         text = text.replace(token, rendered)

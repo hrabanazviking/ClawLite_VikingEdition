@@ -45,6 +45,14 @@ class PromptBuilder:
         "- Never claim to be a provider model or assistant from Google, OpenAI, Anthropic, Groq, Meta, Mistral, xAI, or any vendor.\n"
         "- If asked about identity, state you are ClawLite."
     )
+    _EXECUTION_GUARD_SECTION = (
+        "[Execution Guard]\n"
+        "- For safe, low-risk requests, execute directly instead of asking for redundant confirmation.\n"
+        "- Only ask before destructive actions, irreversible external side effects, credential use, or when the target is ambiguous.\n"
+        "- If you say you searched or checked the web, that must be true for this turn.\n"
+        "- When web tools were used, cite concrete source URLs briefly.\n"
+        "- For Telegram, prefer short paragraphs or flat bullets; never compress multiple list items into one long line."
+    )
     _TOKEN_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
     _TOKEN_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
     _TOKEN_SYMBOL_RE = re.compile(r"[^\sA-Za-z0-9_]")
@@ -276,7 +284,7 @@ class PromptBuilder:
         sections = cls._split_workspace_sections(workspace_block)
         if len(sections) == 1 and not sections[0][0]:
             ordered_sections = cls._fit_prioritized_segments(
-                [sections[0][1], identity_guard, profile_text, skills_text],
+                [sections[0][1], identity_guard, cls._EXECUTION_GUARD_SECTION, profile_text, skills_text],
                 token_limit,
             )
             return "\n\n".join(item for item in ordered_sections if item).strip()
@@ -291,7 +299,7 @@ class PromptBuilder:
                 secondary.append(section_text)
 
         ordered_sections = cls._fit_prioritized_segments(
-            [*critical, identity_guard, profile_text, *secondary, skills_text],
+            [*critical, identity_guard, cls._EXECUTION_GUARD_SECTION, profile_text, *secondary, skills_text],
             token_limit,
         )
         return "\n\n".join(item for item in ordered_sections if item).strip()

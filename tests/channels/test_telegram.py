@@ -2225,6 +2225,17 @@ def test_telegram_markdown_code_tokens_do_not_collide_with_user_text() -> None:
     assert "\\x00TG_IC_deadbeefdeadbeef\\x00" in rendered
 
 
+def test_telegram_markdown_expands_inline_bullets_into_readable_lines() -> None:
+    rendered = markdown_to_telegram_html(
+        "O que eu faço melhor: - responder - editar arquivos - rodar testes"
+    )
+
+    assert "O que eu faço melhor:\n" in rendered
+    assert "&#8226; responder" in rendered
+    assert "&#8226; editar arquivos" in rendered
+    assert "&#8226; rodar testes" in rendered
+
+
 def test_telegram_module_import_does_not_call_setup_logging() -> None:
     source = Path(telegram_module.__file__).read_text(encoding="utf-8")
     assert "from clawlite.utils.logging import setup_logging" not in source

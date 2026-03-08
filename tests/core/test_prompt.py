@@ -180,6 +180,9 @@ def test_prompt_builder_adds_always_on_identity_guard_section(tmp_path: Path) ->
     assert "[Identity Guard]" in out.system_prompt
     assert "Always answer as ClawLite." in out.system_prompt
     assert "Never claim to be a provider model" in out.system_prompt
+    assert "[Execution Guard]" in out.system_prompt
+    assert "execute directly instead of asking for redundant confirmation" in out.system_prompt
+    assert "If you say you searched or checked the web" in out.system_prompt
 
 
 def test_prompt_builder_token_estimate_is_deterministic_and_not_len_div_4() -> None:

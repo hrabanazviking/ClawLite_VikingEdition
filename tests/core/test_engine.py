@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 import gc
+import json
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,44 @@ class FakeFixedTextProvider:
     async def complete(self, *, messages, tools):
         del messages, tools
         return ProviderResult(text=self.text, tool_calls=[], model="fake/model")
+
+
+class FakeWebToolProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, *, messages, tools):
+        del messages, tools
+        self.calls += 1
+        if self.calls == 1:
+            return ProviderResult(
+                text="checking the web",
+                tool_calls=[ToolCall(name="web_search", arguments={"query": "openclaw"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="OpenClaw is an autonomous assistant stack.", tool_calls=[], model="fake/model")
+
+
+class FakeWebSearchTools:
+    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+        del arguments, session_id, channel, user_id
+        if name != "web_search":
+            raise AssertionError(f"unexpected tool {name}")
+        return json.dumps(
+            {
+                "ok": True,
+                "tool": "web_search",
+                "result": {
+                    "items": [
+                        {"title": "OpenClaw", "url": "https://openclaw.ai/", "snippet": "site"},
+                        {"title": "GitHub", "url": "https://github.com/openclaw", "snippet": "repo"},
+                    ]
+                },
+            }
+        )
+
+    def schema(self):
+        return [{"name": "web_search", "description": "search web", "arguments": {"query": "string"}}]
 
 
 class SessionStoreCapture:
@@ -2850,3 +2889,31 @@ def test_engine_stop_requests_expire_by_ttl_and_cleanup() -> None:
         assert engine._stop_requested(session_id="cli:active-stop", stop_event=None) is False
     finally:
         engine_module.time.monotonic = original_monotonic
+
+
+def test_engine_softens_unverified_web_claims_without_web_tools() -> None:
+    async def _scenario() -> None:
+        provider = FakeFixedTextProvider(
+            "Pesquisei na internet e aqui vai o resumo objetivo: OpenClaw e um projeto de agentes."
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools())
+
+        out = await engine.run(session_id="cli:web-claim", user_text="o que e openclaw?")
+        assert "Pesquisei na internet" not in out.text
+        assert "Com base no contexto disponível" in out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_appends_sources_after_real_web_tool_usage() -> None:
+    async def _scenario() -> None:
+        provider = FakeWebToolProvider()
+        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools())
+
+        out = await engine.run(session_id="cli:web-sources", user_text="pesquise openclaw")
+        assert out.text.startswith("OpenClaw is an autonomous assistant stack.")
+        assert "Sources:" in out.text
+        assert "https://openclaw.ai/" in out.text
+        assert "https://github.com/openclaw" in out.text
+
+    asyncio.run(_scenario())

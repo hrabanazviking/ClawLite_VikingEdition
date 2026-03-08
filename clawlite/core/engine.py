@@ -294,6 +294,21 @@ class AgentEngine:
         r"(?:\s*[.!?]+|\s*$)",
         re.IGNORECASE,
     )
+    _WEB_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch", "web_search"})
+    _URL_RE = re.compile(r"https?://[^\s)<>\"]+")
+    _WEB_CLAIM_RE = re.compile(
+        r"\b(?:"
+        r"pesquisei(?:\s+na\s+(?:internet|web))?"
+        r"|busquei(?:\s+na\s+(?:internet|web))?"
+        r"|fiz\s+uma\s+busca(?:\s+na\s+(?:internet|web))?"
+        r"|procurei(?:\s+na\s+(?:internet|web))?"
+        r"|i\s+searched(?:\s+the\s+web|\s+online)?"
+        r"|i\s+looked\s+it\s+up(?:\s+online)?"
+        r"|i\s+researched(?:\s+online)?"
+        r"|i\s+browsed(?:\s+the\s+web)?"
+        r")\b",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -2023,6 +2038,94 @@ class AgentEngine:
 
         return f"{normalized_main}{digest_suffix}"
 
+    @classmethod
+    def _extract_web_source_urls(cls, messages: list[dict[str, Any]], *, limit: int = 3) -> list[str]:
+        seen: set[str] = set()
+        urls: list[str] = []
+
+        def add_url(raw: Any) -> None:
+            value = str(raw or "").strip().rstrip(".,;)")
+            if not value or not cls._URL_RE.match(value) or value in seen:
+                return
+            seen.add(value)
+            urls.append(value)
+
+        for message in messages:
+            if str(message.get("role", "")).strip() != "tool":
+                continue
+            name = str(message.get("name", "")).strip()
+            if name not in cls._WEB_TOOL_NAMES:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            payload: dict[str, Any] | None = None
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+
+            if payload and payload.get("ok") is True:
+                result = payload.get("result")
+                if isinstance(result, dict):
+                    if name == "web_fetch":
+                        add_url(result.get("final_url"))
+                        add_url(result.get("url"))
+                    elif name == "web_search":
+                        items = result.get("items")
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    add_url(item.get("url"))
+                                    if len(urls) >= limit:
+                                        return urls
+            for match in cls._URL_RE.findall(content):
+                add_url(match)
+                if len(urls) >= limit:
+                    return urls
+        return urls
+
+    @classmethod
+    def _soften_unverified_web_claims(cls, text: str, *, used_web_tools: bool) -> str:
+        if used_web_tools or not text:
+            return text
+
+        def repl(match: re.Match[str]) -> str:
+            token = match.group(0)
+            replacement = "com base no contexto disponível"
+            if token[:1].isupper():
+                replacement = replacement.capitalize()
+            return replacement
+
+        return cls._WEB_CLAIM_RE.sub(repl, text)
+
+    @classmethod
+    def _append_web_sources(cls, text: str, sources: list[str]) -> str:
+        clean_text = str(text or "").rstrip()
+        if not clean_text or not sources:
+            return clean_text
+        if cls._URL_RE.search(clean_text):
+            return clean_text
+        if re.search(r"(?im)^(sources|fontes):\s*$", clean_text):
+            return clean_text
+        source_lines = "\n".join(f"- {url}" for url in sources[:3])
+        return f"{clean_text}\n\nSources:\n{source_lines}"
+
+    @classmethod
+    def _postprocess_final_output(
+        cls,
+        *,
+        output_text: str,
+        messages: list[dict[str, Any]],
+    ) -> str:
+        sources = cls._extract_web_source_urls(messages)
+        updated = cls._soften_unverified_web_claims(output_text, used_web_tools=bool(sources))
+        if sources:
+            updated = cls._append_web_sources(updated, sources)
+        return updated
+
     def _stop_requested(self, *, session_id: str, stop_event: asyncio.Event | None) -> bool:
         if stop_event is not None and stop_event.is_set():
             return True
@@ -2610,6 +2713,11 @@ class AgentEngine:
         enforcement = self.identity_enforcer.enforce(user_text=user_text, output_text=final.text)
         final = ProviderResult(
             text=enforcement.text,
+            tool_calls=list(final.tool_calls),
+            model=final.model,
+        )
+        final = ProviderResult(
+            text=self._postprocess_final_output(output_text=final.text, messages=messages),
             tool_calls=list(final.tool_calls),
             model=final.model,
         )

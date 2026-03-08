@@ -42,6 +42,7 @@ class ExecTool(Tool):
         "ver",
         "vol",
     }
+    _SHELL_META_RE = re.compile(r"(^|[^\\])(?:\|\||&&|[|<>;`])")
 
     def __init__(
         self,
@@ -241,6 +242,15 @@ class ExecTool(Tool):
             return f"/{value[0].lower()}/{value[3:]}"
         return value
 
+    @classmethod
+    def _needs_shell_wrapper(cls, command: str) -> bool:
+        value = str(command or "")
+        if not value.strip():
+            return False
+        if cls._SHELL_META_RE.search(value):
+            return True
+        return "$(" in value
+
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
         command = str(arguments.get("command", "")).strip()
         log = bind_event("tool.exec", session=ctx.session_id, tool=self.name)
@@ -269,6 +279,8 @@ class ExecTool(Tool):
         env_path = str(env.get("PATH", "") or "")
 
         bash_path = shutil.which("bash", path=env_path) if os.name == "nt" else None
+        shell_path = None if os.name == "nt" else (shutil.which("bash", path=env_path) or shutil.which("sh", path=env_path))
+        use_shell_wrapper = os.name != "nt" and self._needs_shell_wrapper(command)
         exec_argv = list(argv)
         shell_command = command
         if os.name == "nt":
@@ -286,13 +298,24 @@ class ExecTool(Tool):
         cwd = str(self.workspace_path) if self.restrict_to_workspace else None
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *exec_argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
+            if use_shell_wrapper and shell_path:
+                process = await asyncio.create_subprocess_exec(
+                    shell_path,
+                    "-lc",
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *exec_argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
         except OSError as exc:
             if os.name == "nt":
                 cmd_path = os.environ.get("COMSPEC", "").strip() or shutil.which("cmd", path=env_path)
