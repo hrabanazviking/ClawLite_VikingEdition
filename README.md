@@ -124,6 +124,14 @@ http://127.0.0.1:8787#token=...
 
 The dashboard consumes that fragment once, stores the token locally for the browser session, and removes it from the address bar.
 
+If onboarding is still pending, the dashboard also exposes a `Hatch agent` action that sends:
+
+```text
+Wake up, my friend!
+```
+
+through the normal operator session so the first bootstrap turn can complete.
+
 ### 4. Talk to the agent
 
 ```bash
@@ -265,7 +273,7 @@ The local dashboard is no longer a static landing page. It is a real operator sh
 
 Current tabs:
 
-- 🧭 `Overview` — control plane, event feed, heartbeat trigger, diagnostics snapshot
+- 🧭 `Overview` — control plane, event feed, heartbeat trigger, diagnostics snapshot, and one-click hatch action when bootstrap is pending
 - 💬 `Chat` — live WS/HTTP chat and raw WebSocket frame preview
 - 🗂️ `Sessions` — recent sessions with one-click handoff into chat
 - 🤖 `Automation` — cron, channels, provider recovery, self-evolution state

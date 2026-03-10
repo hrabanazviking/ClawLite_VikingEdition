@@ -5,6 +5,7 @@ const tokenStorageKey = "clawlite.dashboard.token";
 const refreshStorageKey = "clawlite.dashboard.refreshMs";
 const defaultRefreshMs = 15000;
 const maxFeedEntries = 18;
+const HATCH_MESSAGE = "Wake up, my friend!";
 
 const state = {
   activeTab: "overview",
@@ -584,6 +585,13 @@ function renderKnowledge() {
   setBadge("memory-status", memoryMonitor.enabled ? "monitoring" : "disabled", memoryMonitor.enabled ? "ok" : "warn");
 }
 
+function hatchPending() {
+  const payload = state.dashboardState || {};
+  const onboarding = payload.onboarding || {};
+  const bootstrap = payload.bootstrap || {};
+  return Boolean((bootstrap.pending || onboarding.bootstrap_exists) && !onboarding.completed);
+}
+
 function renderOverview() {
   const status = state.status || bootstrap.control_plane || {};
   const ready = Boolean(status.ready);
@@ -610,6 +618,19 @@ function renderOverview() {
 
   setText("nav-refresh-state", state.autoRefreshMs > 0 ? formatDuration(state.autoRefreshMs / 1000) : "manual");
   setText("nav-last-sync", state.lastSyncAt ? formatClock(state.lastSyncAt) : "pending");
+
+  const hatchButton = byId("trigger-hatch");
+  const hatchReady = hatchPending();
+  if (hatchButton) {
+    hatchButton.disabled = !hatchReady;
+    hatchButton.textContent = hatchReady ? "Hatch agent" : "Bootstrap settled";
+  }
+  setText(
+    "hatch-summary",
+    hatchReady
+      ? `Bootstrap is still pending. Click Hatch agent to send \"${HATCH_MESSAGE}\" through the normal operator session and let ClawLite define itself.`
+      : "Bootstrap is already settled. Use chat normally or trigger a heartbeat when you want proactive checks.",
+  );
 
   renderEndpointList();
   renderComponentBoard();
@@ -825,21 +846,32 @@ async function sendHttpMessage() {
   if (!text) {
     return;
   }
-  appendChatEntry("user", text, sessionId);
+  await sendHttpMessageText(text, { sessionId, source: "manual-http" });
   byId("chat-input").value = "";
+}
+
+async function sendHttpMessageText(text, options = {}) {
+  const sessionId = String(options.sessionId || byId("session-input").value.trim() || state.sessionId || "dashboard:operator");
+  const source = String(options.source || "http");
+  const cleanText = String(text || "").trim();
+  if (!cleanText) {
+    return;
+  }
+  appendChatEntry("user", cleanText, sessionId);
+  state.sessionId = sessionId;
   try {
     const payload = await fetchJson(paths.message || "/api/message", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ session_id: sessionId, text }),
+      body: JSON.stringify({ session_id: sessionId, text: cleanText }),
     });
     appendChatEntry("assistant", String(payload.text || ""), String(payload.model || "http"));
-    recordEvent("ok", "HTTP chat request completed", sessionId, payload.model || "http");
+    recordEvent("ok", "HTTP chat request completed", cleanText.slice(0, 80), `${source} | ${payload.model || "http"}`);
   } catch (error) {
     appendChatEntry("assistant", `HTTP error: ${error.message}`, "http");
-    recordEvent("danger", "HTTP chat request failed", error.message, sessionId);
+    recordEvent("danger", "HTTP chat request failed", error.message, `${source} | ${sessionId}`);
   }
 }
 
@@ -887,6 +919,20 @@ async function triggerHeartbeat() {
   }
 }
 
+async function triggerHatch() {
+  if (!hatchPending()) {
+    recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
+    return;
+  }
+  useSession(state.sessionId || "dashboard:operator");
+  setActiveTab("chat");
+  await sendHttpMessageText(HATCH_MESSAGE, {
+    sessionId: state.sessionId || "dashboard:operator",
+    source: "hatch",
+  });
+  await refreshAll("hatch");
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-tab-target]").forEach((node) => {
     node.addEventListener("click", () => setActiveTab(node.dataset.tabTarget || "overview"));
@@ -929,6 +975,9 @@ function bindEvents() {
   });
   byId("trigger-heartbeat").addEventListener("click", () => {
     void triggerHeartbeat();
+  });
+  byId("trigger-hatch").addEventListener("click", () => {
+    void triggerHatch();
   });
   byId("send-chat").addEventListener("click", sendWsMessage);
   byId("send-rest").addEventListener("click", () => {

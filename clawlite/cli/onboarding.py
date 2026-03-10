@@ -670,6 +670,7 @@ _FLOW_CHOICES = {
 }
 
 _SUPPORTED_FLOWS = {"quickstart", "advanced"}
+_HATCH_MESSAGE = "Wake up, my friend!"
 
 
 def _print_banner(console: Console) -> None:
@@ -1128,6 +1129,16 @@ def run_onboarding_wizard(
             if callable(onboarding_status_fn)
             else {"completed": False}
         )
+        generated_bootstrap = any(Path(path).name == "BOOTSTRAP.md" for path in generated_files)
+        bootstrap_pending = bool(
+            (generated_bootstrap or onboarding_status.get("bootstrap_exists", False))
+            and not onboarding_status.get("completed", False)
+        )
+        onboarding_label = (
+            "completed"
+            if onboarding_status.get("completed")
+            else "bootstrap pending" if bootstrap_pending else "not seeded"
+        )
 
         tg_status = "[green]enabled[/]" if config.channels.telegram.enabled else "[dim]disabled[/]"
         token_display = _mask_secret(generated_token, keep=8)
@@ -1135,21 +1146,31 @@ def run_onboarding_wizard(
         model_display = str(config.provider.model or "default")
 
         sections_done = ", ".join(sorted(visited)) if visited else "none"
+        summary_text = (
+            f"[bold green]🦊 ClawLite is ready![/]\n\n"
+            f"  [bold]Gateway URL:[/]   {gateway_url}\n"
+            f"  [bold]Token:[/]         {token_display}\n"
+            f"  [bold]Flow:[/]          {flow}\n"
+            f"  [bold]Provider:[/]      {provider_display} / {model_display}\n"
+            f"  [bold]Telegram:[/]      {tg_status}\n"
+            f"  [bold]Sections:[/]      {sections_done}\n"
+            f"  [bold]Onboarding:[/]    {onboarding_label}\n"
+        )
+        if bootstrap_pending:
+            summary_text += (
+                f"  [bold]First hatch:[/]    Open the dashboard and click Hatch agent  "
+                f"[dim](sends \"{_HATCH_MESSAGE}\")[/]\n"
+            )
+        summary_text += (
+            f"  [bold]Config saved:[/]  {saved_path}\n\n"
+            f"[dim]Start the agent:[/]  [bold cyan]clawlite start[/]\n"
+            f"[dim]Dashboard:[/]        [bold cyan]{gateway_url}[/]\n"
+            f"[dim]Dashboard + token:[/] [bold cyan]{dashboard_url_with_token}[/]"
+        )
 
         console.print(
             Panel(
-                f"[bold green]🦊 ClawLite is ready![/]\n\n"
-                f"  [bold]Gateway URL:[/]   {gateway_url}\n"
-                f"  [bold]Token:[/]         {token_display}\n"
-                f"  [bold]Flow:[/]          {flow}\n"
-                f"  [bold]Provider:[/]      {provider_display} / {model_display}\n"
-                f"  [bold]Telegram:[/]      {tg_status}\n"
-                f"  [bold]Sections:[/]      {sections_done}\n"
-                f"  [bold]Onboarding:[/]    {'completed' if onboarding_status.get('completed') else 'bootstrap pending'}\n"
-                f"  [bold]Config saved:[/]  {saved_path}\n\n"
-                f"[dim]Start the agent:[/]  [bold cyan]clawlite start[/]\n"
-                f"[dim]Dashboard:[/]        [bold cyan]{gateway_url}[/]\n"
-                f"[dim]Dashboard + token:[/] [bold cyan]{dashboard_url_with_token}[/]",
+                summary_text,
                 title="[green]Setup complete[/]",
                 border_style="green",
                 padding=(1, 2),
@@ -1201,6 +1222,8 @@ def run_onboarding_wizard(
                 "gateway_url": gateway_url,
                 "dashboard_url_with_token": dashboard_url_with_token,
                 "gateway_token": generated_token,
+                "bootstrap_pending": bootstrap_pending,
+                "recommended_first_message": _HATCH_MESSAGE if bootstrap_pending else "",
             },
         }
     except KeyboardInterrupt:

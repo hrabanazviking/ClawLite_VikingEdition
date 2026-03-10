@@ -2282,6 +2282,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert "Gateway Control Plane" in body
         assert "Operator view for health, chat, diagnostics, tools, and WebSocket connectivity." in body
         assert "Trigger heartbeat" in body
+        assert "Hatch agent" in body
         assert "Signal Feed" in body
         assert "Workspace Runtime Files" in body
         assert "Recent Sessions" in body
@@ -2318,6 +2319,8 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "const bootstrap = window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ || {}" in js.text
     assert "connectWs" in js.text
     assert "triggerHeartbeat" in js.text
+    assert "triggerHatch" in js.text
+    assert "Wake up, my friend!" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
     assert "history.replaceState" in js.text
