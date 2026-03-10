@@ -5198,8 +5198,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     return app
 
 
-def run_gateway(host: str | None = None, port: int | None = None) -> None:
-    cfg = load_config()
+def run_gateway(
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    config: AppConfig | None = None,
+    config_path: str | None = None,
+) -> None:
+    cfg = config or load_config(config_path)
     app = create_app(cfg)
     resolved_host = host or cfg.gateway.host
     resolved_port = port or int(cfg.gateway.port)

@@ -92,7 +92,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     cfg = _ensure_config_materialized(args.config)
     host = args.host or cfg.gateway.host
     port = args.port or cfg.gateway.port
-    run_gateway(host=host, port=port)
+    run_gateway(host=host, port=port, config=cfg, config_path=args.config)
     return 0
 
 

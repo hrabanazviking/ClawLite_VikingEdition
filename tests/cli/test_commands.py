@@ -410,11 +410,14 @@ def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:
 
     called = {"ok": False}
 
-    def _fake_run_gateway(*, host, port):
+    def _fake_run_gateway(*, host, port, config=None, config_path=None):
         called["ok"] = True
         assert host == "127.0.0.1"
         assert port == 8787
+        assert config is not None
+        assert config_path == str(config_path_obj)
 
+    config_path_obj = config_path
     monkeypatch.setattr("clawlite.gateway.server.run_gateway", _fake_run_gateway)
     rc = main(["--config", str(config_path), "gateway"])
     assert rc == 0
@@ -445,10 +448,12 @@ def test_cli_start_creates_missing_default_config_and_prints_notice(tmp_path: Pa
 
     called = {"ok": False}
 
-    def _fake_run_gateway(*, host, port):
+    def _fake_run_gateway(*, host, port, config=None, config_path=None):
         called["ok"] = True
         assert host == "127.0.0.1"
         assert port == 8787
+        assert config is not None
+        assert config_path is None
 
     monkeypatch.setattr("clawlite.gateway.server.run_gateway", _fake_run_gateway)
 
@@ -459,6 +464,38 @@ def test_cli_start_creates_missing_default_config_and_prints_notice(tmp_path: Pa
 
     out = capsys.readouterr().out
     assert "Config criado em ~/.clawlite/config.json." in out
+
+
+def test_cli_start_uses_custom_config_values_for_runtime_and_port(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "custom.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "gateway": {"host": "127.0.0.1", "port": 19999, "auth": {"mode": "required", "token": "tok-123456"}},
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_gateway(*, host, port, config=None, config_path=None):
+        captured["host"] = host
+        captured["port"] = port
+        captured["config"] = config
+        captured["config_path"] = config_path
+
+    monkeypatch.setattr("clawlite.gateway.server.run_gateway", _fake_run_gateway)
+
+    rc = main(["--config", str(config_path), "start"])
+    assert rc == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 19999
+    assert captured["config_path"] == str(config_path)
+    assert captured["config"].gateway.port == 19999
 
 
 def test_cli_help_version_status_do_not_import_gateway(tmp_path: Path, capsys) -> None:
