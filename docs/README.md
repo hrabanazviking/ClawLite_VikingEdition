@@ -4,7 +4,14 @@ Start here if you are setting up ClawLite from GitHub and want the current opera
 
 ## Start Here
 
-- [Repository README](../README.md) - overview and 5-minute setup
+- [Repository README](../README.md) - overview and quickstart
+- [Status](./STATUS.md) - current milestone, strengths, and known gaps
+- [Autonomy Plan](./AUTONOMY_PLAN.md) - phased plan for robustness and 24/7 autonomy
+- [Runbook](./RUNBOOK.md) - operator validation and incident flow
+- [Releasing](./RELEASING.md) - tag and release workflow
+
+## Core Reference
+
 - [CLI](./cli.md) - every command with examples
 - [Channels](./channels.md) - Telegram, Discord, Email, WhatsApp, Slack, and runtime behavior
 - [Providers](./providers.md) - provider matrix, auth, aliases, local runtimes, and failover notes
@@ -15,9 +22,9 @@ Start here if you are setting up ClawLite from GitHub and want the current opera
 ## Additional Reference
 
 - [Quickstart](./QUICKSTART.md)
+- [Architecture](./ARCHITECTURE.md)
 - [Configuration](./CONFIGURATION.md)
 - [API](./API.md)
 - [Skills](./SKILLS.md)
-- [Architecture](./ARCHITECTURE.md)
 - [Operations](./OPERATIONS.md)
 - [Telegram Reliability Semantics](./TELEGRAM_RELIABILITY_SEMANTICS.md)

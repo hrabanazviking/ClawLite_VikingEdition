@@ -4,6 +4,13 @@ ClawLite is a Python autonomous assistant with a local gateway, pluggable LLM pr
 
 It is built for developers who want to get a bot running locally first, then wire it into Telegram, Discord, Email, WhatsApp, or Slack.
 
+## Current State
+
+- `main` is the living branch and may contain hardening work beyond the latest tagged release.
+- The runtime already includes gateway compatibility endpoints, structured diagnostics, supervised background loops, persistent memory controls, and provider/channel operations.
+- The current execution focus is operational robustness plus OpenClaw parity for dashboard, onboarding, bootstrap, heartbeat, providers, channels, and autonomy.
+- For the live engineering snapshot, see `docs/STATUS.md` and `docs/AUTONOMY_PLAN.md`.
+
 ## Why ClawLite
 
 - Local-first runtime with CLI, HTTP, and WebSocket entry points.
@@ -40,6 +47,8 @@ Quickstart does four things for you:
 - Keeps the gateway local on `127.0.0.1:8787`.
 - Enables token auth on the gateway.
 - Offers Telegram setup and bootstraps the workspace files.
+
+Use `clawlite configure --flow advanced` when you want the manual section-by-section wizard.
 
 ### 3) Start the gateway
 
@@ -134,6 +143,11 @@ The full command reference lives in `docs/cli.md`.
 
 ## Documentation
 
+- `docs/README.md` - docs index
+- `docs/STATUS.md` - current state and active milestone
+- `docs/AUTONOMY_PLAN.md` - phased robustness and autonomy plan
+- `docs/RUNBOOK.md` - operator runbook and validation flows
+- `docs/RELEASING.md` - tag and release workflow
 - `docs/cli.md` - every CLI command with examples
 - `docs/channels.md` - Telegram, Discord, Email, WhatsApp, Slack, and channel runtime behavior
 - `docs/providers.md` - supported providers, auth, aliases, local runtimes, and failover notes
@@ -144,7 +158,8 @@ The full command reference lives in `docs/cli.md`.
 - `docs/API.md` - gateway HTTP and WebSocket surfaces
 - `docs/SKILLS.md` - skill discovery and lifecycle
 - `docs/ARCHITECTURE.md` - runtime architecture
-- `docs/OPERATIONS.md` - diagnostics and operational runbooks
+- `docs/OPERATIONS.md` - diagnostics and operational commands
+- `CHANGELOG.md` - shipped and unreleased changes
 
 ## Development
 

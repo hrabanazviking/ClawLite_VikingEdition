@@ -17,6 +17,16 @@
 - Evolve MCP integration and specialized providers.
 - Publish more objective operations and release guides for personal deploys.
 
+## Execution Mode (2026-03)
+
+- Active mission: make ClawLite robust, recoverable, and operationally autonomous with `ref/openclaw` and `ref/nanobot` as behavior references.
+- Current milestone: Phase 1 — dashboard/control-plane parity after the docs/release hygiene baseline.
+- Delivery policy: each green slice gets its own commit and push; tags/releases happen only at the end of a validated milestone.
+- Source-of-truth docs for the current cycle:
+  - `docs/STATUS.md`
+  - `docs/AUTONOMY_PLAN.md`
+  - `docs/RELEASING.md`
+
 ## Minimum Release Criteria
 
 1. `pytest -q` passing.

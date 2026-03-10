@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Project status, autonomy execution plan, operator runbook, and release workflow docs for the current hardening cycle.
 - OpenClaw-compatible filesystem and memory tool aliases to reduce migration friction (`663a8f0`).
 - Native `apply_patch` and process-control tools for safer in-agent file edits and runtime operations (`a858966`).
 - Session orchestration and background subagent tools in the runtime tool surface (`5e9d829`).
@@ -15,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional OpenClaw operational skills ported into ClawLite (`461180d`, `f6be3f4`).
 
 ### Changed
+- Synced README, docs index, and roadmap with the real repository state, validation commands, and milestone workflow.
 - Enforced ClawLite identity in prompts and emitted outputs to avoid assistant-name drift (`6d5c99a`).
 - Added layered tool policy resolution, then tightened tool-policy handling across memory-forget and run-skill paths (`e1a0033`, `1203c64`, `f6592b2`).
 - Hardened long-running reliability for provider retries, channel dispatch/reuse, gateway background tasks, cron execution, and memory compaction/monitor persistence (`da50a2a`, `017844f`, `aefaade`, `2e891b1`, `60773a5`).

@@ -1,0 +1,93 @@
+# ClawLite Status
+
+Last updated: 2026-03-10
+
+## Summary
+
+ClawLite is already a functional local-first agent runtime with:
+
+- FastAPI gateway with HTTP + WebSocket control surfaces
+- structured diagnostics and compatibility aliases
+- persistent memory, cron, heartbeat, and subagent primitives
+- channel manager plus Telegram and other outbound integrations
+- provider auth lifecycle, preflight validation, and release-preflight helpers
+
+The main engineering goal for the current cycle is not a rewrite.
+It is to turn the existing runtime into a durable 24/7 operator-grade system with strong recovery, better control-plane UX, and parity with the most useful OpenClaw behaviors.
+
+## Current Baseline
+
+- Latest tag in the repository: `v0.5.0-beta.2`
+- `main` already contains unreleased hardening work beyond that tag
+- CI currently covers:
+  - pytest on Python 3.10 and 3.12
+  - Ruff critical lint checks
+  - smoke imports
+  - autonomy contract tests
+
+## Strengths Already Present
+
+- Gateway compatibility endpoints: `/`, `/api/status`, `/api/message`, `/api/token`, `WS /ws`
+- Structured diagnostics for runtime, HTTP, provider, channels, memory, and subagents
+- Supervised background loops for autonomy, channel delivery, channel recovery, subagent maintenance, and self evolution
+- Workspace templates plus bootstrap/heartbeat lifecycle foundations
+- Provider auth/status/validation flows and release-preflight command surface
+- Durable config writes and heartbeat state persistence patterns
+
+## Main Gaps To Close
+
+1. Rich dashboard/control-plane UI parity with `ref/openclaw`
+2. Onboarding parity for quickstart, advanced flow, live probes, and final operator handoff
+3. Heartbeat parity for wake-aware scheduling, dedupe, and target-aware delivery
+4. Broader provider coverage plus multi-hop failover and local runtime autodiscovery
+5. Telegram/channel durability: pairing, offset safety, media ingest, replay after restart
+6. Runtime recovery durability: persisted outbound/dead-letter state and component health registry
+7. Skill lifecycle, hot reload, and dependency fallbacks
+8. Subagent lifecycle, orchestration, and context-isolation hardening
+9. Advanced memory and self-improvement pipelines after the platform is stable
+
+## Phase Progress
+
+- Phase 0 - docs and release hygiene: delivered in this cycle
+- Active milestone: Phase 1 - dashboard and control-plane parity
+
+Scope:
+
+- port the richer dashboard/control-plane shell from OpenClaw into ClawLite
+- preserve compatibility endpoints while improving operator UX and observability
+- keep the gateway contract stable while replacing the simple root page with a real dashboard
+
+Exit criteria:
+
+- dashboard assets are served by ClawLite
+- browser reconnect/control-plane behavior is stable
+- gateway compatibility endpoints remain intact
+
+## Validation Baseline
+
+Use these commands as the minimum local operator checks:
+
+```bash
+python -m clawlite.cli --help
+python -m pytest tests/ -q --tb=short
+clawlite validate config
+clawlite validate preflight --gateway-url http://127.0.0.1:8787
+bash scripts/smoke_test.sh
+```
+
+## Delivery Policy
+
+- commit and push every green slice
+- update docs in the same cycle as behavior changes
+- reserve tags and GitHub releases for the end of a validated milestone
+- keep `CHANGELOG.md` current as work lands on `main`
+
+## Reference Repositories
+
+- Behavioral parity reference: `/root/projetos/ref/openclaw`
+- Autonomy/reliability reference: `/root/projetos/ref/nanobot`
+- Memory inspiration reference: `/root/projetos/memU`
+
+## Next Step
+
+The next implementation target is Phase 1: port the richer dashboard/control-plane surfaces from OpenClaw into ClawLite without breaking the current gateway contract.
