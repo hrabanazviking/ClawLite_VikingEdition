@@ -122,14 +122,14 @@ def model_check_hints(model_check: dict[str, Any], *, model: str) -> list[str]:
         return []
     detail = str(model_check.get("detail", "") or "").strip().lower()
     if detail == "router_model_auto":
-        return ["O modelo 'auto' usa roteamento do gateway; a lista remota nao exige match exato."]
+        return ["The 'auto' model uses gateway routing; the remote list does not require an exact match."]
     if not bool(model_check.get("checked", False)):
         return []
     if bool(model_check.get("ok", False)):
         return []
     model_name = str(model or "").strip()
     if detail == "model_not_listed" and model_name:
-        return [f"O modelo '{model_name}' nao apareceu na lista remota do provider; valide nome, conta e permissoes."]
+        return [f"Model '{model_name}' did not appear in the provider's remote list; verify the name, account, and permissions."]
     if detail == "model_not_listed":
-        return ["O modelo configurado nao apareceu na lista remota do provider; valide nome, conta e permissoes."]
+        return ["The configured model did not appear in the provider's remote list; verify the name, account, and permissions."]
     return []

@@ -847,7 +847,7 @@ def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, 
             "api_key_source": "env:OPENAI_API_KEY",
             "key_envs": ["OPENAI_API_KEY"],
             "model_check": {"checked": False, "ok": True},
-            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
+            "onboarding_hint": "OpenAI responds via the standard OpenAI-compatible endpoint; validate billing and the active project.",
             "hints": ["Credenciais validas."],
         },
     )
@@ -1817,7 +1817,7 @@ def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, cap
     assert payload["recommended_model"] == "openai/gpt-4o-mini"
     assert "openai/gpt-4o-mini" in payload["recommended_models"]
     assert "billing" in payload["onboarding_hint"].lower()
-    assert any("live probe" in row.lower() for row in payload["hints"])
+    assert any("live provider probe" in row.lower() for row in payload["hints"])
 
 
 def test_cli_provider_login_openai_codex_keep_model_preserves_active_model(tmp_path: Path, capsys) -> None:
@@ -1957,7 +1957,7 @@ def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: P
     assert payload["transport"] == "local_runtime"
     assert payload["probe_method"] == "GET"
     assert payload["error_class"] == "network"
-    assert any("Inicie o servidor vLLM" in row for row in payload["hints"])
+    assert any("Start the vLLM server" in row for row in payload["hints"])
 
 
 def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path, monkeypatch) -> None:
@@ -2147,7 +2147,7 @@ def test_provider_live_probe_openai_model_not_listed_returns_soft_warning(tmp_pa
     assert payload["model_check"]["checked"] is True
     assert payload["model_check"]["ok"] is False
     assert payload["model_check"]["detail"] == "model_not_listed"
-    assert any("nao apareceu na lista remota" in row.lower() for row in payload["hints"])
+    assert any("did not appear in the provider's remote list" in row.lower() for row in payload["hints"])
 
 
 def test_provider_live_probe_prefers_configured_vendor_transport_over_generic_model(tmp_path: Path, monkeypatch) -> None:

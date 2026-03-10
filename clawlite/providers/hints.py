@@ -70,100 +70,100 @@ def provider_probe_hints(
     hints: list[str] = []
 
     if transport in {"anthropic", "anthropic_compatible"}:
-        _append_hint(hints, "Este provider usa transporte Anthropic-compatible; o probe consulta /messages ou /models.")
+        _append_hint(hints, "This provider uses Anthropic-compatible transport; the probe checks /messages or /models.")
     elif transport == "openai_compatible":
-        _append_hint(hints, "Este provider usa transporte OpenAI-compatible; o probe consulta /models.")
+        _append_hint(hints, "This provider uses OpenAI-compatible transport; the probe checks /models.")
     elif transport == "oauth_codex_responses":
-        _append_hint(hints, "Este provider usa Codex Responses com OAuth; o probe consulta /codex/responses.")
+        _append_hint(hints, "This provider uses Codex Responses with OAuth; the probe checks /codex/responses.")
     elif transport == "oauth_openai_compatible":
-        _append_hint(hints, "Este provider usa transporte OpenAI-compatible com autenticacao OAuth.")
+        _append_hint(hints, "This provider uses OpenAI-compatible transport with OAuth authentication.")
     elif transport == "local_runtime" and provider_name == "ollama":
-        _append_hint(hints, "O probe local do Ollama verifica /api/tags e confirma o modelo configurado.")
+        _append_hint(hints, "The Ollama local probe checks /api/tags and verifies the configured model.")
     elif transport == "local_runtime" and provider_name == "vllm":
-        _append_hint(hints, "O probe local do vLLM verifica /health e /v1/models.")
+        _append_hint(hints, "The vLLM local probe checks /health and /v1/models.")
 
     if not error_text and int(status_code or 0) < 400:
         if provider_name == "ollama":
-            _append_hint(hints, "Runtime local do Ollama respondeu normalmente.")
+            _append_hint(hints, "The local Ollama runtime responded normally.")
         elif provider_name == "vllm":
-            _append_hint(hints, "Runtime local do vLLM respondeu normalmente.")
+            _append_hint(hints, "The local vLLM runtime responded normally.")
         return hints
 
     if error_text == "api_key_missing":
         if str(auth_mode or "").strip().lower() == "oauth":
-            _append_hint(hints, "Execute 'clawlite provider login openai-codex' para autenticar o Codex.")
+            _append_hint(hints, "Run 'clawlite provider login openai-codex' to authenticate Codex.")
         else:
-            _append_hint(hints, f"Configure a chave do provider '{provider_name}' em config ou variavel de ambiente antes de testar novamente.")
+            _append_hint(hints, f"Configure the API key for provider '{provider_name}' in config or an environment variable before testing again.")
             if key_envs:
-                _append_hint(hints, f"Variaveis sugeridas: {', '.join(str(item) for item in key_envs[:3])}.")
+                _append_hint(hints, f"Suggested environment variables: {', '.join(str(item) for item in key_envs[:3])}.")
         return hints
 
     if error_text == "base_url_missing":
-        _append_hint(hints, f"Configure a base URL do provider '{provider_name}' antes de executar o probe novamente.")
+        _append_hint(hints, f"Configure the base URL for provider '{provider_name}' before running the probe again.")
         if default_base_url:
-            _append_hint(hints, f"Base URL padrao esperada: {default_base_url}.")
+            _append_hint(hints, f"Expected default base URL: {default_base_url}.")
         return hints
 
     if lowered.startswith("provider_config_error:ollama_unreachable:") or (provider_name == "ollama" and _networkish(lowered)):
-        _append_hint(hints, "Inicie o runtime local com 'ollama serve' e confirme a porta 11434.")
+        _append_hint(hints, "Start the local runtime with 'ollama serve' and confirm port 11434.")
     if lowered.startswith("provider_config_error:ollama_model_missing:"):
         model_name = error_text.rsplit(":", 1)[-1]
-        _append_hint(hints, f"Baixe ou carregue o modelo local com 'ollama pull {model_name}'.")
+        _append_hint(hints, f"Download or load the local model with 'ollama pull {model_name}'.")
     if lowered.startswith("provider_config_error:vllm_unreachable:") or (provider_name == "vllm" and _networkish(lowered)):
-        _append_hint(hints, "Inicie o servidor vLLM e confirme a base URL configurada.")
+        _append_hint(hints, "Start the vLLM server and confirm the configured base URL.")
     if lowered.startswith("provider_config_error:vllm_model_missing:"):
         model_name = error_text.rsplit(":", 1)[-1]
-        _append_hint(hints, f"Suba o modelo '{model_name}' no vLLM ou ajuste o modelo configurado.")
+        _append_hint(hints, f"Serve model '{model_name}' in vLLM or adjust the configured model.")
 
     if lowered.startswith("http_status:401") or lowered.startswith("http_status:403"):
-        _append_hint(hints, "A autenticacao foi rejeitada; revise a chave configurada e a conta associada.")
+        _append_hint(hints, "Authentication was rejected; review the configured key and the associated account.")
     if lowered.startswith("http_status:404"):
         if transport == "anthropic":
-            _append_hint(hints, "O endpoint Anthropic-compatible nao foi encontrado; revise a api_base e a compatibilidade do provider.")
+            _append_hint(hints, "The Anthropic-compatible endpoint was not found; review the api_base and provider compatibility.")
         elif provider_name in {"ollama", "vllm"}:
-            _append_hint(hints, "O runtime respondeu sem a rota esperada; revise a base URL e a versao do servidor.")
+            _append_hint(hints, "The runtime responded without the expected route; review the base URL and server version.")
         elif default_base_url:
-            _append_hint(hints, f"Revise se a api_base segue o padrao esperado para este provider: {default_base_url}.")
+            _append_hint(hints, f"Review whether the api_base follows the expected pattern for this provider: {default_base_url}.")
     if lowered.startswith("http_status:429"):
-        _append_hint(hints, "O provider limitou a requisicao; verifique rate limit, quota e billing.")
+        _append_hint(hints, "The provider rate-limited the request; check rate limits, quota, and billing.")
     if status_code >= 500:
-        _append_hint(hints, "O provider remoto retornou erro 5xx; tente novamente ou use o fallback configurado.")
+        _append_hint(hints, "The remote provider returned a 5xx error; retry or use the configured fallback.")
     if _networkish(lowered):
-        _append_hint(hints, "Nao foi possivel conectar ao provider; confirme DNS, porta, firewall e disponibilidade do endpoint.")
+        _append_hint(hints, "Could not connect to the provider; confirm DNS, port, firewall, and endpoint availability.")
     if "timeout" in lowered or "timed out" in lowered:
-        _append_hint(hints, "O endpoint demorou para responder; aumente o timeout ou teste outro provider.")
+        _append_hint(hints, "The endpoint took too long to respond; increase the timeout or try another provider.")
     if detail_lowered:
         if "insufficient_quota" in detail_lowered or "billing" in detail_lowered or "quota" in detail_lowered:
-            _append_hint(hints, "O detalhe do provider indica quota ou billing esgotado.")
+            _append_hint(hints, "The provider detail indicates quota or billing is exhausted.")
         if "model" in detail_lowered and ("not found" in detail_lowered or "does not exist" in detail_lowered or "unknown" in detail_lowered):
             if model:
-                _append_hint(hints, f"O provider rejeitou o modelo configurado; revise '{model}'.")
+                _append_hint(hints, f"The provider rejected the configured model; review '{model}'.")
             else:
-                _append_hint(hints, "O provider rejeitou o modelo configurado; revise o nome do modelo.")
+                _append_hint(hints, "The provider rejected the configured model; review the model name.")
         if "invalid api key" in detail_lowered or "unauthorized" in detail_lowered or "authentication" in detail_lowered:
-            _append_hint(hints, "O detalhe retornado aponta problema de autenticacao ou permissao.")
+            _append_hint(hints, "The returned detail points to an authentication or permission problem.")
 
     provider_base_url_hints: dict[str, str] = {
-        "openrouter": "OpenRouter normalmente responde em https://openrouter.ai/api/v1.",
-        "groq": "Groq normalmente responde em https://api.groq.com/openai/v1.",
-        "gemini": "Gemini OpenAI-compatible normalmente responde em https://generativelanguage.googleapis.com/v1beta/openai.",
-        "anthropic": "Anthropic normalmente responde em https://api.anthropic.com/v1.",
-        "minimax": "MiniMax anthropic-compatible normalmente usa base terminando em /anthropic.",
-        "xiaomi": "Xiaomi Mimo anthropic-compatible normalmente usa base terminando em /anthropic.",
-        "kimi_coding": "Kimi Coding anthropic-compatible normalmente usa base em https://api.kimi.com/coding/.",
-        "qianfan": "Qianfan normalmente responde em https://qianfan.baidubce.com/v2.",
-        "zai": "Z.AI/GLM normalmente responde em https://api.z.ai/api/paas/v4.",
-        "byteplus": "BytePlus Ark normalmente responde em https://ark.ap-southeast.bytepluses.com/api/v3.",
-        "doubao": "Doubao Ark normalmente responde em https://ark.cn-beijing.volces.com/api/v3.",
-        "volcengine": "Volcengine Ark normalmente responde em https://ark.cn-beijing.volces.com/api/v3.",
-        "openai_codex": "OpenAI Codex OAuth normalmente responde em https://chatgpt.com/backend-api/codex/responses.",
+        "openrouter": "OpenRouter normally responds at https://openrouter.ai/api/v1.",
+        "groq": "Groq normally responds at https://api.groq.com/openai/v1.",
+        "gemini": "Gemini OpenAI-compatible normally responds at https://generativelanguage.googleapis.com/v1beta/openai.",
+        "anthropic": "Anthropic normally responds at https://api.anthropic.com/v1.",
+        "minimax": "MiniMax Anthropic-compatible usually uses a base URL ending with /anthropic.",
+        "xiaomi": "Xiaomi Mimo Anthropic-compatible usually uses a base URL ending with /anthropic.",
+        "kimi_coding": "Kimi Coding Anthropic-compatible usually uses a dedicated base under https://api.kimi.com/coding/.",
+        "qianfan": "Qianfan normally responds at https://qianfan.baidubce.com/v2.",
+        "zai": "Z.AI/GLM normally responds at https://api.z.ai/api/paas/v4.",
+        "byteplus": "BytePlus Ark normally responds at https://ark.ap-southeast.bytepluses.com/api/v3.",
+        "doubao": "Doubao Ark normally responds at https://ark.cn-beijing.volces.com/api/v3.",
+        "volcengine": "Volcengine Ark normally responds at https://ark.cn-beijing.volces.com/api/v3.",
+        "openai_codex": "OpenAI Codex OAuth normally responds at https://chatgpt.com/backend-api/codex/responses.",
     }
     if status_code >= 400 or error_text:
         if provider_name in provider_base_url_hints:
             _append_hint(hints, provider_base_url_hints[provider_name])
 
     if endpoint and not hints and error_text:
-        _append_hint(hints, f"O probe falhou na rota '{endpoint}'; revise base URL, autenticacao e disponibilidade do provider.")
+        _append_hint(hints, f"The probe failed on route '{endpoint}'; review the base URL, authentication, and provider availability.")
     return hints
 
 
@@ -189,9 +189,9 @@ def provider_status_hints(
         key_envs=key_envs,
     )
     if configured and auth_mode == "api_key":
-        _append_hint(hints, "Credenciais do provider detectadas; o proximo passo e validar com provider live probe.")
+        _append_hint(hints, "Provider credentials were detected; the next step is to validate them with a live provider probe.")
     if configured and auth_mode == "none" and provider_name in {"ollama", "vllm"}:
-        _append_hint(hints, "Runtime local configurado; valide se o modelo esta carregado antes de usar em producao.")
+        _append_hint(hints, "Local runtime is configured; verify that the model is loaded before using it in production.")
     return hints
 
 
@@ -218,7 +218,7 @@ def provider_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
     hints: list[str] = []
 
     if transport:
-        _append_hint(hints, f"Transporte ativo: {transport}.")
+        _append_hint(hints, f"Active transport: {transport}.")
 
     circuit_open = bool(payload.get("circuit_open", False) or counters.get("circuit_open", False))
     last_error_class = str(
@@ -227,7 +227,7 @@ def provider_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
     if circuit_open:
         summary["state"] = "circuit_open"
-        _append_hint(hints, "Circuit breaker do provider esta aberto por falhas consecutivas.")
+        _append_hint(hints, "The provider circuit breaker is open after consecutive failures.")
 
     if provider_name == "failover":
         candidates = payload.get("candidates")
@@ -260,32 +260,32 @@ def provider_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
             if summary["state"] == "healthy":
                 summary["state"] = "cooldown"
             summary["cooling_candidates"] = cooling_candidates
-            _append_hint(hints, "Failover com candidatos temporariamente em cooldown.")
+            _append_hint(hints, "Failover currently has candidates in cooldown.")
         if suppressed_candidates:
             summary["suppressed_candidates"] = suppressed_candidates
             summary["suppression_reason"] = str(suppressed_candidates[0].get("suppression_reason", "") or "")
             reason_messages = {
-                "auth": "Um ou mais candidatos de failover foram suprimidos por falha de autenticacao.",
-                "quota": "Um ou mais candidatos de failover foram suprimidos por quota ou billing esgotado.",
-                "config": "Um ou mais candidatos de failover foram suprimidos por configuracao invalida.",
+                "auth": "One or more failover candidates are suppressed because of authentication failure.",
+                "quota": "One or more failover candidates are suppressed because quota or billing is exhausted.",
+                "config": "One or more failover candidates are suppressed because of invalid configuration.",
             }
             first_reason = summary["suppression_reason"]
             if first_reason in reason_messages:
                 _append_hint(hints, reason_messages[first_reason])
         elif int(counters.get("fallback_attempts", 0) or 0) > 0 and summary["state"] == "healthy":
             summary["state"] = "degraded"
-            _append_hint(hints, "Failover ja precisou acionar fallback nesta janela de telemetria.")
+            _append_hint(hints, "Failover has already used a fallback in this telemetry window.")
 
     if last_error_class in {"auth", "quota", "rate_limit", "network", "http_transient", "retry_exhausted"}:
         if summary["state"] == "healthy":
             summary["state"] = "degraded"
         messages = {
-            "auth": "Ultima falha foi de autenticacao; revise chave ou sessao do provider.",
-            "quota": "Ultima falha indica quota ou billing esgotado.",
-            "rate_limit": "Ultima falha indica rate limit no provider.",
-            "network": "Ultima falha foi de rede; confirme conectividade e disponibilidade do endpoint.",
-            "http_transient": "Ultima falha foi transitória no provider; o fallback ou retry deve absorver novas tentativas.",
-            "retry_exhausted": "O provider esgotou tentativas de retry antes de responder com sucesso.",
+            "auth": "The latest failure was authentication-related; review the provider key or session.",
+            "quota": "The latest failure indicates exhausted quota or billing.",
+            "rate_limit": "The latest failure indicates provider rate limiting.",
+            "network": "The latest failure was network-related; confirm connectivity and endpoint availability.",
+            "http_transient": "The latest failure was transient; retry or failover should absorb future attempts.",
+            "retry_exhausted": "The provider exhausted retry attempts before responding successfully.",
         }
         _append_hint(hints, messages[last_error_class])
 

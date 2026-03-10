@@ -37,127 +37,127 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "custom": ProviderProfile(
         family="custom",
         recommended_models=(),
-        onboarding_hint="Provider customizado; revise manualmente modelo, auth e base URL antes de usar.",
+        onboarding_hint="Custom provider; review the model, auth, and base URL manually before use.",
     ),
     "openrouter": ProviderProfile(
         family="gateway",
         recommended_models=("openrouter/auto", "openrouter/openai/gpt-4o-mini"),
-        onboarding_hint="Gateway multi-model; o modo 'auto' nao exige match exato na lista remota.",
+        onboarding_hint="Multi-model Gateway; 'auto' mode does not require an exact match in the remote list.",
     ),
     "kilocode": ProviderProfile(
         family="gateway",
         recommended_models=("kilocode/anthropic/claude-opus-4.6",),
-        onboarding_hint="Gateway multi-model; confirme o provider upstream embutido no nome do modelo.",
+        onboarding_hint="Multi-model Gateway; confirm the upstream provider embedded in the model name.",
     ),
     "gemini": ProviderProfile(
         family="openai_compatible",
         recommended_models=("gemini/gemini-2.5-flash", "gemini/gemini-2.5-pro"),
-        onboarding_hint="Gemini usa endpoint OpenAI-compatible via Google Generative Language.",
+        onboarding_hint="Gemini uses an OpenAI-compatible endpoint via Google Generative Language.",
     ),
     "groq": ProviderProfile(
         family="openai_compatible",
         recommended_models=("groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile"),
-        onboarding_hint="Groq responde via OpenAI-compatible; priorize modelos latentes de baixa latencia.",
+        onboarding_hint="Groq responds via OpenAI-compatible endpoints; prefer low-latency models when possible.",
     ),
     "deepseek": ProviderProfile(
         family="openai_compatible",
         recommended_models=("deepseek/deepseek-chat", "deepseek/deepseek-reasoner"),
-        onboarding_hint="DeepSeek responde via OpenAI-compatible; valide quota e billing antes do rollout.",
+        onboarding_hint="DeepSeek responds via OpenAI-compatible endpoints; validate quota and billing before rollout.",
     ),
     "together": ProviderProfile(
         family="gateway",
         recommended_models=("together/moonshotai/Kimi-K2.5", "together/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
-        onboarding_hint="Together funciona como gateway OpenAI-compatible; confirme o nome completo do upstream.",
+        onboarding_hint="Together behaves like an OpenAI-compatible gateway; confirm the full upstream model name.",
     ),
     "huggingface": ProviderProfile(
         family="gateway",
         recommended_models=("huggingface/deepseek-ai/DeepSeek-R1", "huggingface/meta-llama/Llama-3.3-70B-Instruct"),
-        onboarding_hint="Hugging Face router expõe modelos upstream completos; confirme o repo/model id.",
+        onboarding_hint="The Hugging Face router exposes full upstream models; confirm the repo/model id.",
     ),
     "xai": ProviderProfile(
         family="openai_compatible",
         recommended_models=("xai/grok-4", "xai/grok-4-fast-reasoning"),
-        onboarding_hint="xAI responde via OpenAI-compatible; confirme permissao para o modelo Grok escolhido.",
+        onboarding_hint="xAI responds via OpenAI-compatible endpoints; confirm access to the chosen Grok model.",
     ),
     "mistral": ProviderProfile(
         family="openai_compatible",
         recommended_models=("mistral/mistral-large-latest", "mistral/codestral-latest"),
-        onboarding_hint="Mistral responde via OpenAI-compatible; prefira aliases 'latest' para evitar drift de versão fixa.",
+        onboarding_hint="Mistral responds via OpenAI-compatible endpoints; prefer 'latest' aliases to avoid fixed-version drift.",
     ),
     "moonshot": ProviderProfile(
         family="openai_compatible",
         recommended_models=("moonshot/kimi-k2.5",),
-        onboarding_hint="Moonshot/Kimi responde via OpenAI-compatible; confirme disponibilidade regional do endpoint.",
+        onboarding_hint="Moonshot/Kimi responds via OpenAI-compatible endpoints; confirm regional endpoint availability.",
     ),
     "qianfan": ProviderProfile(
         family="openai_compatible",
         recommended_models=("qianfan/deepseek-v3.2", "qianfan/ernie-4.0-turbo"),
-        onboarding_hint="Qianfan usa endpoint próprio OpenAI-compatible; verifique credenciais e região Baidu Cloud.",
+        onboarding_hint="Qianfan uses its own OpenAI-compatible endpoint; verify credentials and the Baidu Cloud region.",
     ),
     "zai": ProviderProfile(
         family="openai_compatible",
         recommended_models=("zai/glm-5", "zai/glm-4.6"),
-        onboarding_hint="Z.AI/GLM responde via endpoint compatível; confirme a conta habilitada para o modelo GLM.",
+        onboarding_hint="Z.AI/GLM responds via a compatible endpoint; confirm that your account is enabled for the GLM model.",
     ),
     "nvidia": ProviderProfile(
         family="openai_compatible",
         recommended_models=("nvidia/meta/llama-3.1-70b-instruct",),
-        onboarding_hint="NVIDIA NIM responde via OpenAI-compatible; o catálogo pode variar por tenant/projeto.",
+        onboarding_hint="NVIDIA NIM responds via OpenAI-compatible endpoints; the catalog may vary by tenant or project.",
     ),
     "byteplus": ProviderProfile(
         family="openai_compatible",
         recommended_models=("byteplus/deepseek-v3.1",),
-        onboarding_hint="BytePlus Ark responde via OpenAI-compatible; confirme projeto e endpoint regional.",
+        onboarding_hint="BytePlus Ark responds via OpenAI-compatible endpoints; confirm the project and regional endpoint.",
     ),
     "doubao": ProviderProfile(
         family="openai_compatible",
         recommended_models=("doubao/doubao-seed-1-6",),
-        onboarding_hint="Doubao Ark responde via OpenAI-compatible; confirme se o tenant tem acesso ao modelo escolhido.",
+        onboarding_hint="Doubao Ark responds via OpenAI-compatible endpoints; confirm that the tenant has access to the chosen model.",
     ),
     "volcengine": ProviderProfile(
         family="openai_compatible",
         recommended_models=("volcengine/doubao-seed-1-6",),
-        onboarding_hint="Volcengine Ark responde via OpenAI-compatible; valide região e projeto antes do uso.",
+        onboarding_hint="Volcengine Ark responds via OpenAI-compatible endpoints; validate region and project before use.",
     ),
     "minimax": ProviderProfile(
         family="anthropic_compatible",
         recommended_models=("minimax/MiniMax-M2.5",),
-        onboarding_hint="MiniMax usa transporte Anthropic-compatible; a base URL costuma terminar em /anthropic.",
+        onboarding_hint="MiniMax uses Anthropic-compatible transport; the base URL usually ends with /anthropic.",
     ),
     "xiaomi": ProviderProfile(
         family="anthropic_compatible",
         recommended_models=("xiaomi/mimo-v2-flash",),
-        onboarding_hint="Xiaomi Mimo usa transporte Anthropic-compatible; confirme base URL com sufixo /anthropic.",
+        onboarding_hint="Xiaomi Mimo uses Anthropic-compatible transport; confirm a base URL ending with /anthropic.",
     ),
     "kimi_coding": ProviderProfile(
         family="anthropic_compatible",
         recommended_models=("kimi-coding/k2p5",),
-        onboarding_hint="Kimi Coding usa transporte Anthropic-compatible e base dedicada em /coding/.",
+        onboarding_hint="Kimi Coding uses Anthropic-compatible transport and a dedicated /coding/ base URL.",
     ),
     "anthropic": ProviderProfile(
         family="anthropic_compatible",
         recommended_models=("anthropic/claude-3-5-haiku-latest", "anthropic/claude-3-7-sonnet-latest"),
-        onboarding_hint="Anthropic usa transporte nativo /v1/messages; confirme a chave ANTHROPIC_API_KEY.",
+        onboarding_hint="Anthropic uses the native /v1/messages transport; confirm the ANTHROPIC_API_KEY value.",
     ),
     "openai": ProviderProfile(
         family="openai_compatible",
         recommended_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
-        onboarding_hint="OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
+        onboarding_hint="OpenAI responds via the standard OpenAI-compatible endpoint; validate billing and the active project.",
     ),
     "openai_codex": ProviderProfile(
         family="oauth",
         recommended_models=("openai-codex/gpt-5.3-codex",),
-        onboarding_hint="OpenAI Codex usa OAuth local; faça login antes de validar o provider.",
+        onboarding_hint="OpenAI Codex uses local OAuth; sign in before validating the provider.",
     ),
     "ollama": ProviderProfile(
         family="local_runtime",
         recommended_models=("openai/llama3.2", "openai/qwen2.5-coder:7b"),
-        onboarding_hint="Ollama exige runtime local ativo e modelo previamente baixado com 'ollama pull'.",
+        onboarding_hint="Ollama requires a running local runtime and a model downloaded ahead of time with 'ollama pull'.",
     ),
     "vllm": ProviderProfile(
         family="local_runtime",
         recommended_models=("vllm/meta-llama/Llama-3.2-3B-Instruct",),
-        onboarding_hint="vLLM exige servidor ativo e modelo carregado no startup do processo.",
+        onboarding_hint="vLLM requires a running server and a model loaded when the process starts.",
     ),
 }
 
@@ -169,7 +169,7 @@ def provider_profile(name: str) -> ProviderProfile:
         ProviderProfile(
             family="custom",
             recommended_models=(),
-            onboarding_hint="Provider sem perfil conhecido; revise manualmente modelo, auth e endpoint.",
+            onboarding_hint="Provider profile is unknown; review the model, auth, and endpoint manually.",
         ),
     )
 

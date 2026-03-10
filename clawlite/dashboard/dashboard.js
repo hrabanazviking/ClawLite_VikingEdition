@@ -365,6 +365,90 @@ function renderToolsSummary() {
     });
 }
 
+function renderProviderRecoveryBoard() {
+  const grid = byId("provider-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+
+  const provider = (state.dashboardState || {}).provider || {};
+  const telemetry = provider.telemetry || {};
+  const summary = telemetry.summary || {};
+  const candidates = [];
+
+  const suppressionReason = String(summary.suppression_reason || "");
+  const coolingCandidates = Array.isArray(summary.cooling_candidates) ? summary.cooling_candidates : [];
+  const suppressedCandidates = Array.isArray(summary.suppressed_candidates) ? summary.suppressed_candidates : [];
+
+  candidates.push({
+    title: "Provider state",
+    body: `${String(summary.state || "unknown")} | ${String(provider.autonomy?.provider || telemetry.provider || "provider")}`,
+    detail: String(provider.autonomy?.suppression_hint || summary.onboarding_hint || "No additional guidance yet."),
+  });
+
+  candidates.push({
+    title: "Suppression reason",
+    body: suppressionReason || "none",
+    detail: suppressionReason
+      ? `Backoff ${formatDuration(provider.autonomy?.suppression_backoff_s || provider.autonomy?.cooldown_remaining_s || 0)}`
+      : "Provider calls are currently allowed.",
+  });
+
+  if (suppressedCandidates.length) {
+    suppressedCandidates.slice(0, 4).forEach((item) => {
+      candidates.push({
+        title: `${item.role || "candidate"}: ${item.model || "unknown"}`,
+        body: `suppressed by ${item.suppression_reason || "unknown"}`,
+        detail: `cooldown ${formatDuration(item.cooldown_remaining_s || 0)}`,
+      });
+    });
+  } else if (coolingCandidates.length) {
+    coolingCandidates.slice(0, 4).forEach((item) => {
+      candidates.push({
+        title: `${item.role || "candidate"}: ${item.model || "unknown"}`,
+        body: "temporary cooldown",
+        detail: `cooldown ${formatDuration(item.cooldown_remaining_s || 0)}`,
+      });
+    });
+  } else {
+    candidates.push({
+      title: "Candidates",
+      body: "no active suppression",
+      detail: "Primary and fallback candidates are currently available.",
+    });
+  }
+
+  const hints = Array.isArray(summary.hints) ? summary.hints : [];
+  if (hints.length) {
+    candidates.push({
+      title: "Operator hint",
+      body: String(hints[0] || ""),
+      detail: hints.length > 1 ? String(hints[1] || "") : "",
+    });
+  }
+
+  candidates.slice(0, 6).forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "summary-card";
+
+    const title = document.createElement("span");
+    title.className = "summary-card__title";
+    title.textContent = item.title;
+
+    const body = document.createElement("div");
+    body.className = "summary-card__meta";
+    body.textContent = item.body;
+
+    const detail = document.createElement("div");
+    detail.className = "summary-card__meta";
+    detail.textContent = item.detail;
+
+    card.append(title, body, detail);
+    grid.appendChild(card);
+  });
+}
+
 function handoffPayload() {
   return (state.dashboardState || {}).handoff || {};
 }
@@ -540,6 +624,7 @@ function renderAutomation() {
     counters: providerTelemetry.counters || {},
   });
   setBadge("provider-status", String(providerAutonomy.state || "unknown"), toneForState(providerAutonomy.state));
+  renderProviderRecoveryBoard();
 
   const selfEvolution = payload.self_evolution || {};
   setText("metric-self-evolution", selfEvolution.enabled ? "enabled" : "disabled");

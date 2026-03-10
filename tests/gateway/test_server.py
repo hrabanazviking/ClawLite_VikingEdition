@@ -2315,6 +2315,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert "Trigger heartbeat" in body
         assert "Hatch agent" in body
         assert "Next Steps" in body
+        assert 'id="provider-grid"' in body
         assert "Signal Feed" in body
         assert "Workspace Runtime Files" in body
         assert "Recent Sessions" in body
@@ -2354,6 +2355,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerHatch" in js.text
     assert "Wake up, my friend!" in js.text
     assert "handoff-grid" in js.text
+    assert "renderProviderRecoveryBoard" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
@@ -2570,7 +2572,7 @@ def test_gateway_provider_error_payload_circuit_open_includes_provider_and_coold
         text = str(payload.get("error", "")).lower()
         assert "openai" in text
         assert "30.0s" in text
-        assert "protecao" in text
+    assert "protection mode" in text
 
 
 def test_gateway_provider_error_payload_quota_429_is_specific(tmp_path: Path) -> None:
@@ -4992,7 +4994,7 @@ def test_gateway_diagnostics_provider_summary_surfaces_failover_state(tmp_path: 
         assert summary["suppressed_candidates"][0]["model"] == "openai/gpt-4o-mini"
         assert summary["cooling_candidates"][0]["model"] == "openai/gpt-4o-mini"
         assert any("cooldown" in row.lower() for row in summary["hints"])
-        assert any("autenticacao" in row.lower() for row in summary["hints"])
+        assert any("authentication" in row.lower() for row in summary["hints"])
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:

@@ -265,7 +265,7 @@ def test_probe_provider_ollama_accepts_runtime_base_url_with_v1(monkeypatch) -> 
     assert payload["ok"] is True
     assert payload["status_code"] == 200
     assert payload["transport"] == "local_runtime"
-    assert any("Ollama respondeu" in row for row in payload["hints"])
+    assert any("Ollama runtime responded normally" in row for row in payload["hints"])
 
 
 def test_probe_provider_openai_model_not_listed_returns_soft_warning(monkeypatch) -> None:
@@ -303,7 +303,7 @@ def test_probe_provider_openai_model_not_listed_returns_soft_warning(monkeypatch
     assert payload["ok"] is True
     assert payload["model_check"]["checked"] is True
     assert payload["model_check"]["ok"] is False
-    assert any("nao apareceu na lista remota" in row.lower() for row in payload["hints"])
+    assert any("did not appear in the provider's remote list" in row.lower() for row in payload["hints"])
 
 
 def test_probe_provider_openai_missing_api_key_returns_actionable_hint() -> None:
@@ -311,7 +311,7 @@ def test_probe_provider_openai_missing_api_key_returns_actionable_hint() -> None
     assert payload["ok"] is False
     assert payload["error"] == "api_key_missing"
     assert payload["transport"] == "openai_compatible"
-    assert any("Configure a chave do provider 'openai'" in row for row in payload["hints"])
+    assert any("Configure the API key for provider 'openai'" in row for row in payload["hints"])
 
 
 def test_probe_provider_minimax_uses_anthropic_messages_transport(monkeypatch) -> None:
@@ -402,7 +402,7 @@ def test_run_onboarding_wizard_advanced_persists_custom_model_and_gateway(monkey
             "family": "openai_compatible",
             "recommended_model": "openai/gpt-4o-mini",
             "recommended_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
-            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
+            "onboarding_hint": "OpenAI responds via the standard OpenAI-compatible endpoint; validate billing and the active project.",
             "base_url": base_url,
             "api_key_masked": "********3456",
             "error": "",
@@ -537,7 +537,7 @@ def test_run_onboarding_wizard_quickstart_uses_guided_defaults(monkeypatch, tmp_
             "family": "openai_compatible",
             "recommended_model": "openai/gpt-4o-mini",
             "recommended_models": ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"],
-            "onboarding_hint": "OpenAI responde via endpoint OpenAI-compatible padrão; valide billing e projeto ativo.",
+            "onboarding_hint": "OpenAI responds via the standard OpenAI-compatible endpoint; validate billing and the active project.",
             "base_url": base_url,
             "api_key_masked": "********3456",
             "error": "",

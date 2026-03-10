@@ -12,7 +12,7 @@ def test_hint_401_message() -> None:
         transport="openai_compatible",
     )
 
-    assert any("autenticacao foi rejeitada" in hint.lower() for hint in hints)
+    assert any("authentication was rejected" in hint.lower() for hint in hints)
 
 
 def test_hint_429_message() -> None:
@@ -88,4 +88,4 @@ def test_provider_telemetry_summary_surfaces_suppressed_failover_candidates() ->
     assert summary["state"] == "cooldown"
     assert summary["suppression_reason"] == "auth"
     assert summary["suppressed_candidates"][0]["model"] == "openai/gpt-4o-mini"
-    assert any("autenticacao" in hint.lower() for hint in summary["hints"])
+    assert any("authentication" in hint.lower() for hint in summary["hints"])
