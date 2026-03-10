@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Packaged dashboard shell served from `/` with status, diagnostics, tool catalog, token handling, and live chat controls over the existing gateway contract.
+- Packaged dashboard shell served from `/` with status, diagnostics, tool catalog, token handling, live chat, event feed, autorefresh, and heartbeat controls over the existing gateway contract.
 - Project status, autonomy execution plan, operator runbook, and release workflow docs for the current hardening cycle.
 - OpenClaw-compatible filesystem and memory tool aliases to reduce migration friction (`663a8f0`).
 - Native `apply_patch` and process-control tools for safer in-agent file edits and runtime operations (`a858966`).
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Additional OpenClaw operational skills ported into ClawLite (`461180d`, `f6be3f4`).
 
 ### Changed
-- Gateway root entrypoint now serves a richer operator dashboard backed by packaged HTML/CSS/JS assets instead of a single inline landing page.
+- Gateway root entrypoint now serves a richer operator dashboard backed by packaged HTML/CSS/JS assets instead of a single inline landing page, with a more operational UI/UX direction for control-plane work.
 - Synced README, docs index, and roadmap with the real repository state, validation commands, and milestone workflow.
 - Enforced ClawLite identity in prompts and emitted outputs to avoid assistant-name drift (`6d5c99a`).
 - Added layered tool policy resolution, then tightened tool-policy handling across memory-forget and run-skill paths (`e1a0033`, `1203c64`, `f6592b2`).

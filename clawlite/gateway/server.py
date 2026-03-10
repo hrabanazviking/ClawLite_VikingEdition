@@ -516,6 +516,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "message": "/api/message",
             "token": "/api/token",
             "tools": "/api/tools/catalog",
+            "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
         },
         "assets": {

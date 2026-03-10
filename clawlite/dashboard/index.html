@@ -8,6 +8,8 @@
   </head>
   <body>
     <div class="page-shell">
+      <div class="ambient-orb ambient-orb--left"></div>
+      <div class="ambient-orb ambient-orb--right"></div>
       <header class="topbar">
         <div>
           <p class="eyebrow">Gateway Control Plane</p>
@@ -27,17 +29,53 @@
           <button class="nav-button" data-tab-target="chat">Chat</button>
           <button class="nav-button" data-tab-target="runtime">Runtime</button>
           <button class="nav-button" data-tab-target="tools">Tools</button>
+          <div class="nav-divider"></div>
+          <div class="nav-meta">
+            <span class="nav-meta__label">Autorefresh</span>
+            <strong class="nav-meta__value" id="nav-refresh-state">15s</strong>
+          </div>
+          <div class="nav-meta">
+            <span class="nav-meta__label">Last sync</span>
+            <strong class="nav-meta__value" id="nav-last-sync">pending</strong>
+          </div>
           <div class="nav-spacer"></div>
           <button class="action-button" id="refresh-all" type="button">Refresh</button>
         </aside>
 
         <main class="content-stack">
           <section class="panel is-active" data-tab-panel="overview">
+            <section class="control-strip panel-card">
+              <div class="control-strip__copy">
+                <p class="eyebrow">Operator Actions</p>
+                <h2>Fast runtime controls without leaving the dashboard</h2>
+                <p class="panel-card__text">Refresh telemetry, trigger a heartbeat cycle, and keep the shell auto-syncing while you watch the gateway recover or process proactive work.</p>
+              </div>
+              <div class="control-strip__actions">
+                <label class="field field--compact" for="refresh-interval">
+                  <span>Autorefresh cadence</span>
+                  <select id="refresh-interval">
+                    <option value="0">Off</option>
+                    <option value="5000">5s</option>
+                    <option value="15000" selected>15s</option>
+                    <option value="30000">30s</option>
+                  </select>
+                </label>
+                <div class="button-row button-row--stacked">
+                  <button class="ghost-button" id="reconnect-ws" type="button">Reconnect WS</button>
+                  <button class="action-button" id="trigger-heartbeat" type="button">Trigger heartbeat</button>
+                </div>
+              </div>
+            </section>
+
             <div class="card-grid card-grid--stats">
               <article class="metric-card"><span class="metric-card__label">Readiness</span><strong class="metric-card__value" id="metric-ready">starting</strong></article>
               <article class="metric-card"><span class="metric-card__label">Gateway phase</span><strong class="metric-card__value" id="metric-phase">created</strong></article>
               <article class="metric-card"><span class="metric-card__label">Contract</span><strong class="metric-card__value" id="metric-contract">-</strong></article>
               <article class="metric-card"><span class="metric-card__label">Server time</span><strong class="metric-card__value" id="metric-server-time">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Uptime</span><strong class="metric-card__value" id="metric-uptime">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Queued events</span><strong class="metric-card__value" id="metric-queue">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Enabled channels</span><strong class="metric-card__value" id="metric-channels">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Heartbeat</span><strong class="metric-card__value" id="metric-heartbeat">-</strong></article>
             </div>
 
             <div class="card-grid">
@@ -67,10 +105,28 @@
               </article>
             </div>
 
+            <div class="card-grid">
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Component Board</h2>
+                  <span class="badge" id="diag-status">pending</span>
+                </div>
+                <div class="component-board" id="component-board"></div>
+              </article>
+
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Signal Feed</h2>
+                  <span class="badge" id="event-feed-status">quiet</span>
+                </div>
+                <div class="event-feed" id="event-feed"></div>
+              </article>
+            </div>
+
             <article class="panel-card">
               <div class="panel-card__header">
                 <h2>Diagnostics Snapshot</h2>
-                <span class="badge" id="diag-status">pending</span>
+                <span class="badge">runtime</span>
               </div>
               <div class="diag-grid">
                 <div>
@@ -114,9 +170,24 @@
                 <div class="chat-log" id="chat-log"></div>
               </article>
             </div>
+
+            <article class="panel-card">
+              <div class="panel-card__header">
+                <h2>WebSocket Events</h2>
+                <span class="badge" id="ws-event-state">idle</span>
+              </div>
+              <pre class="code-block" id="ws-event-preview">Waiting for live websocket frames...</pre>
+            </article>
           </section>
 
           <section class="panel" data-tab-panel="runtime">
+            <div class="card-grid card-grid--stats">
+              <article class="metric-card"><span class="metric-card__label">Diagnostics schema</span><strong class="metric-card__value" id="metric-schema">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">HTTP requests</span><strong class="metric-card__value" id="metric-http">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">WS frames</span><strong class="metric-card__value" id="metric-ws">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Tool count</span><strong class="metric-card__value" id="metric-tool-count">-</strong></article>
+            </div>
+
             <div class="card-grid">
               <article class="panel-card">
                 <div class="panel-card__header">
@@ -143,6 +214,24 @@
               </div>
               <pre class="code-block" id="tools-json">Loading...</pre>
             </article>
+
+            <div class="card-grid">
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Tool Groups</h2>
+                  <span class="badge">summary</span>
+                </div>
+                <div class="summary-grid" id="tool-groups"></div>
+              </article>
+
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Aliases</h2>
+                  <span class="badge">compat</span>
+                </div>
+                <div class="summary-grid" id="tool-aliases"></div>
+              </article>
+            </div>
           </section>
         </main>
       </div>

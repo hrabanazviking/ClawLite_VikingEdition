@@ -2280,12 +2280,15 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert "<h1>ClawLite Dashboard</h1>" in body
         assert "Gateway Control Plane" in body
         assert "Operator view for health, chat, diagnostics, tools, and WebSocket connectivity." in body
+        assert "Trigger heartbeat" in body
+        assert "Signal Feed" in body
         assert 'window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ = {' in body
         assert "/_clawlite/dashboard.css" in body
         assert "/_clawlite/dashboard.js" in body
         assert '"status": "/api/status"' in body
         assert '"diagnostics": "/api/diagnostics"' in body
         assert '"message": "/api/message"' in body
+        assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
 
@@ -2310,6 +2313,8 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert js.status_code == 200
     assert "const bootstrap = window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ || {}" in js.text
     assert "connectWs" in js.text
+    assert "triggerHeartbeat" in js.text
+    assert "scheduleAutoRefresh" in js.text
     assert js.headers["content-type"].startswith("application/javascript")
 
 

@@ -60,7 +60,7 @@ Scope:
 Recent progress:
 
 - the first dashboard slice is now served from packaged assets at `/`
-- the shell already exposes token-aware status, diagnostics, tools, and chat controls using the existing gateway endpoints
+- the shell already exposes token-aware status, diagnostics, tools, chat controls, heartbeat trigger, autorefresh, and a live operator event feed using the existing gateway endpoints
 
 Exit criteria:
 

@@ -2,17 +2,27 @@ const bootstrap = window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ || {};
 const auth = bootstrap.auth || {};
 const paths = bootstrap.paths || {};
 const tokenStorageKey = "clawlite.dashboard.token";
+const refreshStorageKey = "clawlite.dashboard.refreshMs";
+const defaultRefreshMs = 15000;
+const maxFeedEntries = 18;
 
 const state = {
   activeTab: "overview",
   token: window.localStorage.getItem(tokenStorageKey) || "",
+  autoRefreshMs: Number(window.localStorage.getItem(refreshStorageKey) || defaultRefreshMs),
   ws: null,
   wsState: "offline",
   reconnectTimer: null,
+  refreshTimer: null,
+  refreshInFlight: false,
+  heartbeatBusy: false,
   status: bootstrap.control_plane || null,
   diagnostics: null,
   tools: null,
   tokenInfo: null,
+  lastSyncAt: null,
+  eventFeed: [],
+  wsPreview: "Waiting for live websocket frames...",
   sessionId: "dashboard:operator",
 };
 
@@ -56,6 +66,71 @@ function setCode(id, value) {
   }
 }
 
+function setBadge(id, text, tone = "") {
+  const node = byId(id);
+  if (!node) {
+    return;
+  }
+  node.textContent = text;
+  node.className = `badge${tone ? ` badge--${tone}` : ""}`;
+}
+
+function formatClock(value) {
+  if (!value) {
+    return "-";
+  }
+  try {
+    return new Date(value).toLocaleTimeString();
+  } catch (_error) {
+    return String(value);
+  }
+}
+
+function formatDuration(seconds) {
+  const total = Number(seconds || 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return "0s";
+  }
+  if (total < 60) {
+    return `${Math.round(total)}s`;
+  }
+  if (total < 3600) {
+    return `${Math.floor(total / 60)}m ${Math.round(total % 60)}s`;
+  }
+  return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+}
+
+function numeric(value, fallback = 0) {
+  const result = Number(value);
+  return Number.isFinite(result) ? result : fallback;
+}
+
+function truthy(value) {
+  return value === true || value === "true" || value === "running" || value === "ready" || value === "online";
+}
+
+function toneForState(value) {
+  if (truthy(value)) {
+    return "ok";
+  }
+  if (value === false || value === "failed" || value === "stopped" || value === "offline") {
+    return "danger";
+  }
+  return "warn";
+}
+
+function recordEvent(level, title, detail, meta = "") {
+  const event = {
+    level,
+    title,
+    detail,
+    meta,
+    ts: new Date().toISOString(),
+  };
+  state.eventFeed = [event, ...state.eventFeed].slice(0, maxFeedEntries);
+  renderEventFeed();
+}
+
 function appendChatEntry(role, text, meta = "") {
   const log = byId("chat-log");
   if (!log) {
@@ -63,20 +138,226 @@ function appendChatEntry(role, text, meta = "") {
   }
   const entry = document.createElement("article");
   entry.className = `chat-entry chat-entry--${role}`;
-  const timestamp = new Date().toLocaleTimeString();
-  entry.innerHTML = `
-    <div class="chat-entry__meta">
-      <span>${role}</span>
-      <span>${meta || timestamp}</span>
-    </div>
-    <div>${text}</div>
-  `;
+
+  const metaRow = document.createElement("div");
+  metaRow.className = "chat-entry__meta";
+  const roleNode = document.createElement("span");
+  roleNode.textContent = role;
+  const timeNode = document.createElement("span");
+  timeNode.textContent = meta || new Date().toLocaleTimeString();
+  metaRow.append(roleNode, timeNode);
+
+  const body = document.createElement("div");
+  body.textContent = text;
+  entry.append(metaRow, body);
   log.prepend(entry);
+}
+
+function renderEndpointList() {
+  const endpointList = byId("endpoint-list");
+  if (!endpointList) {
+    return;
+  }
+  endpointList.innerHTML = "";
+  const labels = {
+    health: "health",
+    status: "status",
+    diagnostics: "diagnostics",
+    message: "chat",
+    token: "token",
+    tools: "tools",
+    heartbeat_trigger: "heartbeat",
+    ws: "websocket",
+  };
+  Object.entries(paths).forEach(([label, path]) => {
+    const item = document.createElement("li");
+    const code = document.createElement("code");
+    code.textContent = String(path);
+    const text = document.createElement("span");
+    text.textContent = labels[label] || label.replaceAll("_", " ");
+    item.append(code, text);
+    endpointList.appendChild(item);
+  });
+}
+
+function summarizeQueue(queue) {
+  if (!queue || typeof queue !== "object") {
+    return "-";
+  }
+  const candidates = [
+    queue.pending,
+    queue.in_flight,
+    queue.total,
+    queue.outbound_pending,
+    queue.dead_letter,
+  ].map((value) => numeric(value, 0));
+  const max = Math.max(...candidates, 0);
+  return String(max);
+}
+
+function countEnabledChannels(channels) {
+  if (!channels || typeof channels !== "object") {
+    return "0";
+  }
+  let count = 0;
+  Object.values(channels).forEach((value) => {
+    if (value && typeof value === "object") {
+      if (truthy(value.enabled) || truthy(value.running) || truthy(value.available) || truthy(value.connected)) {
+        count += 1;
+      }
+    }
+  });
+  return String(count);
+}
+
+function heartbeatSummary(heartbeat) {
+  if (!heartbeat || typeof heartbeat !== "object") {
+    return "-";
+  }
+  if (heartbeat.last_decision && typeof heartbeat.last_decision === "object") {
+    return `${heartbeat.last_decision.action || "skip"}:${heartbeat.last_decision.reason || "unknown"}`;
+  }
+  if (heartbeat.last_action || heartbeat.last_reason) {
+    return `${heartbeat.last_action || "skip"}:${heartbeat.last_reason || "unknown"}`;
+  }
+  return "idle";
+}
+
+function componentEntries() {
+  const components = (state.status || {}).components || {};
+  return Object.entries(components);
+}
+
+function renderComponentBoard() {
+  const container = byId("component-board");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+  const entries = componentEntries();
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "summary-card";
+    empty.textContent = "No component telemetry available yet.";
+    container.appendChild(empty);
+    return;
+  }
+
+  entries.forEach(([name, payload]) => {
+    const card = document.createElement("article");
+    const tone = toneForState(payload && typeof payload === "object" ? payload.ready ?? payload.running ?? payload.connected : payload);
+    card.className = `component-card component-card--${tone === "ok" ? "ready" : tone === "danger" ? "stopped" : "pending"}`;
+
+    const title = document.createElement("span");
+    title.className = "component-card__title";
+    title.textContent = name;
+
+    const meta = document.createElement("div");
+    meta.className = "component-card__meta";
+    if (payload && typeof payload === "object") {
+      const parts = [];
+      ["state", "worker_state", "reason", "last_status", "restored"].forEach((key) => {
+        if (payload[key] !== undefined && payload[key] !== "") {
+          parts.push(`${key}: ${payload[key]}`);
+        }
+      });
+      meta.textContent = parts.length ? parts.join(" | ") : safeJson(payload);
+    } else {
+      meta.textContent = String(payload);
+    }
+
+    card.append(title, meta);
+    container.appendChild(card);
+  });
+}
+
+function renderEventFeed() {
+  const container = byId("event-feed");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+  if (!state.eventFeed.length) {
+    const empty = document.createElement("article");
+    empty.className = "event-entry";
+    empty.textContent = "No operator events yet. Refresh or send a chat message to populate this feed.";
+    container.appendChild(empty);
+    setBadge("event-feed-status", "quiet");
+    return;
+  }
+
+  setBadge("event-feed-status", `${state.eventFeed.length} events`, state.eventFeed[0].level === "danger" ? "danger" : state.eventFeed[0].level);
+  state.eventFeed.forEach((event) => {
+    const entry = document.createElement("article");
+    entry.className = "event-entry";
+
+    const level = document.createElement("span");
+    level.className = `event-entry__level event-entry__level--${event.level}`;
+    level.textContent = event.level;
+
+    const title = document.createElement("span");
+    title.className = "event-entry__title";
+    title.textContent = event.title;
+
+    const detail = document.createElement("div");
+    detail.className = "event-entry__meta";
+    detail.textContent = event.detail;
+
+    const meta = document.createElement("div");
+    meta.className = "event-entry__meta";
+    meta.textContent = `${formatClock(event.ts)}${event.meta ? ` | ${event.meta}` : ""}`;
+
+    entry.append(level, title, detail, meta);
+    container.appendChild(entry);
+  });
+}
+
+function renderToolsSummary() {
+  const groupsNode = byId("tool-groups");
+  const aliasesNode = byId("tool-aliases");
+  if (!groupsNode || !aliasesNode) {
+    return;
+  }
+  groupsNode.innerHTML = "";
+  aliasesNode.innerHTML = "";
+
+  const tools = state.tools || {};
+  const groups = Array.isArray(tools.groups) ? tools.groups : [];
+  const aliases = tools.aliases && typeof tools.aliases === "object" ? tools.aliases : {};
+
+  groups.slice(0, 12).forEach((group) => {
+    const card = document.createElement("article");
+    card.className = "summary-card";
+    const title = document.createElement("span");
+    title.className = "summary-card__title";
+    title.textContent = String(group.name || group.group || "group");
+    const meta = document.createElement("div");
+    meta.className = "summary-card__meta";
+    meta.textContent = `${numeric(group.count, 0)} tools`;
+    card.append(title, meta);
+    groupsNode.appendChild(card);
+  });
+
+  Object.entries(aliases)
+    .slice(0, 12)
+    .forEach(([alias, target]) => {
+      const card = document.createElement("article");
+      card.className = "summary-card";
+      const title = document.createElement("span");
+      title.className = "summary-card__title";
+      title.textContent = alias;
+      const meta = document.createElement("div");
+      meta.className = "summary-card__meta";
+      meta.textContent = String(target);
+      card.append(title, meta);
+      aliasesNode.appendChild(card);
+    });
 }
 
 function renderOverview() {
   const status = state.status || bootstrap.control_plane || {};
   const ready = Boolean(status.ready);
+
   setText("pill-connection", state.wsState);
   setText("pill-phase", String(status.phase || "created"));
   setText("pill-auth", String((status.auth || {}).mode || auth.mode || "off"));
@@ -84,21 +365,24 @@ function renderOverview() {
   setText("metric-phase", String(status.phase || "created"));
   setText("metric-contract", String(status.contract_version || "-"));
   setText("metric-server-time", String(status.server_time || "-"));
+
+  const diagnostics = state.diagnostics || {};
+  setText("metric-uptime", formatDuration(diagnostics.uptime_s));
+  setText("metric-queue", summarizeQueue(diagnostics.queue));
+  setText("metric-channels", countEnabledChannels(diagnostics.channels));
+  setText("metric-heartbeat", heartbeatSummary(diagnostics.heartbeat));
+
   setText("auth-badge", String((status.auth || {}).posture || auth.posture || "open"));
   setText(
     "auth-summary",
-    `Header ${auth.header_name || "Authorization"} or query ${auth.query_param || "token"}. Token configured: ${Boolean((status.auth || {}).token_configured)}.`,
+    `Header ${auth.header_name || "Authorization"} or query ${auth.query_param || "token"}. Token configured: ${Boolean((status.auth || {}).token_configured)}. Loopback bypass: ${Boolean((status.auth || {}).allow_loopback_without_auth)}.`,
   );
 
-  const endpointList = byId("endpoint-list");
-  if (endpointList) {
-    endpointList.innerHTML = "";
-    Object.entries(paths).forEach(([label, path]) => {
-      const item = document.createElement("li");
-      item.innerHTML = `<code>${path}</code><span>${label}</span>`;
-      endpointList.appendChild(item);
-    });
-  }
+  setText("nav-refresh-state", state.autoRefreshMs > 0 ? formatDuration(state.autoRefreshMs / 1000) : "manual");
+  setText("nav-last-sync", state.lastSyncAt ? formatClock(state.lastSyncAt) : "pending");
+
+  renderEndpointList();
+  renderComponentBoard();
 }
 
 function renderRuntime() {
@@ -110,15 +394,24 @@ function renderRuntime() {
   const components = (state.status || {}).components || {};
   setCode("components-preview", components);
   if (state.diagnostics) {
-    setText("diag-status", "live");
+    setBadge("diag-status", "live", "ok");
     setCode("runtime-preview", {
       queue: state.diagnostics.queue,
       channels: state.diagnostics.channels,
       heartbeat: state.diagnostics.heartbeat,
       autonomy: state.diagnostics.autonomy,
       supervisor: state.diagnostics.supervisor,
+      ws: state.diagnostics.ws,
+      http: state.diagnostics.http,
     });
   }
+
+  setText("metric-schema", String((state.diagnostics || {}).schema_version || "-"));
+  setText("metric-http", String(numeric(((state.diagnostics || {}).http || {}).total_requests, 0)));
+  setText("metric-ws", String(numeric((((state.diagnostics || {}).ws || {}).frames_in), 0) + numeric((((state.diagnostics || {}).ws || {}).frames_out), 0)));
+  setText("metric-tool-count", String(numeric((state.tools || {}).tool_count, 0)));
+  setCode("ws-event-preview", state.wsPreview);
+  renderToolsSummary();
 }
 
 function renderAll() {
@@ -126,39 +419,39 @@ function renderAll() {
   renderRuntime();
 }
 
-async function fetchJson(path) {
+async function fetchJson(path, options = {}) {
   const response = await fetch(path, {
-    headers: authHeaders(),
+    headers: {
+      ...authHeaders(),
+      ...(options.headers || {}),
+    },
+    method: options.method || "GET",
+    body: options.body,
   });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (_error) {
+    payload = { raw: text };
   }
-  return response.json();
+  if (!response.ok) {
+    const detail = payload.detail || payload.error || response.statusText;
+    throw new Error(`${response.status} ${detail}`);
+  }
+  return payload;
 }
 
 async function refreshStatus() {
-  try {
-    state.status = await fetchJson(paths.status || "/api/status");
-  } catch (error) {
-    appendChatEntry("assistant", `Status refresh failed: ${error.message}`, "status");
-  }
+  state.status = await fetchJson(paths.status || "/api/status");
 }
 
 async function refreshDiagnostics() {
-  try {
-    state.diagnostics = await fetchJson(paths.diagnostics || "/api/diagnostics");
-  } catch (error) {
-    setText("diag-status", "auth required");
-    setCode("runtime-preview", { error: error.message });
-  }
+  state.diagnostics = await fetchJson(paths.diagnostics || "/api/diagnostics");
 }
 
 async function refreshTools() {
-  try {
-    state.tools = await fetchJson(paths.tools || "/api/tools/catalog");
-  } catch (error) {
-    setCode("tools-json", { error: error.message });
-  }
+  state.tools = await fetchJson(paths.tools || "/api/tools/catalog");
 }
 
 async function refreshTokenInfo() {
@@ -169,9 +462,24 @@ async function refreshTokenInfo() {
   }
 }
 
-async function refreshAll() {
-  await Promise.all([refreshStatus(), refreshDiagnostics(), refreshTools(), refreshTokenInfo()]);
-  renderAll();
+async function refreshAll(reason = "manual") {
+  if (state.refreshInFlight) {
+    return;
+  }
+  state.refreshInFlight = true;
+  try {
+    await Promise.all([refreshStatus(), refreshDiagnostics(), refreshTools(), refreshTokenInfo()]);
+    state.lastSyncAt = new Date().toISOString();
+    if (reason !== "auto") {
+      recordEvent("ok", "Dashboard sync complete", "Status, diagnostics, tools, and token metadata refreshed.", reason);
+    }
+  } catch (error) {
+    recordEvent("danger", "Dashboard sync failed", error.message, reason);
+    setBadge("diag-status", "auth required", "warn");
+  } finally {
+    state.refreshInFlight = false;
+    renderAll();
+  }
 }
 
 function setActiveTab(tab) {
@@ -184,45 +492,66 @@ function setActiveTab(tab) {
   });
 }
 
+function scheduleAutoRefresh() {
+  window.clearInterval(state.refreshTimer);
+  if (state.autoRefreshMs > 0) {
+    state.refreshTimer = window.setInterval(() => {
+      void refreshAll("auto");
+    }, state.autoRefreshMs);
+  }
+  setText("nav-refresh-state", state.autoRefreshMs > 0 ? formatDuration(state.autoRefreshMs / 1000) : "manual");
+}
+
+function updateWsStatus(nextState) {
+  state.wsState = nextState;
+  const tone = nextState === "online" ? "ok" : nextState === "error" ? "danger" : "warn";
+  setBadge("ws-status", nextState, tone);
+  renderAll();
+}
+
 function connectWs() {
   if (state.ws) {
     state.ws.close();
   }
-  state.wsState = "connecting";
-  renderAll();
+  updateWsStatus("connecting");
   const socket = new WebSocket(buildWsUrl());
   state.ws = socket;
 
   socket.addEventListener("open", () => {
-    state.wsState = "online";
-    renderAll();
+    updateWsStatus("online");
+    recordEvent("ok", "WebSocket connected", buildWsUrl(), "live channel ready");
   });
 
   socket.addEventListener("message", (event) => {
     try {
       const payload = JSON.parse(String(event.data || "{}"));
+      state.wsPreview = safeJson(payload);
+      setBadge("ws-event-state", payload.error ? "gateway-error" : "frame", payload.error ? "danger" : "ok");
       if (payload.text) {
         appendChatEntry("assistant", String(payload.text), String(payload.model || "ws"));
       } else if (payload.error) {
         appendChatEntry("assistant", `Gateway error: ${payload.error}`, "ws");
+        recordEvent("warn", "WebSocket returned gateway error", String(payload.error), "chat");
       } else {
-        appendChatEntry("assistant", safeJson(payload), "ws");
+        recordEvent("ok", "WebSocket frame received", payload.type || "message", "live stream");
       }
     } catch (_error) {
-      appendChatEntry("assistant", String(event.data || ""), "ws");
+      state.wsPreview = String(event.data || "");
+      setBadge("ws-event-state", "raw-frame", "warn");
     }
+    setCode("ws-event-preview", state.wsPreview);
   });
 
   socket.addEventListener("close", () => {
-    state.wsState = "offline";
-    renderAll();
+    updateWsStatus("offline");
+    recordEvent("warn", "WebSocket closed", "Attempting reconnect in 1.4s", "transport");
     window.clearTimeout(state.reconnectTimer);
     state.reconnectTimer = window.setTimeout(connectWs, 1400);
   });
 
   socket.addEventListener("error", () => {
-    state.wsState = "error";
-    renderAll();
+    updateWsStatus("error");
+    recordEvent("danger", "WebSocket transport error", "Browser transport signalled an error before close.", "transport");
   });
 }
 
@@ -243,20 +572,20 @@ async function sendHttpMessage() {
   }
   appendChatEntry("user", text, sessionId);
   byId("chat-input").value = "";
-  const response = await fetch(paths.message || "/api/message", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(),
-    },
-    body: JSON.stringify({ session_id: sessionId, text }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    appendChatEntry("assistant", `HTTP error: ${payload.detail || response.statusText}`, "http");
-    return;
+  try {
+    const payload = await fetchJson(paths.message || "/api/message", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_id: sessionId, text }),
+    });
+    appendChatEntry("assistant", String(payload.text || ""), String(payload.model || "http"));
+    recordEvent("ok", "HTTP chat request completed", sessionId, payload.model || "http");
+  } catch (error) {
+    appendChatEntry("assistant", `HTTP error: ${error.message}`, "http");
+    recordEvent("danger", "HTTP chat request failed", error.message, sessionId);
   }
-  appendChatEntry("assistant", String(payload.text || ""), String(payload.model || "http"));
 }
 
 function sendWsMessage() {
@@ -268,34 +597,100 @@ function sendWsMessage() {
   appendChatEntry("user", text, sessionId);
   byId("chat-input").value = "";
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-    appendChatEntry("assistant", "WebSocket is not connected. Use Refresh or save the token and retry.", "ws");
+    appendChatEntry("assistant", "WebSocket is not connected. Use Reconnect WS or save the token and retry.", "ws");
+    recordEvent("warn", "WebSocket send blocked", "No live connection available.", sessionId);
     return;
   }
   state.ws.send(JSON.stringify({ session_id: sessionId, text }));
+  recordEvent("ok", "WebSocket chat request sent", sessionId, "queued");
+}
+
+async function triggerHeartbeat() {
+  if (state.heartbeatBusy) {
+    return;
+  }
+  state.heartbeatBusy = true;
+  byId("trigger-heartbeat").disabled = true;
+  setBadge("diag-status", "triggering", "warn");
+  try {
+    const payload = await fetchJson(paths.heartbeat_trigger || "/v1/control/heartbeat/trigger", {
+      method: "POST",
+    });
+    const decision = payload.decision || {};
+    recordEvent(
+      decision.action === "run" ? "warn" : "ok",
+      "Heartbeat trigger completed",
+      `${decision.action || "skip"}:${decision.reason || "unknown"}`,
+      "control",
+    );
+    await refreshAll("heartbeat");
+  } catch (error) {
+    recordEvent("danger", "Heartbeat trigger failed", error.message, "control");
+  } finally {
+    state.heartbeatBusy = false;
+    byId("trigger-heartbeat").disabled = false;
+  }
 }
 
 function bindEvents() {
   document.querySelectorAll("[data-tab-target]").forEach((node) => {
     node.addEventListener("click", () => setActiveTab(node.dataset.tabTarget || "overview"));
   });
+
   byId("token-input").value = state.token;
+  byId("session-input").value = state.sessionId;
+
+  const refreshSelect = byId("refresh-interval");
+  refreshSelect.value = String(state.autoRefreshMs);
+  refreshSelect.addEventListener("change", async () => {
+    state.autoRefreshMs = Number(refreshSelect.value || 0);
+    window.localStorage.setItem(refreshStorageKey, String(state.autoRefreshMs));
+    scheduleAutoRefresh();
+    recordEvent("ok", "Autorefresh updated", state.autoRefreshMs > 0 ? formatDuration(state.autoRefreshMs / 1000) : "manual", "dashboard");
+    renderAll();
+  });
+
   byId("save-token").addEventListener("click", async () => {
     persistToken(byId("token-input").value);
+    recordEvent("ok", "Gateway token saved", state.token ? "Operator token stored in local browser storage." : "Token cleared.", "auth");
     connectWs();
-    await refreshAll();
+    await refreshAll("token-save");
   });
+
   byId("clear-token").addEventListener("click", async () => {
     persistToken("");
     byId("token-input").value = "";
+    recordEvent("warn", "Gateway token cleared", "Dashboard returned to anonymous mode.", "auth");
     connectWs();
-    await refreshAll();
+    await refreshAll("token-clear");
   });
-  byId("refresh-all").addEventListener("click", refreshAll);
+
+  byId("refresh-all").addEventListener("click", () => {
+    void refreshAll("manual");
+  });
+  byId("reconnect-ws").addEventListener("click", () => {
+    recordEvent("warn", "WebSocket reconnect requested", "Operator manually restarted the transport.", "transport");
+    connectWs();
+  });
+  byId("trigger-heartbeat").addEventListener("click", () => {
+    void triggerHeartbeat();
+  });
   byId("send-chat").addEventListener("click", sendWsMessage);
-  byId("send-rest").addEventListener("click", sendHttpMessage);
+  byId("send-rest").addEventListener("click", () => {
+    void sendHttpMessage();
+  });
+  byId("chat-input").addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      sendWsMessage();
+    }
+  });
 }
 
 bindEvents();
+setActiveTab(state.activeTab);
 renderAll();
-refreshAll();
+recordEvent("ok", "Dashboard booted", "Packaged shell loaded with gateway bootstrap metadata.", "ui");
+void refreshAll("initial");
+scheduleAutoRefresh();
 connectWs();
