@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -1511,6 +1512,42 @@ async def _run_proactive_monitor(runtime: RuntimeContainer) -> dict[str, Any]:
 
 
 async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
+    def _is_effectively_empty_heartbeat(content: str | None) -> bool:
+        if content is None:
+            return False
+        for raw_line in str(content).splitlines():
+            trimmed = raw_line.strip()
+            if not trimmed:
+                continue
+            if trimmed.startswith("#"):
+                continue
+            if trimmed in {"-", "*", "+", "- [ ]", "* [ ]", "+ [ ]"}:
+                continue
+            return False
+        return True
+
+    def _append_current_time_line(text: str, *, workspace: Any | None) -> str:
+        base = str(text or "").rstrip()
+        if not base or "Current time:" in base:
+            return base
+        timezone_name = "UTC"
+        user_profile = getattr(workspace, "user_profile", None)
+        if callable(user_profile):
+            try:
+                profile = user_profile()
+                timezone_name = str(getattr(profile, "timezone", "") or "").strip() or "UTC"
+            except Exception:
+                timezone_name = "UTC"
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            timezone_name = "UTC"
+            tz = dt.timezone.utc
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        formatted = now_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        utc_time = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+        return f"{base}\nCurrent time: {formatted} ({timezone_name}) / {utc_time}"
+
     heartbeat_prompt = (
         "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. "
         "Do not infer or repeat old tasks from prior chats. "
@@ -1524,8 +1561,13 @@ async def _run_heartbeat(runtime: RuntimeContainer) -> HeartbeatDecision:
             workspace_heartbeat = str(workspace_heartbeat_prompt() or "").strip()
         except Exception:
             workspace_heartbeat = ""
+    workspace_root = getattr(workspace, "workspace", None)
+    heartbeat_path = Path(workspace_root) / "HEARTBEAT.md" if workspace_root else None
+    if heartbeat_path is not None and heartbeat_path.exists() and _is_effectively_empty_heartbeat(workspace_heartbeat):
+        return HeartbeatDecision(action="skip", reason="heartbeat_empty")
     if workspace_heartbeat:
         heartbeat_prompt = f"{heartbeat_prompt}\n\nHEARTBEAT.md content:\n{workspace_heartbeat}"
+    heartbeat_prompt = _append_current_time_line(heartbeat_prompt, workspace=workspace)
     session_id = "heartbeat:system"
     bind_event("heartbeat.tick", session="heartbeat:system").debug("heartbeat callback running")
     result = await _run_engine_with_timeout(

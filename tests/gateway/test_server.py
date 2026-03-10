@@ -34,6 +34,7 @@ from clawlite.gateway.server import (
 from clawlite.providers.base import LLMResult
 from clawlite.scheduler.heartbeat import HeartbeatDecision
 from clawlite.utils import logging as logging_utils
+from clawlite.workspace.loader import WorkspaceLoader
 
 
 class FakeProvider:
@@ -2724,6 +2725,61 @@ def test_run_heartbeat_injects_workspace_content_when_available() -> None:
         assert "HEARTBEAT.md content:" in user_text
         assert "check inbox" in user_text
         assert "prune stale tasks" in user_text
+        assert "Current time:" in user_text
+
+    asyncio.run(_scenario())
+
+
+def test_run_heartbeat_skips_effectively_empty_workspace_heartbeat(tmp_path: Path) -> None:
+    loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
+    loader.bootstrap()
+    (tmp_path / "ws" / "HEARTBEAT.md").write_text("# Heartbeat\n\n- [ ]\n", encoding="utf-8")
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id, user_text
+            self.calls += 1
+            return SimpleNamespace(text="HEARTBEAT_OK")
+
+    async def _scenario() -> None:
+        engine = _Engine()
+        runtime = SimpleNamespace(engine=engine, workspace=loader)
+
+        decision = await _run_heartbeat(runtime)
+
+        assert decision.action == "skip"
+        assert decision.reason == "heartbeat_empty"
+        assert engine.calls == 0
+
+    asyncio.run(_scenario())
+
+
+def test_run_heartbeat_appends_current_time_line_with_workspace_timezone(tmp_path: Path) -> None:
+    loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
+    loader.bootstrap(variables={"user_timezone": "America/Sao_Paulo"})
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def run(self, *, session_id: str, user_text: str):
+            del session_id
+            self.calls.append(user_text)
+            return SimpleNamespace(text="HEARTBEAT_OK")
+
+    async def _scenario() -> None:
+        engine = _Engine()
+        runtime = SimpleNamespace(engine=engine, workspace=loader)
+
+        decision = await _run_heartbeat(runtime)
+
+        assert decision.reason == "heartbeat_ok"
+        assert engine.calls
+        assert "Current time:" in engine.calls[0]
+        assert "America/Sao_Paulo" in engine.calls[0]
 
     asyncio.run(_scenario())
 
