@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Onboarding now emits a tokenized dashboard link, and the dashboard can bootstrap auth from the URL fragment before stripping it from the address bar; when bootstrap is pending it also exposes a one-click hatch action for the first defining turn.
 - Added a dedicated `clawlite dashboard` command so operators can reopen or print the current dashboard handoff without rerunning onboarding, including backup/web-search/security guidance and bootstrap-state hints; the packaged dashboard now renders those next-step notes too.
 - Fixed `clawlite start` and `clawlite gateway` so `--config` now flows into the runtime instead of silently falling back to the default config file.
+- Bootstrap completion is now gated behind the dedicated hatch session, and `clawlite hatch` provides a terminal-first way to run that first defining turn safely.
 - Heartbeat prompts now inject a cron-style current-time line from the workspace user timezone and skip model calls when `HEARTBEAT.md` exists but is effectively empty.
 - Gateway root entrypoint now serves a richer operator dashboard backed by packaged HTML/CSS/JS assets instead of a single inline landing page, with a more operational UI/UX direction for control-plane work.
 - Added dashboard state endpoints (`/v1/dashboard/state`, `/api/dashboard/state`) so the packaged UI can render recent sessions, cron state, channels, provider recovery, and self-evolution summaries without scraping raw diagnostics.

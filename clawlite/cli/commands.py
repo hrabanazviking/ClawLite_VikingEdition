@@ -187,6 +187,100 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hatch(args: argparse.Namespace) -> int:
+    from clawlite.gateway.server import build_runtime
+
+    cfg = load_config(args.config)
+    handoff = build_dashboard_handoff(cfg, config_path=args.config, ensure_token=False)
+    if not bool(handoff.get("bootstrap_pending", False)):
+        _print_json(
+            {
+                "ok": True,
+                "status": "skipped",
+                "reason": "not_pending",
+                "session_id": handoff.get("hatch_session_id", "hatch:operator"),
+                "message": "",
+            }
+        )
+        return 0
+
+    runtime = build_runtime(cfg)
+    session_id = str(handoff.get("hatch_session_id", "hatch:operator") or "hatch:operator")
+    message = str(args.message or handoff.get("recommended_first_message", "") or "Wake up, my friend!").strip()
+
+    async def _scenario() -> int:
+        try:
+            out = await asyncio.wait_for(
+                runtime.engine.run(session_id=session_id, user_text=message),
+                timeout=max(1.0, float(args.timeout)),
+            )
+        except asyncio.TimeoutError:
+            _print_json(
+                {
+                    "ok": False,
+                    "status": "error",
+                    "reason": "timed_out",
+                    "session_id": session_id,
+                    "message": message,
+                }
+            )
+            return 2
+
+        model = str(getattr(out, "model", "") or "").strip()
+        text = str(getattr(out, "text", "") or "")
+        if not model or model.startswith("engine/"):
+            error = f"bootstrap_hatch_unsatisfied:{model or 'unknown_model'}"
+            runtime.workspace.record_bootstrap_result(status="error", session_id=session_id, error=error)
+            _print_json(
+                {
+                    "ok": False,
+                    "status": "error",
+                    "reason": error,
+                    "session_id": session_id,
+                    "message": message,
+                    "text": text,
+                    "model": model,
+                }
+            )
+            return 2
+
+        completed = bool(runtime.workspace.complete_bootstrap())
+        if not completed:
+            runtime.workspace.record_bootstrap_result(
+                status="error",
+                session_id=session_id,
+                error="complete_bootstrap_returned_false",
+            )
+            _print_json(
+                {
+                    "ok": False,
+                    "status": "error",
+                    "reason": "complete_bootstrap_returned_false",
+                    "session_id": session_id,
+                    "message": message,
+                    "text": text,
+                    "model": model,
+                }
+            )
+            return 2
+
+        runtime.workspace.record_bootstrap_result(status="completed", session_id=session_id)
+        _print_json(
+            {
+                "ok": True,
+                "status": "completed",
+                "reason": "hatch_completed",
+                "session_id": session_id,
+                "message": message,
+                "text": text,
+                "model": model,
+            }
+        )
+        return 0
+
+    return int(asyncio.run(_scenario()) or 0)
+
+
 def cmd_configure(args: argparse.Namespace) -> int:
     """Interactive setup wizard — alias for 'clawlite onboard --wizard'."""
     cfg = _ensure_config_materialized(args.config)
@@ -933,6 +1027,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--session-id", default="cli:default")
     p_run.add_argument("--timeout", type=float, default=20.0, help="Max seconds to wait for a single run")
     p_run.set_defaults(handler=cmd_run)
+
+    p_hatch = sub.add_parser("hatch", help="Run the dedicated first-run bootstrap hatch")
+    p_hatch.add_argument("--message", default="", help="Override the default hatch message")
+    p_hatch.add_argument("--timeout", type=float, default=60.0, help="Max seconds to wait for the hatch run")
+    p_hatch.set_defaults(handler=cmd_hatch)
 
     p_status = sub.add_parser("status", help="Show runtime/config status summary")
     p_status.set_defaults(handler=cmd_status)

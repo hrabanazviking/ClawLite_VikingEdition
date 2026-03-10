@@ -348,6 +348,69 @@ def test_cli_dashboard_opens_browser_when_allowed(tmp_path: Path, capsys, monkey
     assert opened["url"].startswith("http://127.0.0.1:8787#token=")
 
 
+def test_cli_hatch_skips_when_bootstrap_not_pending(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(_config):
+        raise AssertionError("build_runtime should not be called when bootstrap is not pending")
+
+    monkeypatch.setattr("clawlite.gateway.server.build_runtime", _boom)
+    rc = main(["--config", str(config_path), "hatch"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["status"] == "skipped"
+    assert payload["reason"] == "not_pending"
+
+
+def test_cli_hatch_completes_pending_bootstrap(tmp_path: Path, capsys, monkeypatch) -> None:
+    workspace_path = tmp_path / "workspace"
+    loader = WorkspaceLoader(workspace_path=workspace_path)
+    loader.bootstrap()
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(workspace_path),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _Engine:
+        async def run(self, *, session_id: str, user_text: str):
+            captured["session_id"] = session_id
+            captured["user_text"] = user_text
+            return types.SimpleNamespace(text="ready", model="openai/gpt-4o-mini")
+
+    runtime = types.SimpleNamespace(engine=_Engine(), workspace=loader)
+    monkeypatch.setattr("clawlite.gateway.server.build_runtime", lambda _config: runtime)
+
+    rc = main(["--config", str(config_path), "hatch"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["status"] == "completed"
+    assert payload["session_id"] == "hatch:operator"
+    assert captured["session_id"] == "hatch:operator"
+    assert captured["user_text"] == "Wake up, my friend!"
+    assert not (workspace_path / "BOOTSTRAP.md").exists()
+
+
 def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     pairing_state_path = tmp_path / "telegram-pairing.json"

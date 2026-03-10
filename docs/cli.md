@@ -20,12 +20,14 @@ The module entry point is also available as `python -m clawlite.cli`.
 | `start` | Starts the FastAPI gateway | `clawlite start --host 127.0.0.1 --port 8787` |
 | `gateway` | Alias of `start` | `clawlite gateway --port 8787` |
 | `run <prompt>` | Runs one prompt directly through the engine | `clawlite run "summarize this repo" --session-id cli:test --timeout 30` |
+| `hatch` | Runs the dedicated first-run bootstrap hatch session | `clawlite hatch --message "Wake up, my friend!"` |
 | `status` | Prints a local config/runtime summary | `clawlite status` |
 | `dashboard` | Opens or prints the local dashboard handoff | `clawlite dashboard --no-open` |
 
 Notes:
 
 - `run` does not require the gateway to be running.
+- `hatch` does not require the gateway to be running; it uses the dedicated `hatch:operator` session and only completes bootstrap when a pending hatch exists.
 - `status` includes enabled channels, provider model, heartbeat interval, and bootstrap state.
 - `dashboard` prints the current dashboard URL, tokenized handoff URL, bootstrap state, post-onboarding guidance (including web-search hints), and can open the browser unless `--no-open` is passed.
 

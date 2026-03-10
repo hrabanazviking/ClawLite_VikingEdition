@@ -762,7 +762,7 @@ def test_gateway_startup_completes_bootstrap_lifecycle_without_user_turn(tmp_pat
         assert diagnostics_payload["bootstrap"]["last_session_id"] == "bootstrap:system"
 
 
-def test_gateway_successful_chat_completes_bootstrap_after_startup_failure(tmp_path: Path) -> None:
+def test_gateway_hatch_session_completes_bootstrap_after_startup_failure(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
         state_path=str(tmp_path / "state"),
@@ -782,7 +782,7 @@ def test_gateway_successful_chat_completes_bootstrap_after_startup_failure(tmp_p
         assert diagnostics_payload["bootstrap"]["last_error"] == "bootstrap_run_unsatisfied:engine/fallback"
 
         app.state.runtime.engine.provider = FakeProvider()
-        chat = client.post("/v1/chat", json={"session_id": "cli:bootstrap", "text": "ping"})
+        chat = client.post("/v1/chat", json={"session_id": "hatch:operator", "text": "Wake up, my friend!"})
         assert chat.status_code == 200
         assert chat.json()["text"] == "pong"
 
@@ -791,6 +791,35 @@ def test_gateway_successful_chat_completes_bootstrap_after_startup_failure(tmp_p
         diagnostics_payload = client.get("/v1/diagnostics").json()
         assert diagnostics_payload["bootstrap"]["pending"] is False
         assert diagnostics_payload["bootstrap"]["last_status"] == "completed"
+        assert diagnostics_payload["bootstrap"]["last_session_id"] == "hatch:operator"
+
+
+def test_gateway_non_hatch_session_does_not_complete_bootstrap_after_startup_failure(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FailingProvider("bootstrap_boom")
+    bootstrap_file = tmp_path / "workspace" / "BOOTSTRAP.md"
+
+    with TestClient(app) as client:
+        assert bootstrap_file.exists()
+
+        diagnostics_payload = client.get("/v1/diagnostics").json()
+        assert diagnostics_payload["bootstrap"]["pending"] is True
+
+        app.state.runtime.engine.provider = FakeProvider()
+        chat = client.post("/v1/chat", json={"session_id": "cli:bootstrap", "text": "ping"})
+        assert chat.status_code == 200
+        assert chat.json()["text"] == "pong"
+        assert bootstrap_file.exists()
+
+        diagnostics_payload = client.get("/v1/diagnostics").json()
+        assert diagnostics_payload["bootstrap"]["pending"] is True
+        assert diagnostics_payload["bootstrap"]["last_status"] == "error"
 
 
 def test_gateway_internal_sessions_do_not_complete_bootstrap(tmp_path: Path) -> None:

@@ -138,7 +138,13 @@ If onboarding is still pending, the dashboard also exposes a `Hatch agent` actio
 Wake up, my friend!
 ```
 
-through the normal operator session so the first bootstrap turn can complete.
+through the dedicated `hatch:operator` session so the first bootstrap turn can complete cleanly.
+
+If you prefer to hatch from the terminal, you can also run:
+
+```bash
+clawlite hatch
+```
 
 ### 4. Talk to the agent
 

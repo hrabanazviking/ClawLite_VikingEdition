@@ -333,8 +333,8 @@ def build_dashboard_handoff(
                 "id": "hatch",
                 "title": "First hatch",
                 "body": (
-                    f"Bootstrap is still pending. Open the dashboard and use `Hatch agent`, which sends "
-                    f'"{_HATCH_MESSAGE}" through the dedicated `{_HATCH_SESSION_ID}` session.'
+                    f"Bootstrap is still pending. Open the dashboard and use `Hatch agent`, or run `clawlite hatch`, "
+                    f'which sends "{_HATCH_MESSAGE}" through the dedicated `{_HATCH_SESSION_ID}` session.'
                 ),
             },
         )

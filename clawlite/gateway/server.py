@@ -2641,6 +2641,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         normalized = str(session_id or "").strip().lower()
         return normalized.startswith("heartbeat:") or normalized.startswith("autonomy:") or normalized.startswith("bootstrap:")
 
+    def _is_hatch_session_id(session_id: str) -> bool:
+        normalized = str(session_id or "").strip().lower()
+        configured = str(build_dashboard_handoff(runtime.config).get("hatch_session_id", "hatch:operator") or "hatch:operator").strip().lower()
+        return normalized == configured or normalized.startswith("hatch:")
+
     def _finalize_bootstrap_for_user_turn(session_id: str) -> None:
         if _is_internal_session_id(session_id):
             _refresh_bootstrap_component()
@@ -2648,6 +2653,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
         status = _bootstrap_status_snapshot()
         if not bool(status.get("pending", False)):
+            _refresh_bootstrap_component()
+            return
+
+        if not _is_hatch_session_id(session_id):
             _refresh_bootstrap_component()
             return
 
