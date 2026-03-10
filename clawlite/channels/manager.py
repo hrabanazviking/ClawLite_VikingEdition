@@ -156,6 +156,19 @@ class ChannelManager:
             "skipped_by_channel": {},
             "suppressed_by_channel": {},
         }
+        self._operator_recovery: dict[str, Any] = {
+            "running": False,
+            "last_at": "",
+            "last_error": "",
+            "attempted": 0,
+            "recovered": 0,
+            "failed": 0,
+            "skipped_healthy": 0,
+            "skipped_cooldown": 0,
+            "not_found": 0,
+            "forced": False,
+            "channels": [],
+        }
         self._inbound_persistence_path: Path | None = None
         self._inbound_replay_on_startup = True
         self._inbound_replay_limit = 100
@@ -881,19 +894,19 @@ class ChannelManager:
                 exc,
             )
 
-    async def _recover_channel(self, channel_name: str, reason: str) -> bool:
+    async def _recover_channel_detailed(self, channel_name: str, reason: str, *, force: bool = False) -> dict[str, Any]:
         normalized = str(channel_name or "").strip().lower()
         channel = self._channels.get(normalized)
         if channel is None:
-            return False
+            return {"channel": normalized, "status": "not_found", "reason": str(reason or "")}
 
         row = self._ensure_recovery_channel(normalized)
         now = time.monotonic()
         last_attempt = float(row.get("_last_attempt_monotonic", 0.0) or 0.0)
-        if self._recovery_cooldown_s > 0 and last_attempt > 0 and now < (last_attempt + self._recovery_cooldown_s):
+        if not force and self._recovery_cooldown_s > 0 and last_attempt > 0 and now < (last_attempt + self._recovery_cooldown_s):
             self._recovery_total["skipped_cooldown"] += 1
             row["skipped_cooldown"] = int(row.get("skipped_cooldown", 0) or 0) + 1
-            return False
+            return {"channel": normalized, "status": "skipped_cooldown", "reason": str(reason or "")}
 
         row["_last_attempt_monotonic"] = now
         row["last_reason"] = str(reason or "")
@@ -906,7 +919,12 @@ class ChannelManager:
             row["failures"] = int(row.get("failures", 0) or 0) + 1
             row["last_recovery_at"] = recovery_at
             row["last_error"] = "channel_recovery_unregistered"
-            return False
+            return {
+                "channel": normalized,
+                "status": "failed",
+                "reason": str(reason or ""),
+                "error": "channel_recovery_unregistered",
+            }
 
         replacement: BaseChannel | None = None
         try:
@@ -939,7 +957,12 @@ class ChannelManager:
                     "at": recovery_at,
                 }
             )
-            return False
+            return {
+                "channel": normalized,
+                "status": "failed",
+                "reason": str(reason or ""),
+                "error": str(exc),
+            }
 
         self._recovery_total["success"] += 1
         row["success"] = int(row.get("success", 0) or 0) + 1
@@ -954,7 +977,82 @@ class ChannelManager:
                 "at": recovery_at,
             }
         )
-        return True
+        return {"channel": normalized, "status": "recovered", "reason": str(reason or "")}
+
+    async def _recover_channel(self, channel_name: str, reason: str) -> bool:
+        result = await self._recover_channel_detailed(channel_name, reason, force=False)
+        return str(result.get("status", "")) == "recovered"
+
+    async def operator_recover_channels(self, *, channel: str = "", force: bool = True) -> dict[str, Any]:
+        normalized = str(channel or "").strip().lower()
+        summary: dict[str, Any] = {
+            "running": True,
+            "last_at": datetime.now(timezone.utc).isoformat(),
+            "last_error": "",
+            "attempted": 0,
+            "recovered": 0,
+            "failed": 0,
+            "skipped_healthy": 0,
+            "skipped_cooldown": 0,
+            "not_found": 0,
+            "forced": bool(force),
+            "channels": [],
+        }
+        self._operator_recovery = dict(summary)
+
+        try:
+            if normalized:
+                names = [normalized]
+            else:
+                names = sorted(self._channels.keys())
+
+            for name in names:
+                current = self._channels.get(name)
+                if current is None:
+                    summary["not_found"] += 1
+                    summary["channels"].append({"channel": name, "status": "not_found"})
+                    continue
+
+                health = current.health()
+                task_state, task_error = self._channel_worker_state(current)
+                if not normalized and health.running and task_state == "running":
+                    summary["skipped_healthy"] += 1
+                    summary["channels"].append(
+                        {"channel": name, "status": "skipped_healthy", "reason": "already_running"}
+                    )
+                    continue
+
+                summary["attempted"] += 1
+                reason = "operator_recover_all"
+                if normalized:
+                    reason = "operator_recover_channel"
+                elif not health.running:
+                    reason = "operator_recover_channel_stopped"
+                elif task_state != "running":
+                    reason = f"operator_recover_worker_{task_state}"
+                    if task_error:
+                        reason = f"{reason}:{task_error}"
+
+                result = await self._recover_channel_detailed(name, reason, force=force)
+                status = str(result.get("status", "") or "")
+                if status == "recovered":
+                    summary["recovered"] += 1
+                elif status == "skipped_cooldown":
+                    summary["skipped_cooldown"] += 1
+                elif status == "not_found":
+                    summary["not_found"] += 1
+                else:
+                    summary["failed"] += 1
+                summary["channels"].append(result)
+        except Exception as exc:
+            summary["last_error"] = str(exc)
+            self._operator_recovery = dict(summary)
+            bind_event("channel.recovery").warning("operator channel recovery failed error={}", exc)
+            raise
+
+        summary["running"] = False
+        self._operator_recovery = dict(summary)
+        return dict(summary)
 
     async def _recovery_loop(self) -> None:
         while True:
@@ -1477,6 +1575,7 @@ class ChannelManager:
             "interval_s": float(self._recovery_interval_s),
             "cooldown_s": float(self._recovery_cooldown_s),
             "total": dict(self._recovery_total),
+            "operator": dict(self._operator_recovery),
             "per_channel": per_channel,
         }
 

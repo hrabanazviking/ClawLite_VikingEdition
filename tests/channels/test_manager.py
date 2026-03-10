@@ -1227,6 +1227,41 @@ def test_channel_manager_recovers_failed_channel_worker_and_notifies() -> None:
     asyncio.run(_scenario())
 
 
+def test_channel_manager_operator_recover_channels_recovers_failed_worker() -> None:
+    async def _scenario() -> None:
+        RecoveringChannel.starts = 0
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", RecoveringChannel)
+        await mgr.start(
+            {
+                "channels": {
+                    "recovery_enabled": False,
+                    "recovery_cooldown_s": 60.0,
+                    "fake": {"enabled": True},
+                }
+            }
+        )
+
+        status = mgr.status()["fake"]
+        assert status["task_state"] == "failed"
+
+        summary = await mgr.operator_recover_channels(force=True)
+
+        status = mgr.status()["fake"]
+        assert summary["attempted"] == 1
+        assert summary["recovered"] == 1
+        assert status["task_state"] == "running"
+        assert status["recovery"]["success"] >= 1
+        diagnostics = mgr.recovery_diagnostics()
+        assert diagnostics["operator"]["recovered"] == 1
+        assert diagnostics["operator"]["forced"] is True
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_recovery_diagnostics_and_restart_loop(tmp_path: Path) -> None:
     async def _scenario() -> None:
         bus = MessageQueue()

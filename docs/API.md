@@ -142,6 +142,38 @@ Example response:
 
 Alias compatível: `POST /api/channels/replay`.
 
+## `POST /v1/control/channels/recover`
+
+Triggers operator-requested channel recovery through the live channel manager.
+
+Example request:
+
+```json
+{
+  "channel": "",
+  "force": true
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "attempted": 2,
+    "recovered": 1,
+    "failed": 0,
+    "skipped_healthy": 3,
+    "skipped_cooldown": 0,
+    "not_found": 0,
+    "forced": true
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/recover`.
+
 ## `GET /health`
 
 Example response:

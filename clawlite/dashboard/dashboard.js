@@ -707,6 +707,7 @@ function renderAutomation() {
   }
 
   const channelsPayload = payload.channels || {};
+  const channelsRecovery = payload.channels_recovery || {};
   const channels = Array.isArray(channelsPayload.items) ? channelsPayload.items : [];
   const channelsGrid = byId("channels-grid");
   if (channelsGrid) {
@@ -732,6 +733,25 @@ function renderAutomation() {
       card.append(title, meta, summary);
       channelsGrid.appendChild(card);
     });
+
+    const operatorRecovery = channelsRecovery.operator || {};
+    appendSummaryCard(channelsGrid, {
+      title: "Manual recovery",
+      body: `${numeric(operatorRecovery.recovered, 0)} recovered | ${numeric(operatorRecovery.failed, 0)} failed`,
+      detail: operatorRecovery.last_at
+        ? `${formatClock(operatorRecovery.last_at)} | ${numeric(operatorRecovery.skipped_healthy, 0)} healthy skips | ${numeric(operatorRecovery.skipped_cooldown, 0)} cooldown skips`
+        : "No operator recovery action has been triggered yet.",
+    });
+  }
+
+  const recoverButton = byId("recover-channels");
+  if (recoverButton) {
+    const unhealthyCount = channels.filter((channel) => {
+      const state = String(channel.state || "").toLowerCase();
+      return channel.enabled && state !== "running";
+    }).length;
+    recoverButton.disabled = unhealthyCount <= 0;
+    recoverButton.textContent = unhealthyCount > 0 ? `Recover unhealthy channels (${unhealthyCount})` : "Recover unhealthy channels";
   }
 
   const provider = payload.provider || {};
@@ -1204,6 +1224,36 @@ async function triggerDeadLetterReplay() {
   }
 }
 
+async function triggerChannelRecovery() {
+  const button = byId("recover-channels");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.channels_recover || "/v1/control/channels/recover", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ force: true }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.failed ? "warn" : "ok",
+      "Channel recovery finished",
+      `${numeric(summary.recovered, 0)} recovered | ${numeric(summary.failed, 0)} failed | ${numeric(summary.skipped_healthy, 0)} already healthy`,
+      "channels",
+    );
+    await refreshAll("channel-recovery");
+  } catch (error) {
+    recordEvent("danger", "Channel recovery failed", error.message, "channels");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerHatch() {
   if (!hatchPending()) {
     recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
@@ -1254,6 +1304,9 @@ function bindEvents() {
 
   byId("refresh-all").addEventListener("click", () => {
     void refreshAll("manual");
+  });
+  byId("recover-channels").addEventListener("click", () => {
+    void triggerChannelRecovery();
   });
   byId("replay-dead-letters").addEventListener("click", () => {
     void triggerDeadLetterReplay();

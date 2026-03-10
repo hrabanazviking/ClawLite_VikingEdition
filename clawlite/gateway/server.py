@@ -307,6 +307,11 @@ class ChannelReplayRequest(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class ChannelRecoverRequest(BaseModel):
+    channel: str = ""
+    force: bool = True
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -528,6 +533,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "token": "/api/token",
             "tools": "/api/tools/catalog",
             "channels_replay": "/v1/control/channels/replay",
+            "channels_recover": "/v1/control/channels/recover",
             "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
         },
@@ -4683,6 +4689,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return {"ok": True, "summary": summary}
 
+    async def _channels_recover_handler(request: Request, payload: ChannelRecoverRequest) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        summary = await runtime.channels.operator_recover_channels(
+            channel=str(payload.channel or "").strip(),
+            force=bool(payload.force),
+        )
+        return {"ok": True, "summary": summary}
+
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
@@ -4690,6 +4704,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/channels/replay")
     async def api_channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
+
+    @app.post("/v1/control/channels/recover")
+    async def channels_recover(request: Request, payload: ChannelRecoverRequest | None = None) -> dict[str, Any]:
+        return await _channels_recover_handler(request, payload or ChannelRecoverRequest())
+
+    @app.post("/api/channels/recover")
+    async def api_channels_recover(request: Request, payload: ChannelRecoverRequest | None = None) -> dict[str, Any]:
+        return await _channels_recover_handler(request, payload or ChannelRecoverRequest())
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:
