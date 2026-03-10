@@ -4264,6 +4264,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "runner": dict(self_evolution_runner_state),
         }
 
+    def _dashboard_memory_summary() -> dict[str, Any]:
+        monitor_payload: dict[str, Any]
+        if runtime.memory_monitor is None:
+            monitor_payload = {"enabled": False}
+        else:
+            try:
+                monitor_payload = dict(runtime.memory_monitor.telemetry())
+            except Exception:
+                monitor_payload = {"enabled": False, "error": "memory_monitor_unavailable"}
+            monitor_payload["enabled"] = True
+
+        analysis_payload: dict[str, Any] = {}
+        analysis_stats = getattr(runtime.engine.memory, "analysis_stats", None)
+        if callable(analysis_stats):
+            try:
+                raw_analysis = analysis_stats()
+            except Exception:
+                raw_analysis = {}
+            if isinstance(raw_analysis, dict):
+                analysis_payload = raw_analysis
+
+        return {
+            "monitor": monitor_payload,
+            "analysis": analysis_payload,
+        }
+
     def _dashboard_state_payload() -> dict[str, Any]:
         generated_at = _utc_now_iso()
         control_plane = _control_plane_payload(server_time=generated_at)
@@ -4280,6 +4306,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "heartbeat": runtime.heartbeat.status(),
             "subagents": runtime.engine.subagents.status(),
             "skills": skills,
+            "workspace": runtime.workspace.runtime_health(),
+            "bootstrap": runtime.workspace.bootstrap_status(),
+            "memory": _dashboard_memory_summary(),
             "provider": {
                 "telemetry": provider_telemetry,
                 "autonomy": provider_autonomy,

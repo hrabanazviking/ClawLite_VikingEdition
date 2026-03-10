@@ -498,6 +498,71 @@ function renderAutomation() {
   setBadge("channels-status", channels.length ? `${channels.length} channels` : "empty", channels.length ? "ok" : "warn");
 }
 
+function renderKnowledge() {
+  const payload = state.dashboardState || {};
+  const workspace = payload.workspace || {};
+  const bootstrap = payload.bootstrap || {};
+  const skills = payload.skills || {};
+  const memory = payload.memory || {};
+  const memoryMonitor = memory.monitor || {};
+
+  setText(
+    "metric-workspace-health",
+    `${numeric(workspace.healthy_count, 0)}/${Object.keys(workspace.critical_files || {}).length || 0}`,
+  );
+  setText(
+    "metric-bootstrap",
+    bootstrap.pending ? "pending" : bootstrap.last_status || (bootstrap.completed_at ? "completed" : "idle"),
+  );
+  setText("metric-skills-runnable", String(numeric(((skills.summary || {}).runnable), 0)));
+  setText("metric-memory-pending", String(numeric(memoryMonitor.pending, 0)));
+
+  const workspaceGrid = byId("workspace-grid");
+  if (workspaceGrid) {
+    workspaceGrid.innerHTML = "";
+    const files = workspace.critical_files || {};
+    const entries = Object.entries(files);
+    if (!entries.length) {
+      const empty = document.createElement("article");
+      empty.className = "summary-card";
+      empty.textContent = "No workspace runtime health data available.";
+      workspaceGrid.appendChild(empty);
+    }
+    entries.forEach(([name, row]) => {
+      const card = document.createElement("article");
+      card.className = "summary-card";
+      const title = document.createElement("span");
+      title.className = "summary-card__title";
+      title.textContent = name;
+      const meta = document.createElement("div");
+      meta.className = "summary-card__meta";
+      meta.textContent = `${row.status || "unknown"} | bytes ${numeric(row.bytes, 0)} | repaired ${Boolean(row.repaired)}`;
+      const detail = document.createElement("div");
+      detail.className = "summary-card__meta";
+      detail.textContent = row.error || row.backup_path || "runtime file healthy";
+      card.append(title, meta, detail);
+      workspaceGrid.appendChild(card);
+    });
+  }
+
+  setCode("bootstrap-preview", bootstrap);
+  setCode("skills-preview", {
+    summary: skills.summary || {},
+    watcher: skills.watcher || {},
+    sources: skills.sources || {},
+    missing_requirements: skills.missing_requirements || {},
+  });
+  setCode("memory-preview", {
+    monitor: memoryMonitor,
+    analysis: memory.analysis || {},
+  });
+
+  setBadge("workspace-status", workspace.failed_count ? "attention" : "healthy", workspace.failed_count ? "warn" : "ok");
+  setBadge("bootstrap-status", bootstrap.pending ? "pending" : bootstrap.last_status || "idle", bootstrap.pending ? "warn" : "ok");
+  setBadge("skills-status", `${numeric(((skills.summary || {}).available), 0)} available`, numeric(((skills.summary || {}).unavailable), 0) ? "warn" : "ok");
+  setBadge("memory-status", memoryMonitor.enabled ? "monitoring" : "disabled", memoryMonitor.enabled ? "ok" : "warn");
+}
+
 function renderOverview() {
   const status = state.status || bootstrap.control_plane || {};
   const ready = Boolean(status.ready);
@@ -562,6 +627,7 @@ function renderAll() {
   renderOverview();
   renderSessions();
   renderAutomation();
+  renderKnowledge();
   renderRuntime();
 }
 

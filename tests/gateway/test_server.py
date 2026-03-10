@@ -2282,6 +2282,8 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert "Operator view for health, chat, diagnostics, tools, and WebSocket connectivity." in body
         assert "Trigger heartbeat" in body
         assert "Signal Feed" in body
+        assert "Workspace Runtime Files" in body
+        assert "Recent Sessions" in body
         assert 'window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ = {' in body
         assert "/_clawlite/dashboard.css" in body
         assert "/_clawlite/dashboard.js" in body
@@ -2340,6 +2342,9 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert any(item["session_id"] == "dashboard:test" for item in payload["sessions"]["items"])
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
+    assert "workspace" in payload
+    assert "bootstrap" in payload
+    assert "memory" in payload
     assert "telemetry" in payload["provider"]
     assert "autonomy" in payload["provider"]
     assert "items" in payload["channels"]

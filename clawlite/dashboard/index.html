@@ -29,6 +29,7 @@
           <button class="nav-button" data-tab-target="chat">Chat</button>
           <button class="nav-button" data-tab-target="sessions">Sessions</button>
           <button class="nav-button" data-tab-target="automation">Automation</button>
+          <button class="nav-button" data-tab-target="knowledge">Knowledge</button>
           <button class="nav-button" data-tab-target="runtime">Runtime</button>
           <button class="nav-button" data-tab-target="tools">Tools</button>
           <div class="nav-divider"></div>
@@ -240,6 +241,51 @@
               </div>
               <div class="summary-grid summary-grid--wide" id="channels-grid"></div>
             </article>
+          </section>
+
+          <section class="panel" data-tab-panel="knowledge">
+            <div class="card-grid card-grid--stats">
+              <article class="metric-card"><span class="metric-card__label">Workspace health</span><strong class="metric-card__value" id="metric-workspace-health">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Bootstrap</span><strong class="metric-card__value" id="metric-bootstrap">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Skills runnable</span><strong class="metric-card__value" id="metric-skills-runnable">-</strong></article>
+              <article class="metric-card"><span class="metric-card__label">Memory pending</span><strong class="metric-card__value" id="metric-memory-pending">-</strong></article>
+            </div>
+
+            <div class="card-grid">
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Workspace Runtime Files</h2>
+                  <span class="badge" id="workspace-status">pending</span>
+                </div>
+                <div class="summary-grid summary-grid--wide" id="workspace-grid"></div>
+              </article>
+
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Bootstrap Cycle</h2>
+                  <span class="badge" id="bootstrap-status">pending</span>
+                </div>
+                <pre class="code-block" id="bootstrap-preview">Waiting for bootstrap state...</pre>
+              </article>
+            </div>
+
+            <div class="card-grid">
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Skills Inventory</h2>
+                  <span class="badge" id="skills-status">pending</span>
+                </div>
+                <pre class="code-block" id="skills-preview">Waiting for skills diagnostics...</pre>
+              </article>
+
+              <article class="panel-card">
+                <div class="panel-card__header">
+                  <h2>Memory Monitor</h2>
+                  <span class="badge" id="memory-status">pending</span>
+                </div>
+                <pre class="code-block" id="memory-preview">Waiting for memory telemetry...</pre>
+              </article>
+            </div>
           </section>
 
           <section class="panel" data-tab-panel="runtime">

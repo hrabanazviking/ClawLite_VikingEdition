@@ -63,6 +63,12 @@ Example response:
   },
   "heartbeat": {},
   "subagents": {},
+  "workspace": {},
+  "bootstrap": {},
+  "memory": {
+    "monitor": {},
+    "analysis": {}
+  },
   "skills": {},
   "provider": {
     "telemetry": {},
