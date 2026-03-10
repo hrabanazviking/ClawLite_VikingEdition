@@ -401,6 +401,7 @@ function renderDeliveryBoard() {
   const total = delivery.total || {};
   const persistence = delivery.persistence || {};
   const startupReplay = persistence.startup_replay || {};
+  const manualReplay = persistence.manual_replay || {};
   const recentDeadLetters = Array.isArray(queue.dead_letter_recent) ? queue.dead_letter_recent : [];
   const latestDeadLetter = recentDeadLetters[0] || {};
 
@@ -428,6 +429,13 @@ function renderDeliveryBoard() {
       detail: `${numeric(startupReplay.failed, 0)} failed | ${numeric(startupReplay.skipped, 0)} skipped`,
     },
     {
+      title: "Manual replay",
+      body: `${numeric(manualReplay.replayed, 0)} replayed | ${numeric(manualReplay.restored, 0)} restored`,
+      detail: manualReplay.last_at
+        ? `${formatClock(manualReplay.last_at)} | ${numeric(manualReplay.failed, 0)} failed | ${numeric(manualReplay.skipped, 0)} skipped`
+        : "No manual replay has been triggered yet.",
+    },
+    {
       title: "Dispatcher",
       body: `${String(dispatcher.task_state || "unknown")} | ${numeric(dispatcher.active_tasks, 0)} active tasks`,
       detail: `${numeric(dispatcher.active_sessions, 0)} active sessions | max ${numeric(dispatcher.max_concurrency, 0)} concurrency`,
@@ -443,6 +451,12 @@ function renderDeliveryBoard() {
 
   const deliveryHealthy = numeric(queue.dead_letter_size, 0) === 0 && String(dispatcher.task_state || "") === "running";
   setBadge("delivery-status", deliveryHealthy ? "healthy" : "attention", deliveryHealthy ? "ok" : "warn");
+  const replayButton = byId("replay-dead-letters");
+  if (replayButton) {
+    const deadLetterCount = numeric(queue.dead_letter_size, 0);
+    replayButton.disabled = deadLetterCount <= 0;
+    replayButton.textContent = deadLetterCount > 0 ? `Replay dead letters (${deadLetterCount})` : "Replay dead letters";
+  }
 }
 
 function renderSupervisorBoard() {
@@ -1158,6 +1172,38 @@ async function triggerHeartbeat() {
   }
 }
 
+async function triggerDeadLetterReplay() {
+  const queue = ((state.dashboardState || {}).queue) || {};
+  const limit = Math.min(25, Math.max(1, numeric(queue.dead_letter_size, 0) || 1));
+  const button = byId("replay-dead-letters");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.channels_replay || "/v1/control/channels/replay", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ limit }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.failed ? "warn" : "ok",
+      "Dead-letter replay finished",
+      `${numeric(summary.replayed, 0)} replayed | ${numeric(summary.failed, 0)} failed | ${numeric(summary.skipped, 0)} skipped`,
+      "channels",
+    );
+    await refreshAll("delivery-replay");
+  } catch (error) {
+    recordEvent("danger", "Dead-letter replay failed", error.message, "channels");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerHatch() {
   if (!hatchPending()) {
     recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
@@ -1208,6 +1254,9 @@ function bindEvents() {
 
   byId("refresh-all").addEventListener("click", () => {
     void refreshAll("manual");
+  });
+  byId("replay-dead-letters").addEventListener("click", () => {
+    void triggerDeadLetterReplay();
   });
   byId("reconnect-ws").addEventListener("click", () => {
     recordEvent("warn", "WebSocket reconnect requested", "Operator manually restarted the transport.", "transport");

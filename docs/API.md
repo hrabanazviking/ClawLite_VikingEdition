@@ -107,6 +107,41 @@ Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política d
 
 This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload.
 
+## `POST /v1/control/channels/replay`
+
+Replays retained dead-letter outbound events through the live channel manager.
+
+Example request:
+
+```json
+{
+  "limit": 25,
+  "channel": "",
+  "reason": "",
+  "session_id": "",
+  "reasons": []
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "restored": 0,
+    "restored_idempotency_keys": 0,
+    "replayed": 2,
+    "failed": 0,
+    "skipped": 1,
+    "suppressed": 0,
+    "remaining": 1
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/replay`.
+
 ## `GET /health`
 
 Example response:

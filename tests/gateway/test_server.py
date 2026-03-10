@@ -16,7 +16,8 @@ from loguru import logger
 from starlette.websockets import WebSocketDisconnect
 
 import clawlite.gateway.server as gateway_server
-from clawlite.channels.base import BaseChannel
+from clawlite.bus.events import OutboundEvent
+from clawlite.channels.base import BaseChannel, ChannelCapabilities
 from clawlite.config.schema import AppConfig, SchedulerConfig
 from clawlite.core.memory import MemoryStore
 from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
@@ -2318,6 +2319,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert 'id="provider-grid"' in body
         assert 'id="delivery-grid"' in body
         assert 'id="supervisor-grid"' in body
+        assert 'id="replay-dead-letters"' in body
         assert "Signal Feed" in body
         assert "Workspace Runtime Files" in body
         assert "Recent Sessions" in body
@@ -2328,6 +2330,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"status": "/api/status"' in body
         assert '"diagnostics": "/api/diagnostics"' in body
         assert '"message": "/api/message"' in body
+        assert '"channels_replay": "/v1/control/channels/replay"' in body
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
@@ -2360,6 +2363,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "renderDeliveryBoard" in js.text
     assert "renderSupervisorBoard" in js.text
     assert "renderProviderRecoveryBoard" in js.text
+    assert "triggerDeadLetterReplay" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
@@ -2392,6 +2396,7 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "channels_delivery" in payload
     assert "channels_recovery" in payload
     assert "supervisor" in payload
+    assert "manual_replay" in payload["channels_delivery"]["persistence"]
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
     assert "workspace" in payload
@@ -2402,6 +2407,63 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "autonomy" in payload["provider"]
     assert "items" in payload["channels"]
     assert "enabled" in payload["self_evolution"]
+
+
+class _ReplayChannel(BaseChannel):
+    def __init__(self) -> None:
+        super().__init__(name="fake", config={}, capabilities=ChannelCapabilities())
+        self._running = True
+        self.sent: list[tuple[str, str, dict[str, object]]] = []
+
+    async def start(self) -> None:
+        self._running = True
+
+    async def stop(self) -> None:
+        self._running = False
+
+    async def send(self, *, target: str, text: str, metadata: dict[str, object] | None = None) -> str:
+        self.sent.append((target, text, dict(metadata or {})))
+        return "ok"
+
+
+def test_gateway_channels_replay_endpoint_replays_dead_letters(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    replay_channel = _ReplayChannel()
+    app.state.runtime.channels._channels["fake"] = replay_channel
+
+    with TestClient(app) as client:
+        asyncio.run(
+            app.state.runtime.bus.publish_dead_letter(
+                OutboundEvent(
+                    channel="fake",
+                    session_id="fake:session",
+                    target="dest",
+                    text="replay-me",
+                    metadata={"_delivery_idempotency_key": "gateway-replay-test-key"},
+                    dead_lettered=True,
+                    dead_letter_reason="send_failed",
+                )
+            )
+        )
+        response = client.post(
+            "/v1/control/channels/replay",
+            json={"limit": 5, "channel": "fake", "reason": "send_failed", "session_id": "fake:session"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["replayed"] == 1
+    assert payload["summary"]["remaining"] == 0
+    assert replay_channel.sent[0][0] == "dest"
+    assert replay_channel.sent[0][1] == "replay-me"
+    assert replay_channel.sent[0][2]["_replayed_from_dead_letter"] is True
 
 
 def test_gateway_tools_catalog_http_endpoints_return_expected_shape(tmp_path: Path) -> None:

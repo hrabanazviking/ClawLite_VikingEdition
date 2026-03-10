@@ -138,6 +138,24 @@ class ChannelManager:
             "failed_by_channel": {},
             "skipped_by_channel": {},
         }
+        self._delivery_manual_replay: dict[str, Any] = {
+            "running": False,
+            "last_at": "",
+            "last_error": "",
+            "restored": 0,
+            "restored_idempotency_keys": 0,
+            "scanned": 0,
+            "matched": 0,
+            "replayed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "suppressed": 0,
+            "remaining": 0,
+            "replayed_by_channel": {},
+            "failed_by_channel": {},
+            "skipped_by_channel": {},
+            "suppressed_by_channel": {},
+        }
         self._inbound_persistence_path: Path | None = None
         self._inbound_replay_on_startup = True
         self._inbound_replay_limit = 100
@@ -625,6 +643,56 @@ class ChannelManager:
 
     def startup_replay_status(self) -> dict[str, Any]:
         return dict(self._delivery_startup_replay)
+
+    async def operator_replay_dead_letters(
+        self,
+        *,
+        limit: int = 50,
+        channel: str = "",
+        reason: str = "",
+        session_id: str = "",
+        reasons: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "running": True,
+            "last_at": datetime.now(timezone.utc).isoformat(),
+            "last_error": "",
+            "restored": 0,
+            "restored_idempotency_keys": 0,
+            "scanned": 0,
+            "matched": 0,
+            "replayed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "suppressed": 0,
+            "remaining": int(self.bus.stats().get("dead_letter_size", 0) or 0),
+            "replayed_by_channel": {},
+            "failed_by_channel": {},
+            "skipped_by_channel": {},
+            "suppressed_by_channel": {},
+        }
+        self._delivery_manual_replay = dict(summary)
+        try:
+            summary["restored_idempotency_keys"] = await self._restore_delivery_idempotency_persistence()
+            summary["restored"] = await self._restore_persisted_dead_letters()
+            replay = await self.replay_dead_letters(
+                limit=limit,
+                channel=channel,
+                reason=reason,
+                session_id=session_id,
+                reasons=reasons,
+                dry_run=False,
+            )
+            for key, value in replay.items():
+                summary[key] = value
+        except Exception as exc:
+            summary["last_error"] = str(exc)
+            bind_event("channel.delivery").warning("manual dead-letter replay failed error={}", exc)
+            raise
+        finally:
+            summary["running"] = False
+            self._delivery_manual_replay = dict(summary)
+        return dict(summary)
 
     def _load_inbound_persistence_locked(self) -> list[InboundEvent]:
         path = self._inbound_persistence_path
@@ -1363,6 +1431,7 @@ class ChannelManager:
                     "active": int(self._delivery_idempotency_persistence_pending),
                 },
                 "startup_replay": dict(self._delivery_startup_replay),
+                "manual_replay": dict(self._delivery_manual_replay),
             },
         }
 

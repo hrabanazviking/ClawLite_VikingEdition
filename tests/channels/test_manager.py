@@ -976,6 +976,39 @@ def test_channel_manager_replay_dead_letters_updates_replay_counters() -> None:
     asyncio.run(_scenario())
 
 
+def test_channel_manager_operator_replay_tracks_manual_replay_status() -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start({"state_path": "/tmp", "channels": {"fake": {"enabled": True}}})
+
+        await bus.publish_dead_letter(
+            OutboundEvent(
+                channel="fake",
+                session_id="s1",
+                target="u1",
+                text="dead",
+                dead_lettered=True,
+                dead_letter_reason="send_failed",
+            )
+        )
+
+        summary = await mgr.operator_replay_dead_letters(limit=5, channel="fake", reason="send_failed")
+
+        assert summary["replayed"] == 1
+        assert summary["restored"] == 0
+        diagnostics = mgr.delivery_diagnostics()
+        manual = diagnostics["persistence"]["manual_replay"]
+        assert manual["replayed"] == 1
+        assert manual["last_at"]
+        assert manual["running"] is False
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_channel_manager_startup_replays_persisted_dead_letters_after_restart(tmp_path: Path) -> None:
     async def _scenario() -> None:
         state_path = tmp_path / "state"

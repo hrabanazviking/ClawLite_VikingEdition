@@ -69,6 +69,7 @@ Recent progress:
 - provider failover now keeps stronger auth/quota suppression windows and exposes those reasons in diagnostics so autonomy can back off more intelligently
 - the dashboard automation view now turns provider suppression/cooldown telemetry into operator-friendly recovery cards
 - the dashboard automation view now also surfaces delivery queues, dead-letter pressure, channel recovery, and supervisor recovery budgets as operator cards
+- operators can now trigger live dead-letter replay from the dashboard using the existing channel manager instead of relying only on startup replay
 
 Exit criteria:
 

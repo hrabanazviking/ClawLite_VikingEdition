@@ -19,7 +19,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from clawlite.bus.queue import MessageQueue
 from clawlite.channels.manager import ChannelManager
@@ -299,6 +299,14 @@ class CronAddRequest(BaseModel):
     name: str = ""
 
 
+class ChannelReplayRequest(BaseModel):
+    limit: int = 25
+    channel: str = ""
+    reason: str = ""
+    session_id: str = ""
+    reasons: list[str] = Field(default_factory=list)
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -519,6 +527,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "message": "/api/message",
             "token": "/api/token",
             "tools": "/api/tools/catalog",
+            "channels_replay": "/v1/control/channels/replay",
             "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
         },
@@ -4662,6 +4671,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/api/diagnostics", response_model=DiagnosticsResponse)
     async def api_diagnostics(request: Request) -> DiagnosticsResponse:
         return await _diagnostics_handler(request)
+
+    async def _channels_replay_handler(request: Request, payload: ChannelReplayRequest) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        summary = await runtime.channels.operator_replay_dead_letters(
+            limit=max(1, min(int(payload.limit or 25), 200)),
+            channel=str(payload.channel or "").strip(),
+            reason=str(payload.reason or "").strip(),
+            session_id=str(payload.session_id or "").strip(),
+            reasons=[str(item or "").strip() for item in list(payload.reasons or []) if str(item or "").strip()],
+        )
+        return {"ok": True, "summary": summary}
+
+    @app.post("/v1/control/channels/replay")
+    async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
+        return await _channels_replay_handler(request, payload or ChannelReplayRequest())
+
+    @app.post("/api/channels/replay")
+    async def api_channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
+        return await _channels_replay_handler(request, payload or ChannelReplayRequest())
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:

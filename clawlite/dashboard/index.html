@@ -257,7 +257,10 @@
               <article class="panel-card">
                 <div class="panel-card__header">
                   <h2>Delivery Queue</h2>
-                  <span class="badge" id="delivery-status">pending</span>
+                  <div class="button-row">
+                    <button class="ghost-button" id="replay-dead-letters" type="button">Replay dead letters</button>
+                    <span class="badge" id="delivery-status">pending</span>
+                  </div>
                 </div>
                 <div class="summary-grid summary-grid--wide" id="delivery-grid"></div>
               </article>
