@@ -68,6 +68,7 @@ Recent progress:
 - bootstrap completion is now intentionally tied to the dedicated hatch session instead of any arbitrary first user chat turn
 - provider failover now keeps stronger auth/quota suppression windows and exposes those reasons in diagnostics so autonomy can back off more intelligently
 - the dashboard automation view now turns provider suppression/cooldown telemetry into operator-friendly recovery cards
+- the dashboard automation view now also surfaces delivery queues, dead-letter pressure, channel recovery, and supervisor recovery budgets as operator cards
 
 Exit criteria:
 

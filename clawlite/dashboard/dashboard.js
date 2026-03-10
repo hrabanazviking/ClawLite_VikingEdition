@@ -365,6 +365,131 @@ function renderToolsSummary() {
     });
 }
 
+function appendSummaryCard(container, item) {
+  const card = document.createElement("article");
+  card.className = "summary-card";
+
+  const title = document.createElement("span");
+  title.className = "summary-card__title";
+  title.textContent = String(item.title || "item");
+
+  const body = document.createElement("div");
+  body.className = "summary-card__meta";
+  body.textContent = String(item.body || "");
+
+  const detail = document.createElement("div");
+  detail.className = "summary-card__meta";
+  detail.textContent = String(item.detail || "");
+
+  card.append(title, body, detail);
+  container.appendChild(card);
+}
+
+function renderDeliveryBoard() {
+  const grid = byId("delivery-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+
+  const payload = state.dashboardState || {};
+  const queue = payload.queue || {};
+  const delivery = payload.channels_delivery || {};
+  const dispatcher = payload.channels_dispatcher || {};
+  const recovery = payload.channels_recovery || {};
+  const inbound = payload.channels_inbound || {};
+  const total = delivery.total || {};
+  const persistence = delivery.persistence || {};
+  const startupReplay = persistence.startup_replay || {};
+  const recentDeadLetters = Array.isArray(queue.dead_letter_recent) ? queue.dead_letter_recent : [];
+  const latestDeadLetter = recentDeadLetters[0] || {};
+
+  const cards = [
+    {
+      title: "Outbound queue",
+      body: `${numeric(queue.outbound_size, 0)} queued`,
+      detail: `oldest ${formatDuration(queue.outbound_oldest_age_s || 0)}`,
+    },
+    {
+      title: "Dead letters",
+      body: `${numeric(queue.dead_letter_size, 0)} retained`,
+      detail: latestDeadLetter.dead_letter_reason
+        ? `${latestDeadLetter.dead_letter_reason} | oldest ${formatDuration(queue.dead_letter_oldest_age_s || 0)}`
+        : `oldest ${formatDuration(queue.dead_letter_oldest_age_s || 0)}`,
+    },
+    {
+      title: "Delivery totals",
+      body: `${numeric(total.success, 0)} success / ${numeric(total.failures, 0)} failed`,
+      detail: `${numeric(total.dead_lettered, 0)} dead-lettered | ${numeric(total.replayed, 0)} replayed`,
+    },
+    {
+      title: "Startup replay",
+      body: `${numeric(startupReplay.replayed, 0)} replayed`,
+      detail: `${numeric(startupReplay.failed, 0)} failed | ${numeric(startupReplay.skipped, 0)} skipped`,
+    },
+    {
+      title: "Dispatcher",
+      body: `${String(dispatcher.task_state || "unknown")} | ${numeric(dispatcher.active_tasks, 0)} active tasks`,
+      detail: `${numeric(dispatcher.active_sessions, 0)} active sessions | max ${numeric(dispatcher.max_concurrency, 0)} concurrency`,
+    },
+    {
+      title: "Recovery loop",
+      body: `${String(recovery.task_state || "unknown")} | ${numeric((recovery.total || {}).success, 0)} recovered`,
+      detail: `${numeric((recovery.total || {}).failures, 0)} failed | ${numeric((recovery.total || {}).skipped_cooldown, 0)} cooldown skips`,
+    },
+  ];
+
+  cards.forEach((item) => appendSummaryCard(grid, item));
+
+  const deliveryHealthy = numeric(queue.dead_letter_size, 0) === 0 && String(dispatcher.task_state || "") === "running";
+  setBadge("delivery-status", deliveryHealthy ? "healthy" : "attention", deliveryHealthy ? "ok" : "warn");
+}
+
+function renderSupervisorBoard() {
+  const grid = byId("supervisor-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+
+  const supervisor = ((state.dashboardState || {}).supervisor) || {};
+  const componentRecovery = supervisor.component_recovery || {};
+  const lastIncident = supervisor.last_incident || {};
+  const cards = [
+    {
+      title: "Supervisor state",
+      body: `${String(supervisor.worker_state || "unknown")} | ${numeric(supervisor.incident_count, 0)} incidents`,
+      detail: `${numeric(supervisor.recovery_attempts, 0)} attempts | ${numeric(supervisor.recovery_success, 0)} recovered`,
+    },
+    {
+      title: "Recovery skips",
+      body: `${numeric(supervisor.recovery_skipped_cooldown, 0)} cooldown`,
+      detail: `${numeric(supervisor.recovery_skipped_budget, 0)} budget | ${numeric(supervisor.recovery_failures, 0)} failures`,
+    },
+    {
+      title: "Last incident",
+      body: String(lastIncident.component || "none"),
+      detail: lastIncident.reason ? `${lastIncident.reason} | ${formatClock(lastIncident.at)}` : "No incidents recorded.",
+    },
+  ];
+
+  Object.entries(componentRecovery)
+    .sort((a, b) => numeric(b[1]?.incidents, 0) - numeric(a[1]?.incidents, 0))
+    .slice(0, 3)
+    .forEach(([name, row]) => {
+      cards.push({
+        title: `Budget: ${name}`,
+        body: `${numeric(row.incidents, 0)} incidents | ${numeric(row.recovery_success, 0)} recovered`,
+        detail: `remaining ${row.budget_remaining === null ? "unbounded" : numeric(row.budget_remaining, 0)} | cooldown ${formatDuration(row.cooldown_remaining_s || 0)}`,
+      });
+    });
+
+  cards.forEach((item) => appendSummaryCard(grid, item));
+
+  const healthy = String(supervisor.worker_state || "") === "running" && numeric(supervisor.recovery_failures, 0) === 0;
+  setBadge("supervisor-status", healthy ? "steady" : "active", healthy ? "ok" : "warn");
+}
+
 function renderProviderRecoveryBoard() {
   const grid = byId("provider-grid");
   if (!grid) {
@@ -428,25 +553,7 @@ function renderProviderRecoveryBoard() {
     });
   }
 
-  candidates.slice(0, 6).forEach((item) => {
-    const card = document.createElement("article");
-    card.className = "summary-card";
-
-    const title = document.createElement("span");
-    title.className = "summary-card__title";
-    title.textContent = item.title;
-
-    const body = document.createElement("div");
-    body.className = "summary-card__meta";
-    body.textContent = item.body;
-
-    const detail = document.createElement("div");
-    detail.className = "summary-card__meta";
-    detail.textContent = item.detail;
-
-    card.append(title, body, detail);
-    grid.appendChild(card);
-  });
+  candidates.slice(0, 6).forEach((item) => appendSummaryCard(grid, item));
 }
 
 function handoffPayload() {
@@ -624,6 +731,8 @@ function renderAutomation() {
     counters: providerTelemetry.counters || {},
   });
   setBadge("provider-status", String(providerAutonomy.state || "unknown"), toneForState(providerAutonomy.state));
+  renderDeliveryBoard();
+  renderSupervisorBoard();
   renderProviderRecoveryBoard();
 
   const selfEvolution = payload.self_evolution || {};

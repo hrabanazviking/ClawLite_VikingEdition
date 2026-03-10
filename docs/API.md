@@ -105,6 +105,8 @@ Example response:
 
 Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política de autenticação).
 
+This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload.
+
 ## `GET /health`
 
 Example response:

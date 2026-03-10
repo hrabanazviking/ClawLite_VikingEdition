@@ -2316,6 +2316,8 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert "Hatch agent" in body
         assert "Next Steps" in body
         assert 'id="provider-grid"' in body
+        assert 'id="delivery-grid"' in body
+        assert 'id="supervisor-grid"' in body
         assert "Signal Feed" in body
         assert "Workspace Runtime Files" in body
         assert "Recent Sessions" in body
@@ -2355,6 +2357,8 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerHatch" in js.text
     assert "Wake up, my friend!" in js.text
     assert "handoff-grid" in js.text
+    assert "renderDeliveryBoard" in js.text
+    assert "renderSupervisorBoard" in js.text
     assert "renderProviderRecoveryBoard" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
@@ -2384,6 +2388,10 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert any(item["session_id"] == "dashboard:test" for item in payload["sessions"]["items"])
     assert payload["handoff"]["hatch_session_id"] == "hatch:operator"
     assert any(item["id"] == "dashboard" for item in payload["handoff"]["guidance"])
+    assert "queue" in payload
+    assert "channels_delivery" in payload
+    assert "channels_recovery" in payload
+    assert "supervisor" in payload
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
     assert "workspace" in payload
