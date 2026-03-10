@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from clawlite.bus.events import OutboundEvent
+from clawlite.bus.events import InboundEvent, OutboundEvent
 from clawlite.bus.queue import MessageQueue
 from clawlite.channels.base import BaseChannel, ChannelCapabilities
 from clawlite.channels.manager import ChannelManager
@@ -999,6 +999,47 @@ def test_channel_manager_operator_replay_tracks_manual_replay_status() -> None:
         assert summary["replayed"] == 1
         assert summary["restored"] == 0
         diagnostics = mgr.delivery_diagnostics()
+        manual = diagnostics["persistence"]["manual_replay"]
+        assert manual["replayed"] == 1
+        assert manual["last_at"]
+        assert manual["running"] is False
+
+        await mgr.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_channel_manager_operator_replay_inbound_tracks_manual_status(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        bus = MessageQueue()
+        mgr = ChannelManager(bus=bus, engine=FakeEngine())
+        mgr.register("fake", FakeChannel)
+        await mgr.start({"state_path": str(tmp_path), "channels": {"fake": {"enabled": True}}})
+
+        dispatch_task = mgr._dispatcher_task
+        assert dispatch_task is not None
+        dispatch_task.cancel()
+        try:
+            await dispatch_task
+        except asyncio.CancelledError:
+            pass
+
+        await mgr._persist_pending_inbound(
+            InboundEvent(
+                channel="fake",
+                session_id="s1",
+                user_id="u1",
+                text="hello",
+                metadata={"chat_id": "u1"},
+            )
+        )
+
+        summary = await mgr.operator_replay_inbound(limit=5, channel="fake", force=False)
+
+        assert summary["replayed"] == 1
+        assert summary["skipped_busy"] == 0
+        assert bus.stats()["inbound_size"] == 1
+        diagnostics = mgr.inbound_diagnostics()
         manual = diagnostics["persistence"]["manual_replay"]
         assert manual["replayed"] == 1
         assert manual["last_at"]

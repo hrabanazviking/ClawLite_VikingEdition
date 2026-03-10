@@ -402,6 +402,9 @@ function renderDeliveryBoard() {
   const persistence = delivery.persistence || {};
   const startupReplay = persistence.startup_replay || {};
   const manualReplay = persistence.manual_replay || {};
+  const inboundPersistence = inbound.persistence || {};
+  const inboundStartupReplay = inboundPersistence.startup_replay || {};
+  const inboundManualReplay = inboundPersistence.manual_replay || {};
   const recentDeadLetters = Array.isArray(queue.dead_letter_recent) ? queue.dead_letter_recent : [];
   const latestDeadLetter = recentDeadLetters[0] || {};
 
@@ -436,6 +439,13 @@ function renderDeliveryBoard() {
         : "No manual replay has been triggered yet.",
     },
     {
+      title: "Inbound journal",
+      body: `${numeric(inboundPersistence.pending, 0)} pending | ${numeric(inboundStartupReplay.replayed, 0)} startup replayed`,
+      detail: inboundManualReplay.last_at
+        ? `${formatClock(inboundManualReplay.last_at)} | ${numeric(inboundManualReplay.replayed, 0)} manual replayed | ${numeric(inboundManualReplay.skipped_busy, 0)} busy skips`
+        : "No manual inbound replay has been triggered yet.",
+    },
+    {
       title: "Dispatcher",
       body: `${String(dispatcher.task_state || "unknown")} | ${numeric(dispatcher.active_tasks, 0)} active tasks`,
       detail: `${numeric(dispatcher.active_sessions, 0)} active sessions | max ${numeric(dispatcher.max_concurrency, 0)} concurrency`,
@@ -456,6 +466,12 @@ function renderDeliveryBoard() {
     const deadLetterCount = numeric(queue.dead_letter_size, 0);
     replayButton.disabled = deadLetterCount <= 0;
     replayButton.textContent = deadLetterCount > 0 ? `Replay dead letters (${deadLetterCount})` : "Replay dead letters";
+  }
+  const inboundReplayButton = byId("replay-inbound-journal");
+  if (inboundReplayButton) {
+    const inboundPending = numeric(inboundPersistence.pending, 0);
+    inboundReplayButton.disabled = inboundPending <= 0;
+    inboundReplayButton.textContent = inboundPending > 0 ? `Replay inbound journal (${inboundPending})` : "Replay inbound journal";
   }
 }
 
@@ -1224,6 +1240,38 @@ async function triggerDeadLetterReplay() {
   }
 }
 
+async function triggerInboundReplay() {
+  const inbound = (((state.dashboardState || {}).channels_inbound) || {}).persistence || {};
+  const limit = Math.min(50, Math.max(1, numeric(inbound.pending, 0) || 1));
+  const button = byId("replay-inbound-journal");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.channels_inbound_replay || "/v1/control/channels/inbound-replay", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ limit, force: false }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      numeric(summary.replayed, 0) > 0 ? "ok" : "warn",
+      "Inbound replay finished",
+      `${numeric(summary.replayed, 0)} replayed | ${numeric(summary.remaining, 0)} remaining | ${numeric(summary.skipped_busy, 0)} busy skips`,
+      "channels",
+    );
+    await refreshAll("inbound-replay");
+  } catch (error) {
+    recordEvent("danger", "Inbound replay failed", error.message, "channels");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerChannelRecovery() {
   const button = byId("recover-channels");
   if (button) {
@@ -1307,6 +1355,9 @@ function bindEvents() {
   });
   byId("recover-channels").addEventListener("click", () => {
     void triggerChannelRecovery();
+  });
+  byId("replay-inbound-journal").addEventListener("click", () => {
+    void triggerInboundReplay();
   });
   byId("replay-dead-letters").addEventListener("click", () => {
     void triggerDeadLetterReplay();

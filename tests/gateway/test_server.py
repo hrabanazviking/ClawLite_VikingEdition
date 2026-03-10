@@ -2332,6 +2332,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"message": "/api/message"' in body
         assert '"channels_replay": "/v1/control/channels/replay"' in body
         assert '"channels_recover": "/v1/control/channels/recover"' in body
+        assert '"channels_inbound_replay": "/v1/control/channels/inbound-replay"' in body
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
@@ -2366,6 +2367,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "renderProviderRecoveryBoard" in js.text
     assert "triggerDeadLetterReplay" in js.text
     assert "triggerChannelRecovery" in js.text
+    assert "triggerInboundReplay" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
@@ -2400,6 +2402,7 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "supervisor" in payload
     assert "manual_replay" in payload["channels_delivery"]["persistence"]
     assert "operator" in payload["channels_recovery"]
+    assert "manual_replay" in payload["channels_inbound"]["persistence"]
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
     assert "workspace" in payload
@@ -2528,6 +2531,36 @@ def test_gateway_channels_recover_endpoint_recovers_failed_worker(tmp_path: Path
     assert payload["summary"]["recovered"] >= 1
     diagnostics = app.state.runtime.channels.recovery_diagnostics()
     assert diagnostics["operator"]["recovered"] >= 1
+
+
+def test_gateway_channels_inbound_replay_endpoint_calls_manager(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.channels.operator_replay_inbound = AsyncMock(
+        return_value={"replayed": 2, "remaining": 1, "skipped_busy": 0}
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/control/channels/inbound-replay",
+            json={"limit": 7, "channel": "telegram", "session_id": "tg:1", "force": True},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["replayed"] == 2
+    app.state.runtime.channels.operator_replay_inbound.assert_awaited_once_with(
+        limit=7,
+        channel="telegram",
+        session_id="tg:1",
+        force=True,
+    )
 
 
 def test_gateway_tools_catalog_http_endpoints_return_expected_shape(tmp_path: Path) -> None:

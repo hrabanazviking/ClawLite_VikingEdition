@@ -184,6 +184,16 @@ class ChannelManager:
             "last_error": "",
             "replayed_by_channel": {},
         }
+        self._inbound_manual_replay: dict[str, Any] = {
+            "running": False,
+            "last_at": "",
+            "last_error": "",
+            "restored": 0,
+            "replayed": 0,
+            "remaining": 0,
+            "skipped_busy": 0,
+            "replayed_by_channel": {},
+        }
         self._recovery_enabled = True
         self._recovery_interval_s = 15.0
         self._recovery_cooldown_s = 30.0
@@ -841,6 +851,88 @@ class ChannelManager:
 
     def startup_inbound_replay_status(self) -> dict[str, Any]:
         return dict(self._inbound_startup_replay)
+
+    async def operator_replay_inbound(
+        self,
+        *,
+        limit: int = 100,
+        channel: str = "",
+        session_id: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "running": True,
+            "last_at": datetime.now(timezone.utc).isoformat(),
+            "last_error": "",
+            "restored": 0,
+            "replayed": 0,
+            "remaining": int(self._inbound_persistence_pending),
+            "skipped_busy": 0,
+            "replayed_by_channel": {},
+        }
+        self._inbound_manual_replay = dict(summary)
+
+        try:
+            channel_filter = str(channel or "").strip()
+            session_filter = str(session_id or "").strip()
+            async with self._inbound_persistence_lock:
+                events = self._load_inbound_persistence_locked()
+
+            if not events:
+                summary["running"] = False
+                self._inbound_manual_replay = dict(summary)
+                return dict(summary)
+
+            inbound_size = int(self.bus.stats().get("inbound_size", 0) or 0)
+            if inbound_size > 0 and not force:
+                summary["skipped_busy"] = inbound_size
+                summary["remaining"] = int(self._inbound_persistence_pending)
+                summary["running"] = False
+                self._inbound_manual_replay = dict(summary)
+                return dict(summary)
+
+            bounded_limit = max(1, int(limit or 1))
+            replay_budget = min(bounded_limit, max(0, int(self._inbound_replay_limit or 0) or bounded_limit))
+            if replay_budget <= 0:
+                summary["running"] = False
+                self._inbound_manual_replay = dict(summary)
+                return dict(summary)
+
+            replayed_by_channel: dict[str, int] = {}
+            restored = 0
+            for event in events:
+                if channel_filter and event.channel != channel_filter:
+                    continue
+                if session_filter and event.session_id != session_filter:
+                    continue
+                if restored >= replay_budget:
+                    break
+                await self.bus.publish_inbound(event)
+                restored += 1
+                replayed_by_channel[event.channel] = replayed_by_channel.get(event.channel, 0) + 1
+
+            summary["restored"] = restored
+            summary["replayed"] = restored
+            summary["replayed_by_channel"] = dict(sorted(replayed_by_channel.items()))
+            async with self._inbound_persistence_lock:
+                self._load_inbound_persistence_locked()
+            summary["remaining"] = int(self._inbound_persistence_pending)
+            bind_event("channel.inbound").info(
+                "manual inbound replay restored={} channel={} session_id={} force={}",
+                restored,
+                channel_filter,
+                session_filter,
+                force,
+            )
+        except Exception as exc:
+            summary["last_error"] = str(exc)
+            self._inbound_manual_replay = dict(summary)
+            bind_event("channel.inbound").warning("manual inbound replay failed error={}", exc)
+            raise
+
+        summary["running"] = False
+        self._inbound_manual_replay = dict(summary)
+        return dict(summary)
 
     def set_recovery_notifier(self, notifier: Callable[[dict[str, Any]], Awaitable[Any]] | None) -> None:
         self._recovery_notifier = notifier
@@ -1557,6 +1649,7 @@ class ChannelManager:
                 "path": str(self._inbound_persistence_path) if self._inbound_persistence_path is not None else "",
                 "pending": int(self._inbound_persistence_pending),
                 "startup_replay": dict(self._inbound_startup_replay),
+                "manual_replay": dict(self._inbound_manual_replay),
             }
         }
 

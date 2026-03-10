@@ -174,6 +174,36 @@ Example response:
 
 Alias compatível: `POST /api/channels/recover`.
 
+## `POST /v1/control/channels/inbound-replay`
+
+Requeues persisted inbound events through the live channel manager.
+
+Example request:
+
+```json
+{
+  "limit": 100,
+  "channel": "",
+  "session_id": "",
+  "force": false
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "replayed": 3,
+    "remaining": 5,
+    "skipped_busy": 0
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/inbound-replay`.
+
 ## `GET /health`
 
 Example response:

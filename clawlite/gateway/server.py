@@ -312,6 +312,13 @@ class ChannelRecoverRequest(BaseModel):
     force: bool = True
 
 
+class ChannelInboundReplayRequest(BaseModel):
+    limit: int = 100
+    channel: str = ""
+    session_id: str = ""
+    force: bool = False
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -534,6 +541,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "tools": "/api/tools/catalog",
             "channels_replay": "/v1/control/channels/replay",
             "channels_recover": "/v1/control/channels/recover",
+            "channels_inbound_replay": "/v1/control/channels/inbound-replay",
             "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
         },
@@ -4697,6 +4705,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         return {"ok": True, "summary": summary}
 
+    async def _channels_inbound_replay_handler(request: Request, payload: ChannelInboundReplayRequest) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        summary = await runtime.channels.operator_replay_inbound(
+            limit=max(1, min(int(payload.limit or 100), 500)),
+            channel=str(payload.channel or "").strip(),
+            session_id=str(payload.session_id or "").strip(),
+            force=bool(payload.force),
+        )
+        return {"ok": True, "summary": summary}
+
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
@@ -4712,6 +4730,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/channels/recover")
     async def api_channels_recover(request: Request, payload: ChannelRecoverRequest | None = None) -> dict[str, Any]:
         return await _channels_recover_handler(request, payload or ChannelRecoverRequest())
+
+    @app.post("/v1/control/channels/inbound-replay")
+    async def channels_inbound_replay(
+        request: Request, payload: ChannelInboundReplayRequest | None = None
+    ) -> dict[str, Any]:
+        return await _channels_inbound_replay_handler(request, payload or ChannelInboundReplayRequest())
+
+    @app.post("/api/channels/inbound-replay")
+    async def api_channels_inbound_replay(
+        request: Request, payload: ChannelInboundReplayRequest | None = None
+    ) -> dict[str, Any]:
+        return await _channels_inbound_replay_handler(request, payload or ChannelInboundReplayRequest())
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:
