@@ -827,6 +827,7 @@ function renderTelegramBoard() {
   const rejectButton = byId("reject-telegram-pairing");
   const revokeButton = byId("revoke-telegram-pairing");
   const offsetButton = byId("commit-telegram-offset");
+  const offsetSyncButton = byId("sync-telegram-offset");
 
   if (!available) {
     appendSummaryCard(grid, {
@@ -849,6 +850,9 @@ function renderTelegramBoard() {
     }
     if (offsetButton) {
       offsetButton.disabled = true;
+    }
+    if (offsetSyncButton) {
+      offsetSyncButton.disabled = true;
     }
     return;
   }
@@ -922,6 +926,9 @@ function renderTelegramBoard() {
   }
   if (offsetButton) {
     offsetButton.disabled = false;
+  }
+  if (offsetSyncButton) {
+    offsetSyncButton.disabled = false;
   }
 }
 
@@ -1658,6 +1665,50 @@ async function triggerTelegramOffsetCommit() {
   }
 }
 
+async function triggerTelegramOffsetSync() {
+  const input = byId("telegram-next-offset");
+  const button = byId("sync-telegram-offset");
+  const raw = String(input?.value || "").trim();
+  if (!raw) {
+    recordEvent("warn", "Telegram next offset sync skipped", "Enter a Telegram next_offset first.", "telegram");
+    return;
+  }
+  const nextOffset = Number(raw);
+  if (!Number.isInteger(nextOffset) || nextOffset < 0) {
+    recordEvent("warn", "Telegram next offset sync skipped", "Telegram next_offset must be a non-negative integer.", "telegram");
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.telegram_offset_sync || "/v1/control/channels/telegram/offset/sync", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ next_offset: nextOffset, allow_reset: false }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Telegram next offset sync finished",
+      summary.ok === false ? String(summary.error || "unknown_error") : `next offset synced to ${nextOffset}`,
+      "telegram",
+    );
+    if (input) {
+      input.value = "";
+    }
+    await refreshAll("telegram-offset-sync");
+  } catch (error) {
+    recordEvent("danger", "Telegram next offset sync failed", error.message, "telegram");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerHatch() {
   if (!hatchPending()) {
     recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
@@ -1729,6 +1780,9 @@ function bindEvents() {
   });
   byId("commit-telegram-offset").addEventListener("click", () => {
     void triggerTelegramOffsetCommit();
+  });
+  byId("sync-telegram-offset").addEventListener("click", () => {
+    void triggerTelegramOffsetSync();
   });
   byId("replay-inbound-journal").addEventListener("click", () => {
     void triggerInboundReplay();

@@ -4647,6 +4647,42 @@ def test_telegram_operator_force_commit_offset_returns_status(tmp_path: Path) ->
     asyncio.run(_scenario())
 
 
+def test_telegram_operator_sync_next_offset_returns_status(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "12345:token",
+                "offset_state_path": str(tmp_path / "offset.json"),
+            }
+        )
+
+        payload = await channel.operator_sync_next_offset(145)
+
+        assert payload["ok"] is True
+        assert payload["next_offset"] == 145
+        assert payload["status"]["offset_watermark_update_id"] == 144
+        assert payload["status"]["offset_next"] == 145
+
+    asyncio.run(_scenario())
+
+
+def test_telegram_operator_sync_next_offset_requires_allow_reset_for_zero(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "12345:token",
+                "offset_state_path": str(tmp_path / "offset.json"),
+            }
+        )
+
+        payload = await channel.operator_sync_next_offset(0, allow_reset=False)
+
+        assert payload["ok"] is False
+        assert payload["error"] == "allow_reset_required"
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_operator_reject_pairing_returns_status(tmp_path: Path) -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(

@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Operators can now inspect Telegram offset/pairing/webhook state in the dashboard and trigger a live Telegram transport refresh via `POST /v1/control/channels/telegram/refresh`.
 - Operators can now approve pending Telegram pairing codes from the control plane via `POST /v1/control/channels/telegram/pairing/approve` and the dashboard.
 - Operators can now deliberately advance the Telegram offset watermark from the control plane via `POST /v1/control/channels/telegram/offset/commit`.
+- Operators can now synchronize Telegram `next_offset` from the control plane via `POST /v1/control/channels/telegram/offset/sync` and the CLI.
 - Operators can now reject pending Telegram pairing codes from the control plane via `POST /v1/control/channels/telegram/pairing/reject` and the dashboard.
 - Operators can now revoke approved Telegram pairing entries from the control plane via `POST /v1/control/channels/telegram/pairing/revoke` and the dashboard.
 - Operators can now trigger runtime supervisor recovery directly from the control plane via `POST /v1/control/supervisor/recover` and the dashboard.

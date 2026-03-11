@@ -345,6 +345,37 @@ Example response:
 
 Alias compatível: `POST /api/channels/telegram/offset/commit`.
 
+## `POST /v1/control/channels/telegram/offset/sync`
+
+Synchronizes the Telegram `next_offset` directly, with optional reset support.
+
+Example request:
+
+```json
+{
+  "next_offset": 145,
+  "allow_reset": false
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "next_offset": 145,
+    "status": {
+      "offset_watermark_update_id": 144,
+      "offset_next": 145
+    }
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/telegram/offset/sync`.
+
 ## `POST /v1/control/supervisor/recover`
 
 Triggers operator-requested runtime supervisor recovery for one component or all tracked components.

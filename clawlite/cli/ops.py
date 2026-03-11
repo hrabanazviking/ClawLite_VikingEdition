@@ -362,6 +362,35 @@ def telegram_offset_commit(
     return payload
 
 
+def telegram_offset_sync(
+    config: AppConfig,
+    *,
+    next_offset: int,
+    allow_reset: bool = False,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/control/channels/telegram/offset/sync",
+        json_body={"next_offset": int(next_offset), "allow_reset": bool(allow_reset)},
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = body.get("summary", {})
+        return payload
+    detail = body.get("detail", body.get("error", "telegram_offset_sync_failed")) if isinstance(body, dict) else str(body or "telegram_offset_sync_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
 def _telegram_pairing_store(config: AppConfig) -> TelegramPairingStore | None:
     telegram = getattr(config.channels, "telegram", None)
     if telegram is None:

@@ -1117,6 +1117,19 @@ class TelegramChannel(BaseChannel):
             "status": self.operator_status(),
         }
 
+    async def operator_sync_next_offset(self, next_offset: int, *, allow_reset: bool = False) -> dict[str, Any]:
+        normalized = self._coerce_update_id(next_offset)
+        if normalized <= 0 and not allow_reset:
+            return {"ok": False, "error": "allow_reset_required"}
+        snapshot = self._offset_store.sync_next_offset(normalized)
+        self._offset = snapshot.next_offset
+        return {
+            "ok": True,
+            "next_offset": normalized,
+            "allow_reset": bool(allow_reset),
+            "status": self.operator_status(),
+        }
+
     async def operator_refresh_transport(self) -> dict[str, Any]:
         summary: dict[str, Any] = {
             "mode": self.mode,

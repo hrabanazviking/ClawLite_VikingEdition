@@ -152,6 +152,7 @@ Telegram operator controls are also available from the terminal:
 clawlite telegram status
 clawlite telegram refresh
 clawlite telegram offset-commit 144
+clawlite telegram offset-sync 145
 ```
 
 ### 4. Talk to the agent
