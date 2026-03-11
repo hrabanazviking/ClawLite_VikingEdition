@@ -798,14 +798,19 @@ function renderAutomation() {
 
 function renderTelegramBoard() {
   const grid = byId("telegram-grid");
+  const pairingGrid = byId("telegram-pairing-grid");
   if (!grid) {
     return;
   }
   grid.innerHTML = "";
+  if (pairingGrid) {
+    pairingGrid.innerHTML = "";
+  }
 
   const telegram = ((state.dashboardState || {}).telegram) || {};
   const available = Boolean(telegram.available);
   const refreshButton = byId("refresh-telegram-transport");
+  const approveButton = byId("approve-telegram-pairing");
 
   if (!available) {
     appendSummaryCard(grid, {
@@ -816,6 +821,9 @@ function renderTelegramBoard() {
     setBadge("telegram-status", "unavailable", "warn");
     if (refreshButton) {
       refreshButton.disabled = true;
+    }
+    if (approveButton) {
+      approveButton.disabled = true;
     }
     return;
   }
@@ -840,10 +848,31 @@ function renderTelegramBoard() {
     detail: telegram.last_error ? `last error ${telegram.last_error}` : "pairing store healthy",
   });
 
+  if (pairingGrid) {
+    const pending = Array.isArray(telegram.pairing_pending) ? telegram.pairing_pending : [];
+    if (!pending.length) {
+      appendSummaryCard(pairingGrid, {
+        title: "Pending requests",
+        body: "none",
+        detail: "No Telegram pairing requests are currently waiting for approval.",
+      });
+    }
+    pending.slice(0, 6).forEach((item) => {
+      appendSummaryCard(pairingGrid, {
+        title: item.code || "pairing",
+        body: `${item.username ? `@${String(item.username).replace(/^@/, "")}` : item.user_id || "unknown user"}`,
+        detail: `chat ${item.chat_id || "-"} | last seen ${formatClock(item.last_seen_at || item.created_at)}`,
+      });
+    });
+  }
+
   const healthy = numeric(telegram.offset_pending_count, 0) === 0 && !telegram.last_error;
   setBadge("telegram-status", healthy ? "healthy" : "attention", healthy ? "ok" : "warn");
   if (refreshButton) {
     refreshButton.disabled = false;
+  }
+  if (approveButton) {
+    approveButton.disabled = false;
   }
 }
 
@@ -1384,6 +1413,45 @@ async function triggerTelegramRefresh() {
   }
 }
 
+async function triggerTelegramPairingApprove() {
+  const input = byId("telegram-pairing-code");
+  const button = byId("approve-telegram-pairing");
+  const code = String(input?.value || "").trim().toUpperCase();
+  if (!code) {
+    recordEvent("warn", "Telegram pairing approval skipped", "Enter a pending pairing code first.", "telegram");
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.telegram_pairing_approve || "/v1/control/channels/telegram/pairing/approve", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ code }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Telegram pairing approval finished",
+      summary.ok === false ? String(summary.error || "unknown_error") : `${code} approved`,
+      "telegram",
+    );
+    if (input) {
+      input.value = "";
+    }
+    await refreshAll("telegram-pairing-approve");
+  } catch (error) {
+    recordEvent("danger", "Telegram pairing approval failed", error.message, "telegram");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerHatch() {
   if (!hatchPending()) {
     recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
@@ -1440,6 +1508,9 @@ function bindEvents() {
   });
   byId("refresh-telegram-transport").addEventListener("click", () => {
     void triggerTelegramRefresh();
+  });
+  byId("approve-telegram-pairing").addEventListener("click", () => {
+    void triggerTelegramPairingApprove();
   });
   byId("replay-inbound-journal").addEventListener("click", () => {
     void triggerInboundReplay();

@@ -229,6 +229,36 @@ Example response:
 
 Alias compatível: `POST /api/channels/telegram/refresh`.
 
+## `POST /v1/control/channels/telegram/pairing/approve`
+
+Approves a pending Telegram pairing request by code through the live Telegram channel.
+
+Example request:
+
+```json
+{
+  "code": "ABCD1234"
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "code": "ABCD1234",
+    "request": {
+      "chat_id": "1",
+      "user_id": "2"
+    }
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/telegram/pairing/approve`.
+
 ## `GET /health`
 
 Example response:

@@ -1030,9 +1030,11 @@ class TelegramChannel(BaseChannel):
     def operator_status(self) -> dict[str, Any]:
         offset_snapshot = self._offset_store.snapshot()
         try:
-            pairing_pending = len(self._pairing_store.list_pending())
+            pending_requests = list(self._pairing_store.list_pending())
+            pairing_pending = len(pending_requests)
         except Exception as exc:
             logger.warning("telegram pairing pending snapshot failed error={}", exc)
+            pending_requests = []
             pairing_pending = 0
         try:
             pairing_approved = len(self._pairing_store.approved_entries())
@@ -1054,9 +1056,25 @@ class TelegramChannel(BaseChannel):
             "offset_min_pending_update_id": offset_snapshot.min_pending_update_id,
             "pairing_pending_count": pairing_pending,
             "pairing_approved_count": pairing_approved,
+            "pairing_pending": pending_requests,
             "connected": bool(self._connected),
             "running": bool(self._running),
             "last_error": str(self._last_error or ""),
+        }
+
+    async def operator_approve_pairing(self, code: str) -> dict[str, Any]:
+        normalized_code = str(code or "").strip().upper()
+        if not normalized_code:
+            return {"ok": False, "error": "pairing_code_required"}
+        approved = self._pairing_store.approve(normalized_code)
+        if approved is None:
+            return {"ok": False, "code": normalized_code, "error": "pairing_code_not_found"}
+        return {
+            "ok": True,
+            "code": normalized_code,
+            "approved_entries": list(approved.get("approved_entries", [])),
+            "request": dict(approved.get("request", {})),
+            "status": self.operator_status(),
         }
 
     async def operator_refresh_transport(self) -> dict[str, Any]:

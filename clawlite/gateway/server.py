@@ -323,6 +323,10 @@ class TelegramRefreshRequest(BaseModel):
     noop: bool = False
 
 
+class TelegramPairingApproveRequest(BaseModel):
+    code: str = ""
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -547,6 +551,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "channels_recover": "/v1/control/channels/recover",
             "channels_inbound_replay": "/v1/control/channels/inbound-replay",
             "telegram_refresh": "/v1/control/channels/telegram/refresh",
+            "telegram_pairing_approve": "/v1/control/channels/telegram/pairing/approve",
             "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
         },
@@ -4375,7 +4380,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         channel = runtime.channels.get_channel("telegram")
         operator_status = getattr(channel, "operator_status", None)
         if channel is None or not callable(operator_status):
-            return {}
+            return {"available": False}
         try:
             payload = operator_status()
         except Exception as exc:
@@ -4746,6 +4751,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         summary = await operator_refresh()
         return {"ok": True, "summary": summary}
 
+    async def _telegram_pairing_approve_handler(
+        request: Request, payload: TelegramPairingApproveRequest
+    ) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        channel = runtime.channels.get_channel("telegram")
+        if channel is None:
+            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
+        operator_approve = getattr(channel, "operator_approve_pairing", None)
+        if not callable(operator_approve):
+            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
+        summary = await operator_approve(str(payload.code or ""))
+        return {"ok": bool(summary.get("ok", False)), "summary": summary}
+
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
@@ -4781,6 +4799,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/channels/telegram/refresh")
     async def api_telegram_refresh(request: Request, payload: TelegramRefreshRequest | None = None) -> dict[str, Any]:
         return await _telegram_refresh_handler(request, payload or TelegramRefreshRequest())
+
+    @app.post("/v1/control/channels/telegram/pairing/approve")
+    async def telegram_pairing_approve(
+        request: Request, payload: TelegramPairingApproveRequest | None = None
+    ) -> dict[str, Any]:
+        return await _telegram_pairing_approve_handler(request, payload or TelegramPairingApproveRequest())
+
+    @app.post("/api/channels/telegram/pairing/approve")
+    async def api_telegram_pairing_approve(
+        request: Request, payload: TelegramPairingApproveRequest | None = None
+    ) -> dict[str, Any]:
+        return await _telegram_pairing_approve_handler(request, payload or TelegramPairingApproveRequest())
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:
