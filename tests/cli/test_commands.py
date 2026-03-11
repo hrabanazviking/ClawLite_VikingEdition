@@ -469,6 +469,14 @@ def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     assert payload_reject["code"] == code2
     assert payload_reject["request"]["user_id"] == "654"
 
+    rc_revoke = main(["--config", str(config_path), "pairing", "revoke", "telegram", "@guest"])
+    assert rc_revoke == 0
+    payload_revoke = json.loads(capsys.readouterr().out)
+    assert payload_revoke["ok"] is True
+    assert payload_revoke["entry"] == "@guest"
+    assert payload_revoke["removed_entry"] == "@guest"
+    assert "@guest" not in payload_revoke["approved_entries"]
+
 
 def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.json"

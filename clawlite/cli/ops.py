@@ -305,6 +305,28 @@ def pairing_reject(config: AppConfig, *, channel: str, code: str) -> dict[str, A
     }
 
 
+def pairing_revoke(config: AppConfig, *, channel: str, entry: str) -> dict[str, Any]:
+    channel_name = str(channel or "").strip().lower()
+    normalized_entry = str(entry or "").strip()
+    if channel_name != "telegram":
+        return {"ok": False, "channel": channel_name, "error": f"unsupported_channel:{channel_name or channel}"}
+    if not normalized_entry:
+        return {"ok": False, "channel": channel_name, "error": "pairing_entry_required"}
+    store = _telegram_pairing_store(config)
+    if store is None:
+        return {"ok": False, "channel": channel_name, "error": "telegram_token_missing"}
+    revoked = store.revoke_approved(normalized_entry)
+    if revoked is None:
+        return {"ok": False, "channel": channel_name, "entry": normalized_entry, "error": "pairing_entry_not_found"}
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "entry": normalized_entry,
+        "approved_entries": list(revoked.get("approved_entries", [])),
+        "removed_entry": str(revoked.get("removed_entry", normalized_entry)),
+    }
+
+
 def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
     codex = config.auth.providers.openai_codex
     cfg_token = str(codex.access_token or "").strip()

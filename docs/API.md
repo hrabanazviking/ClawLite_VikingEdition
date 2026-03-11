@@ -289,6 +289,32 @@ Example response:
 
 Alias compatível: `POST /api/channels/telegram/pairing/reject`.
 
+## `POST /v1/control/channels/telegram/pairing/revoke`
+
+Revokes an already approved Telegram pairing entry.
+
+Example request:
+
+```json
+{
+  "entry": "@alice"
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "removed_entry": "@alice"
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/telegram/pairing/revoke`.
+
 ## `POST /v1/control/channels/telegram/offset/commit`
 
 Advances the Telegram safe watermark by force-committing a specific `update_id`.

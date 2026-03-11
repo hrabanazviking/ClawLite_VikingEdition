@@ -1057,6 +1057,7 @@ class TelegramChannel(BaseChannel):
             "pairing_pending_count": pairing_pending,
             "pairing_approved_count": pairing_approved,
             "pairing_pending": pending_requests,
+            "pairing_approved": list(self._pairing_store.approved_entries()),
             "connected": bool(self._connected),
             "running": bool(self._running),
             "last_error": str(self._last_error or ""),
@@ -1089,6 +1090,21 @@ class TelegramChannel(BaseChannel):
             "code": normalized_code,
             "approved_entries": list(rejected.get("approved_entries", [])),
             "request": dict(rejected.get("request", {})),
+            "status": self.operator_status(),
+        }
+
+    async def operator_revoke_pairing(self, entry: str) -> dict[str, Any]:
+        normalized_entry = str(entry or "").strip()
+        if not normalized_entry:
+            return {"ok": False, "error": "pairing_entry_required"}
+        revoked = self._pairing_store.revoke_approved(normalized_entry)
+        if revoked is None:
+            return {"ok": False, "entry": normalized_entry, "error": "pairing_entry_not_found"}
+        return {
+            "ok": True,
+            "entry": normalized_entry,
+            "removed_entry": str(revoked.get("removed_entry", normalized_entry)),
+            "approved_entries": list(revoked.get("approved_entries", [])),
             "status": self.operator_status(),
         }
 

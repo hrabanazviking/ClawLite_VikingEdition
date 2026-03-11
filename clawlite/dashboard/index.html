@@ -273,6 +273,13 @@
                 <button class="ghost-button" id="approve-telegram-pairing" type="button">Approve Telegram pairing</button>
                 <button class="ghost-button" id="reject-telegram-pairing" type="button">Reject Telegram pairing</button>
               </div>
+              <label class="field field--compact" for="telegram-approved-entry">
+                <span>Revoke approved entry</span>
+                <input id="telegram-approved-entry" type="text" autocomplete="off" placeholder="Enter approved Telegram user_id or username" />
+              </label>
+              <div class="button-row">
+                <button class="ghost-button" id="revoke-telegram-pairing" type="button">Revoke Telegram pairing entry</button>
+              </div>
               <label class="field field--compact" for="telegram-offset-update-id">
                 <span>Advance offset watermark</span>
                 <input id="telegram-offset-update-id" type="number" min="0" step="1" placeholder="Enter a Telegram update_id" />

@@ -4666,6 +4666,26 @@ def test_telegram_operator_reject_pairing_returns_status(tmp_path: Path) -> None
     asyncio.run(_scenario())
 
 
+def test_telegram_operator_revoke_pairing_returns_status(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "12345:token",
+                "pairing_state_path": str(tmp_path / "pairing.json"),
+            }
+        )
+        request, _created = channel._pairing_store.issue_request(chat_id="1", user_id="2", username="alice")
+        await channel.operator_approve_pairing(str(request["code"]))
+
+        payload = await channel.operator_revoke_pairing("@alice")
+
+        assert payload["ok"] is True
+        assert payload["removed_entry"] == "@alice"
+        assert "@alice" not in payload["approved_entries"]
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_webhook_missing_config_falls_back_to_polling() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(config={"token": "x:token", "mode": "webhook"})

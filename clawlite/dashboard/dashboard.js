@@ -812,6 +812,7 @@ function renderTelegramBoard() {
   const refreshButton = byId("refresh-telegram-transport");
   const approveButton = byId("approve-telegram-pairing");
   const rejectButton = byId("reject-telegram-pairing");
+  const revokeButton = byId("revoke-telegram-pairing");
   const offsetButton = byId("commit-telegram-offset");
 
   if (!available) {
@@ -829,6 +830,9 @@ function renderTelegramBoard() {
     }
     if (rejectButton) {
       rejectButton.disabled = true;
+    }
+    if (revokeButton) {
+      revokeButton.disabled = true;
     }
     if (offsetButton) {
       offsetButton.disabled = true;
@@ -858,6 +862,7 @@ function renderTelegramBoard() {
 
   if (pairingGrid) {
     const pending = Array.isArray(telegram.pairing_pending) ? telegram.pairing_pending : [];
+    const approved = Array.isArray(telegram.pairing_approved) ? telegram.pairing_approved : [];
     if (!pending.length) {
       appendSummaryCard(pairingGrid, {
         title: "Pending requests",
@@ -872,6 +877,20 @@ function renderTelegramBoard() {
         detail: `chat ${item.chat_id || "-"} | last seen ${formatClock(item.last_seen_at || item.created_at)}`,
       });
     });
+    if (!approved.length) {
+      appendSummaryCard(pairingGrid, {
+        title: "Approved entries",
+        body: "none",
+        detail: "No Telegram pairing approvals are currently stored.",
+      });
+    }
+    approved.slice(0, 6).forEach((item) => {
+      appendSummaryCard(pairingGrid, {
+        title: String(item),
+        body: "approved",
+        detail: "This entry is currently allowed through Telegram pairing policy.",
+      });
+    });
   }
 
   const healthy = numeric(telegram.offset_pending_count, 0) === 0 && !telegram.last_error;
@@ -884,6 +903,9 @@ function renderTelegramBoard() {
   }
   if (rejectButton) {
     rejectButton.disabled = false;
+  }
+  if (revokeButton) {
+    revokeButton.disabled = false;
   }
   if (offsetButton) {
     offsetButton.disabled = false;
@@ -1505,6 +1527,45 @@ async function triggerTelegramPairingReject() {
   }
 }
 
+async function triggerTelegramPairingRevoke() {
+  const input = byId("telegram-approved-entry");
+  const button = byId("revoke-telegram-pairing");
+  const entry = String(input?.value || "").trim();
+  if (!entry) {
+    recordEvent("warn", "Telegram pairing revoke skipped", "Enter an approved Telegram entry first.", "telegram");
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.telegram_pairing_revoke || "/v1/control/channels/telegram/pairing/revoke", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ entry }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Telegram pairing revoke finished",
+      summary.ok === false ? String(summary.error || "unknown_error") : `${entry} revoked`,
+      "telegram",
+    );
+    if (input) {
+      input.value = "";
+    }
+    await refreshAll("telegram-pairing-revoke");
+  } catch (error) {
+    recordEvent("danger", "Telegram pairing revoke failed", error.message, "telegram");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerTelegramOffsetCommit() {
   const input = byId("telegram-offset-update-id");
   const button = byId("commit-telegram-offset");
@@ -1611,6 +1672,9 @@ function bindEvents() {
   });
   byId("reject-telegram-pairing").addEventListener("click", () => {
     void triggerTelegramPairingReject();
+  });
+  byId("revoke-telegram-pairing").addEventListener("click", () => {
+    void triggerTelegramPairingRevoke();
   });
   byId("commit-telegram-offset").addEventListener("click", () => {
     void triggerTelegramOffsetCommit();

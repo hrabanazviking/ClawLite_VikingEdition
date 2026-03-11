@@ -76,6 +76,7 @@ Recent progress:
 - Telegram pairing approval can now be completed from the control plane/dashboard instead of only through the CLI
 - Telegram offset watermark can now be advanced deliberately from the control plane when a safe manual recovery step is needed
 - Pending Telegram pairing requests can now also be rejected directly from the control plane/dashboard
+- Approved Telegram pairing entries can now be revoked directly from the control plane/dashboard
 
 Exit criteria:
 

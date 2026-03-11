@@ -313,3 +313,19 @@ class TelegramPairingStore:
             "approved_entries": approved,
             "request": target.to_payload(),
         }
+
+    def revoke_approved(self, entry: str) -> dict[str, Any] | None:
+        normalized_entry = str(entry or "").strip()
+        if not normalized_entry:
+            return None
+        payload = self._read_store()
+        approved = self._normalize_approved(list(payload.get("approved", [])))
+        kept = [item for item in approved if item != normalized_entry]
+        if kept == approved:
+            return None
+        payload["approved"] = kept
+        self._write_store(payload)
+        return {
+            "removed_entry": normalized_entry,
+            "approved_entries": kept,
+        }
