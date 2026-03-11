@@ -30,6 +30,14 @@ If bootstrap is still pending and you want to hatch from the terminal instead of
 clawlite hatch
 ```
 
+Telegram operator helpers are also available from the terminal:
+
+```bash
+clawlite telegram status
+clawlite telegram refresh
+clawlite telegram offset-commit 144
+```
+
 ## Quick Health Checks
 
 ```bash

@@ -23,6 +23,7 @@ The module entry point is also available as `python -m clawlite.cli`.
 | `hatch` | Runs the dedicated first-run bootstrap hatch session | `clawlite hatch --message "Wake up, my friend!"` |
 | `status` | Prints a local config/runtime summary | `clawlite status` |
 | `dashboard` | Opens or prints the local dashboard handoff | `clawlite dashboard --no-open` |
+| `telegram` | Telegram operator control commands | `clawlite telegram status` |
 
 Notes:
 
@@ -30,6 +31,7 @@ Notes:
 - `hatch` does not require the gateway to be running; it uses the dedicated `hatch:operator` session and only completes bootstrap when a pending hatch exists.
 - `status` includes enabled channels, provider model, heartbeat interval, and bootstrap state.
 - `dashboard` prints the current dashboard URL, tokenized handoff URL, bootstrap state, post-onboarding guidance (including web-search hints), and can open the browser unless `--no-open` is passed.
+- `telegram status` reads Telegram runtime state from `/api/dashboard/state`; `telegram refresh` and `telegram offset-commit` call the live gateway control endpoints.
 
 ## Setup and Onboarding
 

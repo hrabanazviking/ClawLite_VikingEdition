@@ -146,6 +146,14 @@ If you prefer to hatch from the terminal, you can also run:
 clawlite hatch
 ```
 
+Telegram operator controls are also available from the terminal:
+
+```bash
+clawlite telegram status
+clawlite telegram refresh
+clawlite telegram offset-commit 144
+```
+
 ### 4. Talk to the agent
 
 ```bash

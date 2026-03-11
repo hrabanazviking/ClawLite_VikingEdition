@@ -33,6 +33,9 @@ from clawlite.cli.ops import pairing_approve
 from clawlite.cli.ops import pairing_list
 from clawlite.cli.ops import pairing_reject
 from clawlite.cli.ops import pairing_revoke
+from clawlite.cli.ops import telegram_offset_commit
+from clawlite.cli.ops import telegram_refresh
+from clawlite.cli.ops import telegram_status
 from clawlite.cli.ops import provider_clear_auth
 from clawlite.cli.ops import provider_live_probe
 from clawlite.cli.ops import provider_validation
@@ -491,6 +494,43 @@ def cmd_pairing_revoke(args: argparse.Namespace) -> int:
         cfg,
         channel=str(args.channel or ""),
         entry=str(args.entry or ""),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_telegram_status(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = telegram_status(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_telegram_refresh(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = telegram_refresh(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_telegram_offset_commit(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = telegram_offset_commit(
+        cfg,
+        update_id=int(args.update_id),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
     )
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
@@ -1187,6 +1227,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_pairing_revoke.add_argument("channel")
     p_pairing_revoke.add_argument("entry")
     p_pairing_revoke.set_defaults(handler=cmd_pairing_revoke)
+
+    p_telegram = sub.add_parser("telegram", help="Telegram operator control commands")
+    telegram_sub = p_telegram.add_subparsers(dest="telegram_command", required=True)
+
+    p_telegram_status = telegram_sub.add_parser("status", help="Fetch Telegram runtime status from the gateway")
+    p_telegram_status.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_telegram_status.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_telegram_status.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_telegram_status.set_defaults(handler=cmd_telegram_status)
+
+    p_telegram_refresh = telegram_sub.add_parser("refresh", help="Refresh Telegram transport state via the gateway")
+    p_telegram_refresh.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_telegram_refresh.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_telegram_refresh.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_telegram_refresh.set_defaults(handler=cmd_telegram_refresh)
+
+    p_telegram_offset_commit = telegram_sub.add_parser("offset-commit", help="Advance Telegram offset watermark via the gateway")
+    p_telegram_offset_commit.add_argument("update_id", type=int)
+    p_telegram_offset_commit.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_telegram_offset_commit.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_telegram_offset_commit.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_telegram_offset_commit.set_defaults(handler=cmd_telegram_offset_commit)
 
     p_diagnostics = sub.add_parser("diagnostics", help="Operator diagnostics snapshot (local + optional gateway checks)")
     p_diagnostics.add_argument("--gateway-url", default="", help="Gateway base URL to probe, e.g. http://127.0.0.1:8787")

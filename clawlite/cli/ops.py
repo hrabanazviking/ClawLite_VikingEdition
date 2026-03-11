@@ -232,6 +232,136 @@ def heartbeat_trigger(
     return payload
 
 
+def _gateway_control_request(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+    method: str,
+    endpoint: str,
+    json_body: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], httpx.Response | None, Any]:
+    base_url = str(gateway_url or "").strip().rstrip("/")
+    if not base_url:
+        base_url = f"http://{config.gateway.host}:{int(config.gateway.port)}"
+
+    resolved_token = str(token or "").strip() or str(config.gateway.auth.token or "").strip()
+    headers: dict[str, str] = {}
+    if resolved_token:
+        headers["Authorization"] = f"Bearer {resolved_token}"
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+
+    payload: dict[str, Any] = {
+        "ok": False,
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "token_configured": bool(resolved_token),
+    }
+
+    try:
+        with httpx.Client(timeout=max(0.1, float(timeout)), headers=headers) as client:
+            if method.upper() == "GET":
+                response = client.get(f"{base_url}{endpoint}")
+            else:
+                response = client.post(f"{base_url}{endpoint}", json=json_body)
+    except Exception as exc:
+        payload["error"] = str(exc)
+        payload["error_type"] = exc.__class__.__name__
+        return payload, None, None
+
+    try:
+        body: Any = response.json()
+    except Exception:
+        body = response.text
+
+    payload["status_code"] = int(response.status_code)
+    payload["response"] = body
+    return payload, response, body
+
+
+def telegram_status(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="GET",
+        endpoint="/api/dashboard/state",
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict):
+        payload["ok"] = True
+        payload["telegram"] = dict(body.get("telegram", {})) if isinstance(body.get("telegram"), dict) else {}
+        return payload
+    detail = body.get("detail", body.get("error", "telegram_status_failed")) if isinstance(body, dict) else str(body or "telegram_status_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def telegram_refresh(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/control/channels/telegram/refresh",
+        json_body={},
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = body.get("summary", {})
+        return payload
+    detail = body.get("detail", body.get("error", "telegram_refresh_failed")) if isinstance(body, dict) else str(body or "telegram_refresh_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def telegram_offset_commit(
+    config: AppConfig,
+    *,
+    update_id: int,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/control/channels/telegram/offset/commit",
+        json_body={"update_id": int(update_id)},
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = body.get("summary", {})
+        return payload
+    detail = body.get("detail", body.get("error", "telegram_offset_commit_failed")) if isinstance(body, dict) else str(body or "telegram_offset_commit_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
 def _telegram_pairing_store(config: AppConfig) -> TelegramPairingStore | None:
     telegram = getattr(config.channels, "telegram", None)
     if telegram is None:

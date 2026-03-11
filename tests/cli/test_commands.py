@@ -2965,6 +2965,115 @@ def test_cli_heartbeat_trigger_failure_returns_rc2(tmp_path: Path, capsys, monke
     assert payload["error"] == "heartbeat_disabled"
 
 
+def test_cli_telegram_status_uses_gateway_dashboard_state(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.9", "port": 8877, "auth": {"token": "gw-token-abc"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {"telegram": {"available": True, "offset_next": 42}}
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            captured["timeout"] = timeout
+            captured["headers"] = dict(headers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            captured["url"] = url
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "telegram", "status"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["telegram"]["offset_next"] == 42
+    assert captured["url"] == "http://127.0.0.9:8877/api/dashboard/state"
+    assert captured["headers"] == {"Authorization": "Bearer gw-token-abc"}
+
+
+def test_cli_telegram_refresh_and_offset_commit_use_gateway_controls(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "t-123"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, str, object]] = []
+
+    class _FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.status_code = 200
+            self.is_success = True
+            self._payload = payload
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            del timeout, headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None):
+            calls.append(("POST", url, json))
+            if url.endswith("/refresh"):
+                return _FakeResponse({"ok": True, "summary": {"connected": True}})
+            return _FakeResponse({"ok": True, "summary": {"update_id": 144}})
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc_refresh = main(["--config", str(config_path), "telegram", "refresh"])
+    assert rc_refresh == 0
+    refresh_payload = json.loads(capsys.readouterr().out)
+    assert refresh_payload["ok"] is True
+    assert refresh_payload["summary"]["connected"] is True
+
+    rc_commit = main(["--config", str(config_path), "telegram", "offset-commit", "144"])
+    assert rc_commit == 0
+    commit_payload = json.loads(capsys.readouterr().out)
+    assert commit_payload["ok"] is True
+    assert commit_payload["summary"]["update_id"] == 144
+
+    assert calls[0] == ("POST", "http://127.0.0.1:8787/v1/control/channels/telegram/refresh", {})
+    assert calls[1] == ("POST", "http://127.0.0.1:8787/v1/control/channels/telegram/offset/commit", {"update_id": 144})
+
+
 def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
