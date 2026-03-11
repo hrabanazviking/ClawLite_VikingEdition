@@ -796,6 +796,57 @@ function renderAutomation() {
   setBadge("channels-status", channels.length ? `${channels.length} channels` : "empty", channels.length ? "ok" : "warn");
 }
 
+function renderTelegramBoard() {
+  const grid = byId("telegram-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+
+  const telegram = ((state.dashboardState || {}).telegram) || {};
+  const available = Boolean(telegram.available);
+  const refreshButton = byId("refresh-telegram-transport");
+
+  if (!available) {
+    appendSummaryCard(grid, {
+      title: "Telegram",
+      body: "not configured",
+      detail: telegram.last_error || "Enable Telegram to surface offset, pairing, and webhook diagnostics here.",
+    });
+    setBadge("telegram-status", "unavailable", "warn");
+    if (refreshButton) {
+      refreshButton.disabled = true;
+    }
+    return;
+  }
+
+  appendSummaryCard(grid, {
+    title: "Transport",
+    body: `${String(telegram.mode || "unknown")} | ${telegram.webhook_mode_active ? "webhook active" : "polling active"}`,
+    detail: telegram.webhook_requested
+      ? `path ${telegram.webhook_path || "-"} | url configured ${Boolean(telegram.webhook_url_configured)} | secret configured ${Boolean(telegram.webhook_secret_configured)}`
+      : "webhook not requested",
+  });
+
+  appendSummaryCard(grid, {
+    title: "Offset state",
+    body: `next ${numeric(telegram.offset_next, 0)} | pending ${numeric(telegram.offset_pending_count, 0)}`,
+    detail: `watermark ${telegram.offset_watermark_update_id ?? "-"} | highest ${telegram.offset_highest_completed_update_id ?? "-"}`,
+  });
+
+  appendSummaryCard(grid, {
+    title: "Pairing",
+    body: `${numeric(telegram.pairing_pending_count, 0)} pending | ${numeric(telegram.pairing_approved_count, 0)} approved`,
+    detail: telegram.last_error ? `last error ${telegram.last_error}` : "pairing store healthy",
+  });
+
+  const healthy = numeric(telegram.offset_pending_count, 0) === 0 && !telegram.last_error;
+  setBadge("telegram-status", healthy ? "healthy" : "attention", healthy ? "ok" : "warn");
+  if (refreshButton) {
+    refreshButton.disabled = false;
+  }
+}
+
 function renderKnowledge() {
   const payload = state.dashboardState || {};
   const workspace = payload.workspace || {};
@@ -958,6 +1009,7 @@ function renderAll() {
   renderOverview();
   renderSessions();
   renderAutomation();
+  renderTelegramBoard();
   renderKnowledge();
   renderRuntime();
 }
@@ -1302,6 +1354,36 @@ async function triggerChannelRecovery() {
   }
 }
 
+async function triggerTelegramRefresh() {
+  const button = byId("refresh-telegram-transport");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.telegram_refresh || "/v1/control/channels/telegram/refresh", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.last_error ? "warn" : "ok",
+      "Telegram transport refresh finished",
+      `${summary.webhook_activated ? "webhook refreshed" : "offset reloaded"} | connected ${Boolean(summary.connected)}`,
+      "telegram",
+    );
+    await refreshAll("telegram-refresh");
+  } catch (error) {
+    recordEvent("danger", "Telegram transport refresh failed", error.message, "telegram");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerHatch() {
   if (!hatchPending()) {
     recordEvent("warn", "Hatch action skipped", "Bootstrap is already settled for this workspace.", "hatch");
@@ -1355,6 +1437,9 @@ function bindEvents() {
   });
   byId("recover-channels").addEventListener("click", () => {
     void triggerChannelRecovery();
+  });
+  byId("refresh-telegram-transport").addEventListener("click", () => {
+    void triggerTelegramRefresh();
   });
   byId("replay-inbound-journal").addEventListener("click", () => {
     void triggerInboundReplay();

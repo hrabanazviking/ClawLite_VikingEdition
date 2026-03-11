@@ -2333,6 +2333,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"channels_replay": "/v1/control/channels/replay"' in body
         assert '"channels_recover": "/v1/control/channels/recover"' in body
         assert '"channels_inbound_replay": "/v1/control/channels/inbound-replay"' in body
+        assert '"telegram_refresh": "/v1/control/channels/telegram/refresh"' in body
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
@@ -2368,6 +2369,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerDeadLetterReplay" in js.text
     assert "triggerChannelRecovery" in js.text
     assert "triggerInboundReplay" in js.text
+    assert "triggerTelegramRefresh" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
@@ -2403,6 +2405,7 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "manual_replay" in payload["channels_delivery"]["persistence"]
     assert "operator" in payload["channels_recovery"]
     assert "manual_replay" in payload["channels_inbound"]["persistence"]
+    assert "telegram" in payload
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
     assert "workspace" in payload
@@ -2561,6 +2564,27 @@ def test_gateway_channels_inbound_replay_endpoint_calls_manager(tmp_path: Path) 
         session_id="tg:1",
         force=True,
     )
+
+
+def test_gateway_telegram_refresh_endpoint_calls_channel_operator_hook(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    fake_channel = SimpleNamespace(operator_refresh_transport=AsyncMock(return_value={"connected": True}))
+    app.state.runtime.channels._channels["telegram"] = fake_channel
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/channels/telegram/refresh", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["connected"] is True
+    fake_channel.operator_refresh_transport.assert_awaited_once_with()
 
 
 def test_gateway_tools_catalog_http_endpoints_return_expected_shape(tmp_path: Path) -> None:

@@ -1027,6 +1027,66 @@ class TelegramChannel(BaseChannel):
             "offset_min_pending_update_id": offset_snapshot.min_pending_update_id,
         }
 
+    def operator_status(self) -> dict[str, Any]:
+        offset_snapshot = self._offset_store.snapshot()
+        try:
+            pairing_pending = len(self._pairing_store.list_pending())
+        except Exception as exc:
+            logger.warning("telegram pairing pending snapshot failed error={}", exc)
+            pairing_pending = 0
+        try:
+            pairing_approved = len(self._pairing_store.approved_entries())
+        except Exception as exc:
+            logger.warning("telegram pairing approved snapshot failed error={}", exc)
+            pairing_approved = 0
+        return {
+            "mode": self.mode,
+            "webhook_requested": self._webhook_requested(),
+            "webhook_mode_active": self._webhook_mode_active,
+            "webhook_path": self.webhook_path,
+            "webhook_url_configured": bool(self.webhook_url),
+            "webhook_secret_configured": bool(self.webhook_secret),
+            "offset_path": str(self._offset_path()),
+            "offset_next": offset_snapshot.next_offset,
+            "offset_watermark_update_id": offset_snapshot.safe_update_id,
+            "offset_highest_completed_update_id": offset_snapshot.highest_completed_update_id,
+            "offset_pending_count": offset_snapshot.pending_count,
+            "offset_min_pending_update_id": offset_snapshot.min_pending_update_id,
+            "pairing_pending_count": pairing_pending,
+            "pairing_approved_count": pairing_approved,
+            "connected": bool(self._connected),
+            "running": bool(self._running),
+            "last_error": str(self._last_error or ""),
+        }
+
+    async def operator_refresh_transport(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "mode": self.mode,
+            "webhook_requested": self._webhook_requested(),
+            "offset_reloaded": False,
+            "webhook_deleted": False,
+            "webhook_activated": False,
+            "bot_initialized": False,
+            "connected": bool(self._connected),
+            "webhook_mode_active": bool(self._webhook_mode_active),
+            "last_error": "",
+        }
+        try:
+            self._load_offset()
+            summary["offset_reloaded"] = True
+            bot = await self._ensure_bot()
+            summary["bot_initialized"] = bot is not None
+            if self._webhook_requested():
+                summary["webhook_deleted"] = await self._try_delete_webhook(reason="operator_refresh")
+                summary["webhook_activated"] = await self._activate_webhook_mode()
+            summary["connected"] = bool(self._connected)
+            summary["webhook_mode_active"] = bool(self._webhook_mode_active)
+        except Exception as exc:
+            self._last_error = str(exc)
+            summary["last_error"] = str(exc)
+            logger.warning("telegram operator transport refresh failed error={}", exc)
+        return summary | {"status": self.operator_status()}
+
     @property
     def webhook_mode_active(self) -> bool:
         return bool(self._webhook_mode_active)

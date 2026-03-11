@@ -204,6 +204,31 @@ Example response:
 
 Alias compatível: `POST /api/channels/inbound-replay`.
 
+## `POST /v1/control/channels/telegram/refresh`
+
+Refreshes Telegram transport state using the live channel instance.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "offset_reloaded": true,
+    "webhook_deleted": true,
+    "webhook_activated": true,
+    "connected": true,
+    "status": {
+      "offset_next": 89,
+      "offset_pending_count": 0,
+      "pairing_pending_count": 1
+    }
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/telegram/refresh`.
+
 ## `GET /health`
 
 Example response:

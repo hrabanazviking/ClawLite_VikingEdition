@@ -4547,6 +4547,67 @@ def test_telegram_webhook_mode_start_sets_webhook_and_stop_deletes_webhook() -> 
     asyncio.run(_scenario())
 
 
+def test_telegram_operator_status_reports_offset_and_pairing_state(tmp_path: Path) -> None:
+    channel = TelegramChannel(
+        config={
+            "token": "12345:token",
+            "offset_state_path": str(tmp_path / "offset.json"),
+            "pairing_state_path": str(tmp_path / "pairing.json"),
+        }
+    )
+    channel._force_commit_offset_update(55)
+    channel._pairing_store.issue_request(chat_id="1", user_id="2", username="alice")
+
+    payload = channel.operator_status()
+
+    assert payload["mode"] == "polling"
+    assert payload["webhook_requested"] is False
+    assert payload["offset_next"] == 56
+    assert payload["offset_watermark_update_id"] == 55
+    assert payload["pairing_pending_count"] == 1
+    assert payload["pairing_approved_count"] == 0
+
+
+def test_telegram_operator_refresh_transport_refreshes_webhook_and_reloads_offset(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        channel = TelegramChannel(
+            config={
+                "token": "x:token",
+                "mode": "webhook",
+                "webhook_url": "https://example.com/hook",
+                "webhook_secret": "secret-1",
+                "offset_state_path": str(tmp_path / "offset.json"),
+            }
+        )
+        channel._force_commit_offset_update(88)
+
+        class FakeBot:
+            def __init__(self, token: str) -> None:
+                assert token == "x:token"
+                self.set_calls: list[dict[str, object]] = []
+                self.delete_calls: list[dict[str, object]] = []
+
+            async def set_webhook(self, **kwargs):
+                self.set_calls.append(kwargs)
+                return True
+
+            async def delete_webhook(self, **kwargs):
+                self.delete_calls.append(kwargs)
+                return True
+
+        fake_module = SimpleNamespace(Bot=FakeBot)
+        with patch.dict(sys.modules, {"telegram": fake_module}):
+            payload = await channel.operator_refresh_transport()
+
+        assert payload["offset_reloaded"] is True
+        assert payload["webhook_deleted"] is True
+        assert payload["webhook_activated"] is True
+        assert payload["status"]["offset_next"] == 89
+        assert payload["status"]["webhook_mode_active"] is True
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_webhook_missing_config_falls_back_to_polling() -> None:
     async def _scenario() -> None:
         channel = TelegramChannel(config={"token": "x:token", "mode": "webhook"})

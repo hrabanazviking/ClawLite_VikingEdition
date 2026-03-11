@@ -72,6 +72,7 @@ Recent progress:
 - operators can now trigger live dead-letter replay from the dashboard using the existing channel manager instead of relying only on startup replay
 - operators can now also trigger live channel recovery from the dashboard/control plane instead of waiting only for the background recovery supervisor
 - operators can now requeue persisted inbound journal items from the control plane instead of waiting only for startup inbound replay
+- Telegram transport state now has dedicated dashboard/operator visibility plus a live refresh action for webhook/offset health
 
 Exit criteria:
 
