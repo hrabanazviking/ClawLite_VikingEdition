@@ -41,6 +41,7 @@ from clawlite.cli.ops import telegram_status
 from clawlite.cli.ops import provider_clear_auth
 from clawlite.cli.ops import provider_live_probe
 from clawlite.cli.ops import provider_recover
+from clawlite.cli.ops import supervisor_recover
 from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_openai_codex
 from clawlite.cli.ops import provider_set_auth
@@ -456,6 +457,21 @@ def cmd_provider_recover(args: argparse.Namespace) -> int:
         cfg,
         role=str(args.role or ""),
         model=str(args.model or ""),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_supervisor_recover(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = supervisor_recover(
+        cfg,
+        component=str(args.component or ""),
+        force=bool(args.force),
+        reason=str(args.reason or "operator_recover"),
         gateway_url=str(args.gateway_url or ""),
         token=str(args.token or ""),
         timeout=float(args.timeout),
@@ -1250,6 +1266,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_recover.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
     p_provider_recover.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     p_provider_recover.set_defaults(handler=cmd_provider_recover)
+
+    p_supervisor = sub.add_parser("supervisor", help="Supervisor operator control commands")
+    supervisor_sub = p_supervisor.add_subparsers(dest="supervisor_command", required=True)
+
+    p_supervisor_recover = supervisor_sub.add_parser("recover", help="Trigger runtime supervisor recovery via the gateway")
+    p_supervisor_recover.add_argument("--component", default="", help="Optional component name to recover")
+    p_supervisor_recover.add_argument("--no-force", dest="force", action="store_false", help="Respect cooldown and budget instead of forcing recovery")
+    p_supervisor_recover.add_argument("--reason", default="operator_recover", help="Recovery reason label")
+    p_supervisor_recover.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_supervisor_recover.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_supervisor_recover.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_supervisor_recover.set_defaults(handler=cmd_supervisor_recover, force=True)
 
     p_heartbeat = sub.add_parser("heartbeat", help="Heartbeat control commands")
     heartbeat_sub = p_heartbeat.add_subparsers(dest="heartbeat_command", required=True)

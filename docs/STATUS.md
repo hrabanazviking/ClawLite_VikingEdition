@@ -82,6 +82,7 @@ Recent progress:
 - Operators can now trigger supervisor component recovery directly from the control plane/dashboard instead of only waiting for the background supervisor loop
 - Telegram status now includes operator-facing hints for webhook, offset, pairing, and transport problems
 - Provider suppression/cooldown can now be cleared directly from the control plane/dashboard/CLI after the root cause is fixed
+- Supervisor recovery can now also be triggered from the CLI instead of only the dashboard/control-plane UI
 
 Exit criteria:
 

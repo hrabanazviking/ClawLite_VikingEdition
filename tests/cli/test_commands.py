@@ -3256,6 +3256,58 @@ def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monke
     )
 
 
+def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "sup-token"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, str, object]] = []
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "summary": {"recovered": 1, "component": "heartbeat"}}
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            del timeout, headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None):
+            calls.append(("POST", url, json))
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "supervisor", "recover", "--component", "heartbeat"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["summary"]["recovered"] == 1
+    assert calls[0] == (
+        "POST",
+        "http://127.0.0.1:8787/v1/control/supervisor/recover",
+        {"component": "heartbeat", "force": True, "reason": "operator_recover"},
+    )
+
+
 def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

@@ -437,6 +437,36 @@ def provider_recover(
     return payload
 
 
+def supervisor_recover(
+    config: AppConfig,
+    *,
+    component: str = "",
+    force: bool = True,
+    reason: str = "operator_recover",
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/control/supervisor/recover",
+        json_body={"component": str(component or ""), "force": bool(force), "reason": str(reason or "operator_recover")},
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = body.get("summary", {})
+        return payload
+    detail = body.get("detail", body.get("error", "supervisor_recover_failed")) if isinstance(body, dict) else str(body or "supervisor_recover_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
 def _telegram_pairing_store(config: AppConfig) -> TelegramPairingStore | None:
     telegram = getattr(config.channels, "telegram", None)
     if telegram is None:
