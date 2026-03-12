@@ -2343,6 +2343,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"telegram_offset_commit": "/v1/control/channels/telegram/offset/commit"' in body
         assert '"telegram_offset_sync": "/v1/control/channels/telegram/offset/sync"' in body
         assert '"telegram_offset_reset": "/v1/control/channels/telegram/offset/reset"' in body
+        assert '"discord_refresh": "/v1/control/channels/discord/refresh"' in body
         assert '"memory_suggest_refresh": "/v1/control/memory/suggest/refresh"' in body
         assert '"memory_snapshot_create": "/v1/control/memory/snapshot/create"' in body
         assert '"memory_snapshot_rollback": "/v1/control/memory/snapshot/rollback"' in body
@@ -2391,6 +2392,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerTelegramOffsetCommit" in js.text
     assert "triggerTelegramOffsetSync" in js.text
     assert "triggerTelegramOffsetReset" in js.text
+    assert "triggerDiscordRefresh" in js.text
     assert "triggerMemorySuggestRefresh" in js.text
     assert "triggerMemorySnapshotCreate" in js.text
     assert "triggerMemorySnapshotRollback" in js.text
@@ -2433,6 +2435,7 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "operator" in payload["channels_recovery"]
     assert "manual_replay" in payload["channels_inbound"]["persistence"]
     assert payload["telegram"]["available"] is False
+    assert payload["discord"]["available"] is False
     assert "profile" in payload["memory"]
     assert "suggestions" in payload["memory"]
     assert "quality" in payload["memory"]
@@ -5451,6 +5454,27 @@ def test_gateway_memory_snapshot_rollback_endpoint_returns_counts(tmp_path: Path
     assert payload["summary"]["ok"] is True
     assert payload["summary"]["version_id"] == version_id
     assert "counts" in payload["summary"]
+
+
+def test_gateway_discord_refresh_endpoint_calls_channel_operator_hook(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    fake_channel = SimpleNamespace(operator_refresh_transport=AsyncMock(return_value={"ok": True, "gateway_restarted": True}))
+    app.state.runtime.channels._channels["discord"] = fake_channel
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/channels/discord/refresh", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["gateway_restarted"] is True
+    fake_channel.operator_refresh_transport.assert_awaited_once_with()
 
 
 def test_gateway_autonomy_wake_endpoint_calls_runtime_wake_submitter(tmp_path: Path) -> None:

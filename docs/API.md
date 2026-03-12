@@ -186,6 +186,28 @@ Example response:
 
 Alias compatível: `POST /api/memory/snapshot/rollback`.
 
+## `POST /v1/control/channels/discord/refresh`
+
+Refreshes Discord gateway transport state using the live channel instance.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "gateway_restarted": true,
+    "status": {
+      "connected": false,
+      "gateway_task_state": "running"
+    }
+  }
+}
+```
+
+Alias compatível: `POST /api/channels/discord/refresh`.
+
 ## `POST /v1/control/channels/replay`
 
 Replays retained dead-letter outbound events through the live channel manager.

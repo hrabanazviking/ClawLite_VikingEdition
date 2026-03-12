@@ -956,6 +956,63 @@ function renderTelegramBoard() {
   }
 }
 
+function renderDiscordBoard() {
+  const grid = byId("discord-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+  const discord = ((state.dashboardState || {}).discord) || {};
+  const available = Boolean(discord.available);
+  const refreshButton = byId("refresh-discord-transport");
+
+  if (!available) {
+    appendSummaryCard(grid, {
+      title: "Discord",
+      body: "not configured",
+      detail: discord.last_error || "Enable Discord to surface gateway session and reconnect diagnostics here.",
+    });
+    setBadge("discord-status", "unavailable", "warn");
+    if (refreshButton) {
+      refreshButton.disabled = true;
+    }
+    return;
+  }
+
+  appendSummaryCard(grid, {
+    title: "Gateway state",
+    body: `${discord.connected ? "connected" : "disconnected"} | ${String(discord.gateway_task_state || "unknown")}`,
+    detail: `heartbeat ${String(discord.heartbeat_task_state || "unknown")} | sequence ${discord.sequence ?? "-"}`,
+  });
+  appendSummaryCard(grid, {
+    title: "Session",
+    body: String(discord.session_id || "not established"),
+    detail: discord.resume_url ? `resume ${discord.resume_url}` : "no resume url available",
+  });
+  appendSummaryCard(grid, {
+    title: "Runtime",
+    body: `${numeric(discord.dm_cache_size, 0)} DM channels cached | ${numeric(discord.typing_tasks, 0)} typing tasks`,
+    detail: discord.last_error ? `last error ${discord.last_error}` : "transport healthy",
+  });
+
+  const hints = Array.isArray(discord.hints) ? discord.hints : [];
+  if (hints.length) {
+    hints.slice(0, 3).forEach((hint, index) => {
+      appendSummaryCard(grid, {
+        title: `Hint ${index + 1}`,
+        body: String(hint),
+        detail: "Use the Discord transport refresh or channel recovery controls to resolve this safely.",
+      });
+    });
+  }
+
+  const healthy = Boolean(discord.connected) && !discord.last_error;
+  setBadge("discord-status", healthy ? "healthy" : "attention", healthy ? "ok" : "warn");
+  if (refreshButton) {
+    refreshButton.disabled = false;
+  }
+}
+
 function renderMemoryBoard() {
   const grid = byId("memory-grid");
   if (!grid) {
@@ -1163,6 +1220,7 @@ function renderAll() {
   renderOverview();
   renderSessions();
   renderAutomation();
+  renderDiscordBoard();
   renderTelegramBoard();
   renderKnowledge();
   renderRuntime();
@@ -1738,6 +1796,36 @@ async function triggerTelegramRefresh() {
   }
 }
 
+async function triggerDiscordRefresh() {
+  const button = byId("refresh-discord-transport");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.discord_refresh || "/v1/control/channels/discord/refresh", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Discord transport refresh finished",
+      `${summary.gateway_restarted ? "gateway restarted" : "state refreshed"} | running ${Boolean(summary.status?.running)}`,
+      "discord",
+    );
+    await refreshAll("discord-refresh");
+  } catch (error) {
+    recordEvent("danger", "Discord transport refresh failed", error.message, "discord");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerTelegramPairingApprove() {
   const input = byId("telegram-pairing-code");
   const button = byId("approve-telegram-pairing");
@@ -2050,6 +2138,9 @@ function bindEvents() {
   });
   byId("recover-channels").addEventListener("click", () => {
     void triggerChannelRecovery();
+  });
+  byId("refresh-discord-transport").addEventListener("click", () => {
+    void triggerDiscordRefresh();
   });
   byId("refresh-telegram-transport").addEventListener("click", () => {
     void triggerTelegramRefresh();

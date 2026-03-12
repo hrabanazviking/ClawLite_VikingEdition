@@ -377,6 +377,10 @@ class MemorySnapshotRollbackRequest(BaseModel):
     confirm: bool = False
 
 
+class DiscordRefreshRequest(BaseModel):
+    noop: bool = False
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -607,6 +611,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "telegram_offset_commit": "/v1/control/channels/telegram/offset/commit",
             "telegram_offset_sync": "/v1/control/channels/telegram/offset/sync",
             "telegram_offset_reset": "/v1/control/channels/telegram/offset/reset",
+            "discord_refresh": "/v1/control/channels/discord/refresh",
             "memory_suggest_refresh": "/v1/control/memory/suggest/refresh",
             "memory_snapshot_create": "/v1/control/memory/snapshot/create",
             "memory_snapshot_rollback": "/v1/control/memory/snapshot/rollback",
@@ -4467,6 +4472,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             return {"available": True, **payload}
         return {"available": True}
 
+    def _dashboard_discord_summary() -> dict[str, Any]:
+        channel = runtime.channels.get_channel("discord")
+        operator_status = getattr(channel, "operator_status", None)
+        if channel is None or not callable(operator_status):
+            return {"available": False}
+        try:
+            payload = operator_status()
+        except Exception as exc:
+            return {"last_error": str(exc), "available": False}
+        if isinstance(payload, dict):
+            return {"available": True, **payload}
+        return {"available": True}
+
     def _dashboard_state_payload() -> dict[str, Any]:
         generated_at = _utc_now_iso()
         control_plane = _control_plane_payload(server_time=generated_at)
@@ -4484,6 +4502,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "channels_delivery": runtime.channels.delivery_diagnostics(),
             "channels_inbound": runtime.channels.inbound_diagnostics(),
             "channels_recovery": runtime.channels.recovery_diagnostics(),
+            "discord": _dashboard_discord_summary(),
             "telegram": _dashboard_telegram_summary(),
             "cron": _dashboard_cron_summary(),
             "heartbeat": runtime.heartbeat.status(),
@@ -4974,6 +4993,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         summary = memory_snapshot_rollback(runtime.config, version_id=str(payload.version_id or ""))
         return {"ok": bool(summary.get("ok", False)), "summary": summary}
 
+    async def _discord_refresh_handler(request: Request, payload: DiscordRefreshRequest) -> dict[str, Any]:
+        del payload
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        channel = runtime.channels.get_channel("discord")
+        if channel is None:
+            raise HTTPException(status_code=404, detail="channel_not_available:discord")
+        operator_refresh = getattr(channel, "operator_refresh_transport", None)
+        if not callable(operator_refresh):
+            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:discord")
+        summary = await operator_refresh()
+        return {"ok": bool(summary.get("ok", False)), "summary": summary}
+
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
@@ -5133,6 +5164,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         request: Request, payload: MemorySnapshotRollbackRequest | None = None
     ) -> dict[str, Any]:
         return await _memory_snapshot_rollback_handler(request, payload or MemorySnapshotRollbackRequest())
+
+    @app.post("/v1/control/channels/discord/refresh")
+    async def discord_refresh(
+        request: Request, payload: DiscordRefreshRequest | None = None
+    ) -> dict[str, Any]:
+        return await _discord_refresh_handler(request, payload or DiscordRefreshRequest())
+
+    @app.post("/api/channels/discord/refresh")
+    async def api_discord_refresh(
+        request: Request, payload: DiscordRefreshRequest | None = None
+    ) -> dict[str, Any]:
+        return await _discord_refresh_handler(request, payload or DiscordRefreshRequest())
 
     @app.post("/v1/control/supervisor/recover")
     async def supervisor_recover(request: Request, payload: SupervisorRecoverRequest | None = None) -> dict[str, Any]:

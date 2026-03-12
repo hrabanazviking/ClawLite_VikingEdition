@@ -657,3 +657,75 @@ class DiscordChannel(BaseChannel):
     async def _stop_typing(self, channel_id: str) -> None:
         task = self._typing_tasks.pop(channel_id, None)
         await cancel_task(task)
+
+    @staticmethod
+    def _task_state(task: asyncio.Task[Any] | None) -> str:
+        if task is None:
+            return "stopped"
+        if task.cancelled():
+            return "cancelled"
+        if task.done():
+            exc = task.exception()
+            return "failed" if exc is not None else "finished"
+        return "running"
+
+    def operator_status(self) -> dict[str, Any]:
+        gateway_task_state = self._task_state(self._gateway_task)
+        heartbeat_task_state = self._task_state(self._heartbeat_task)
+        hints: list[str] = []
+        if self.on_message is not None and gateway_task_state != "running":
+            hints.append("Discord gateway listener is not running; refresh transport to reconnect the gateway loop.")
+        if self._last_error:
+            hints.append("Discord recorded a recent transport or HTTP error; inspect the error and consider refreshing transport.")
+        if not self._session_id and gateway_task_state == "running":
+            hints.append("Discord gateway is running without an active session id yet; wait for READY/RESUMED or refresh transport.")
+        return {
+            "running": bool(self._running),
+            "connected": self._ws is not None,
+            "gateway_task_state": gateway_task_state,
+            "heartbeat_task_state": heartbeat_task_state,
+            "session_id": self._session_id,
+            "resume_url": self._resume_url,
+            "sequence": self._sequence,
+            "bot_user_id": self._bot_user_id,
+            "dm_cache_size": len(self._dm_channel_ids),
+            "typing_tasks": len(self._typing_tasks),
+            "last_error": str(self._last_error or ""),
+            "hints": hints,
+        }
+
+    async def operator_refresh_transport(self) -> dict[str, Any]:
+        was_running = bool(self._running)
+        was_gateway_running = self._gateway_task is not None and not self._gateway_task.done()
+        summary: dict[str, Any] = {
+            "ok": True,
+            "was_running": was_running,
+            "gateway_restarted": False,
+            "last_error": "",
+        }
+        try:
+            await cancel_task(self._gateway_task)
+            self._gateway_task = None
+            await cancel_task(self._heartbeat_task)
+            self._heartbeat_task = None
+            ws = self._ws
+            self._ws = None
+            if ws is not None:
+                close_fn = getattr(ws, "close", None)
+                if callable(close_fn):
+                    result = close_fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+            self._session_id = ""
+            self._resume_url = ""
+            self._sequence = None
+            self._bot_user_id = ""
+            self._last_error = ""
+            if was_running and (self.on_message is not None or was_gateway_running):
+                await self.start()
+                summary["gateway_restarted"] = True
+        except Exception as exc:
+            self._last_error = str(exc)
+            summary["ok"] = False
+            summary["last_error"] = str(exc)
+        return summary | {"status": self.operator_status()}

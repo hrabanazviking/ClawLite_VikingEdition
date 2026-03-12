@@ -388,3 +388,47 @@ def test_discord_message_create_filters_self_and_acl() -> None:
         assert emitted[0][3]["attachments"][0]["filename"] == "image.png"
 
     asyncio.run(_scenario())
+
+
+def test_discord_operator_status_reports_gateway_state() -> None:
+    channel = DiscordChannel(config={"token": "bot-token"})
+    channel._running = True
+    channel._session_id = "sess-1"
+    channel._resume_url = "wss://resume.example"
+    channel._sequence = 42
+    channel._bot_user_id = "bot-1"
+
+    payload = channel.operator_status()
+
+    assert payload["running"] is True
+    assert payload["session_id"] == "sess-1"
+    assert payload["resume_url"] == "wss://resume.example"
+    assert payload["sequence"] == 42
+    assert payload["bot_user_id"] == "bot-1"
+
+
+def test_discord_operator_refresh_transport_resets_gateway_state() -> None:
+    async def _scenario() -> None:
+        channel = DiscordChannel(config={"token": "bot-token"})
+        channel._running = True
+        channel._session_id = "sess-1"
+        channel._resume_url = "wss://resume.example"
+        channel._sequence = 42
+        channel._bot_user_id = "bot-1"
+        gateway_task = asyncio.create_task(asyncio.sleep(3600))
+        heartbeat_task = asyncio.create_task(asyncio.sleep(3600))
+        channel._gateway_task = gateway_task
+        channel._heartbeat_task = heartbeat_task
+
+        with patch.object(channel, "start", AsyncMock()) as start_mock:
+            payload = await channel.operator_refresh_transport()
+
+        assert payload["ok"] is True
+        assert payload["gateway_restarted"] is True
+        assert start_mock.await_count == 1
+        assert channel._session_id == ""
+        assert channel._resume_url == ""
+        assert channel._sequence is None
+        assert channel._bot_user_id == ""
+
+    asyncio.run(_scenario())

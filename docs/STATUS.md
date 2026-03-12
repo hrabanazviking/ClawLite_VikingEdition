@@ -86,6 +86,7 @@ Recent progress:
 - Operators can now trigger manual autonomy wakes from the dashboard/control plane/CLI instead of waiting only for the scheduled loop
 - Memory profile, pending suggestions, and quality state now surface in dashboard state, and operators can refresh suggestions or create snapshots from the control plane
 - Memory snapshot rollback is now available from the control plane/dashboard with explicit confirmation
+- Discord gateway session/reconnect state now has dedicated dashboard/operator visibility plus a live refresh action
 
 Exit criteria:
 
