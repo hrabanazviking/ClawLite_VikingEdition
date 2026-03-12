@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telegram operator status now includes actionable hints for webhook, offset, pairing, and transport recovery.
 - Operators can now clear provider suppression/cooldown directly from the control plane via `POST /v1/control/provider/recover`, the dashboard, and the CLI.
 - Supervisor recovery is now also accessible from the CLI via `clawlite supervisor recover`.
+- Manual autonomy wakes are now accessible from the control plane via `POST /v1/control/autonomy/wake`, the dashboard, and the CLI.
 - Heartbeat prompts now inject a cron-style current-time line from the workspace user timezone and skip model calls when `HEARTBEAT.md` exists but is effectively empty.
 - Gateway root entrypoint now serves a richer operator dashboard backed by packaged HTML/CSS/JS assets instead of a single inline landing page, with a more operational UI/UX direction for control-plane work.
 - Added dashboard state endpoints (`/v1/dashboard/state`, `/api/dashboard/state`) so the packaged UI can render recent sessions, cron state, channels, provider recovery, and self-evolution summaries without scraping raw diagnostics.

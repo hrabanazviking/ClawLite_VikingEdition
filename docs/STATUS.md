@@ -83,6 +83,7 @@ Recent progress:
 - Telegram status now includes operator-facing hints for webhook, offset, pairing, and transport problems
 - Provider suppression/cooldown can now be cleared directly from the control plane/dashboard/CLI after the root cause is fixed
 - Supervisor recovery can now also be triggered from the CLI instead of only the dashboard/control-plane UI
+- Operators can now trigger manual autonomy wakes from the dashboard/control plane/CLI instead of waiting only for the scheduled loop
 
 Exit criteria:
 

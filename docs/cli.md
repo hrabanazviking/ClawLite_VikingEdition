@@ -26,6 +26,7 @@ The module entry point is also available as `python -m clawlite.cli`.
 | `telegram` | Telegram operator control commands | `clawlite telegram status` |
 | `provider recover` | Clears provider failover suppression/cooldown through the gateway | `clawlite provider recover --role primary` |
 | `supervisor recover` | Triggers runtime supervisor recovery through the gateway | `clawlite supervisor recover --component heartbeat` |
+| `autonomy wake` | Triggers a manual autonomy wake through the gateway | `clawlite autonomy wake --kind proactive` |
 
 Notes:
 
@@ -36,6 +37,7 @@ Notes:
 - `telegram status` reads Telegram runtime state from `/api/dashboard/state` and includes operator hints; `telegram refresh`, `telegram offset-commit`, `telegram offset-sync`, and `telegram offset-reset` call the live gateway control endpoints.
 - `provider recover` calls the live gateway provider recovery control and is intended for failover suppression/cooldown recovery after auth/quota/config issues are fixed.
 - `supervisor recover` calls the live gateway supervisor recovery control and can target one component or all tracked components.
+- `autonomy wake` triggers the live autonomy wake control and is intended for manual proactive/autonomy nudges when an operator wants to run the loop immediately.
 
 ## Setup and Onboarding
 

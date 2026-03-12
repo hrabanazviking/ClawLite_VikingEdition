@@ -42,6 +42,7 @@ from clawlite.cli.ops import provider_clear_auth
 from clawlite.cli.ops import provider_live_probe
 from clawlite.cli.ops import provider_recover
 from clawlite.cli.ops import supervisor_recover
+from clawlite.cli.ops import autonomy_wake
 from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_openai_codex
 from clawlite.cli.ops import provider_set_auth
@@ -472,6 +473,19 @@ def cmd_supervisor_recover(args: argparse.Namespace) -> int:
         component=str(args.component or ""),
         force=bool(args.force),
         reason=str(args.reason or "operator_recover"),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_autonomy_wake(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = autonomy_wake(
+        cfg,
+        kind=str(args.kind or "proactive"),
         gateway_url=str(args.gateway_url or ""),
         token=str(args.token or ""),
         timeout=float(args.timeout),
@@ -1266,6 +1280,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider_recover.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
     p_provider_recover.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     p_provider_recover.set_defaults(handler=cmd_provider_recover)
+
+    p_autonomy = sub.add_parser("autonomy", help="Autonomy operator control commands")
+    autonomy_sub = p_autonomy.add_subparsers(dest="autonomy_command", required=True)
+
+    p_autonomy_wake = autonomy_sub.add_parser("wake", help="Trigger an autonomy wake through the gateway")
+    p_autonomy_wake.add_argument("--kind", choices=["proactive", "heartbeat"], default="proactive")
+    p_autonomy_wake.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_autonomy_wake.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_autonomy_wake.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_autonomy_wake.set_defaults(handler=cmd_autonomy_wake)
 
     p_supervisor = sub.add_parser("supervisor", help="Supervisor operator control commands")
     supervisor_sub = p_supervisor.add_subparsers(dest="supervisor_command", required=True)

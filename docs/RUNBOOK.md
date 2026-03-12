@@ -40,6 +40,7 @@ clawlite telegram offset-sync 145
 clawlite telegram offset-reset --yes
 clawlite provider recover
 clawlite supervisor recover --component heartbeat
+clawlite autonomy wake --kind proactive
 ```
 
 ## Quick Health Checks

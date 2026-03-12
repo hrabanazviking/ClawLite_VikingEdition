@@ -1528,6 +1528,36 @@ async function triggerProviderRecovery() {
   }
 }
 
+async function triggerAutonomyWake() {
+  const button = byId("trigger-autonomy-wake");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.autonomy_wake || "/v1/control/autonomy/wake", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ kind: "proactive" }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.result?.status && String(summary.result.status).startsWith("wake_") ? "warn" : "ok",
+      "Autonomy wake finished",
+      `${summary.kind || "proactive"} | ${safeJson(summary.result || {})}`,
+      "autonomy",
+    );
+    await refreshAll("autonomy-wake");
+  } catch (error) {
+    recordEvent("danger", "Autonomy wake failed", error.message, "autonomy");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerTelegramRefresh() {
   const button = byId("refresh-telegram-transport");
   if (button) {
@@ -1849,6 +1879,9 @@ function bindEvents() {
 
   byId("refresh-all").addEventListener("click", () => {
     void refreshAll("manual");
+  });
+  byId("trigger-autonomy-wake").addEventListener("click", () => {
+    void triggerAutonomyWake();
   });
   byId("recover-provider").addEventListener("click", () => {
     void triggerProviderRecovery();

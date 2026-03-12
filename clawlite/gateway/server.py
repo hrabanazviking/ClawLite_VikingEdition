@@ -359,6 +359,10 @@ class ProviderRecoverRequest(BaseModel):
     model: str = ""
 
 
+class AutonomyWakeRequest(BaseModel):
+    kind: str = "proactive"
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -590,6 +594,7 @@ def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict
             "telegram_offset_sync": "/v1/control/channels/telegram/offset/sync",
             "telegram_offset_reset": "/v1/control/channels/telegram/offset/reset",
             "provider_recover": "/v1/control/provider/recover",
+            "autonomy_wake": "/v1/control/autonomy/wake",
             "supervisor_recover": "/v1/control/supervisor/recover",
             "heartbeat_trigger": "/v1/control/heartbeat/trigger",
             "ws": "/ws",
@@ -4890,6 +4895,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         summary = operator_clear(role=str(payload.role or "").strip(), model=str(payload.model or "").strip())
         return {"ok": bool(summary.get("ok", False)), "summary": summary}
 
+    async def _autonomy_wake_handler(request: Request, payload: AutonomyWakeRequest) -> dict[str, Any]:
+        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
+        normalized_kind = str(payload.kind or "proactive").strip().lower() or "proactive"
+        if normalized_kind == "proactive":
+            result = await _submit_proactive_wake()
+        elif normalized_kind == "heartbeat":
+            result = await _submit_heartbeat_wake()
+        else:
+            raise HTTPException(status_code=400, detail=f"unsupported_autonomy_wake_kind:{normalized_kind}")
+        return {"ok": True, "summary": {"kind": normalized_kind, "result": result}}
+
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
         return await _channels_replay_handler(request, payload or ChannelReplayRequest())
@@ -5005,6 +5021,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/provider/recover")
     async def api_provider_recover(request: Request, payload: ProviderRecoverRequest | None = None) -> dict[str, Any]:
         return await _provider_recover_handler(request, payload or ProviderRecoverRequest())
+
+    @app.post("/v1/control/autonomy/wake")
+    async def autonomy_wake(request: Request, payload: AutonomyWakeRequest | None = None) -> dict[str, Any]:
+        return await _autonomy_wake_handler(request, payload or AutonomyWakeRequest())
+
+    @app.post("/api/autonomy/wake")
+    async def api_autonomy_wake(request: Request, payload: AutonomyWakeRequest | None = None) -> dict[str, Any]:
+        return await _autonomy_wake_handler(request, payload or AutonomyWakeRequest())
 
     @app.post("/v1/control/supervisor/recover")
     async def supervisor_recover(request: Request, payload: SupervisorRecoverRequest | None = None) -> dict[str, Any]:

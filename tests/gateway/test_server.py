@@ -2344,6 +2344,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"telegram_offset_sync": "/v1/control/channels/telegram/offset/sync"' in body
         assert '"telegram_offset_reset": "/v1/control/channels/telegram/offset/reset"' in body
         assert '"provider_recover": "/v1/control/provider/recover"' in body
+        assert '"autonomy_wake": "/v1/control/autonomy/wake"' in body
         assert '"supervisor_recover": "/v1/control/supervisor/recover"' in body
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
@@ -2388,6 +2389,7 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerTelegramOffsetSync" in js.text
     assert "triggerTelegramOffsetReset" in js.text
     assert "triggerProviderRecovery" in js.text
+    assert "triggerAutonomyWake" in js.text
     assert "triggerSupervisorRecovery" in js.text
     assert "hatch:operator" in js.text
     assert "scheduleAutoRefresh" in js.text
@@ -5379,6 +5381,26 @@ def test_gateway_provider_recover_endpoint_calls_provider_operator_hook(tmp_path
     assert payload["ok"] is True
     assert payload["summary"]["cleared"] == 1
     assert payload["summary"]["role"] == "primary"
+
+
+def test_gateway_autonomy_wake_endpoint_calls_runtime_wake_submitter(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.autonomy_wake.submit = AsyncMock(return_value={"status": "ok", "kind": "proactive", "delivered": 0})
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/autonomy/wake", json={"kind": "proactive"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["kind"] == "proactive"
+    app.state.runtime.autonomy_wake.submit.assert_awaited()
 
 
 def test_gateway_startup_rollback_when_subsystem_fails(tmp_path: Path) -> None:

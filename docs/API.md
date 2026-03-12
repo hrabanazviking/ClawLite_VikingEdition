@@ -430,6 +430,34 @@ Example response:
 
 Alias compatível: `POST /api/provider/recover`.
 
+## `POST /v1/control/autonomy/wake`
+
+Triggers a manual autonomy wake through the live wake coordinator.
+
+Example request:
+
+```json
+{
+  "kind": "proactive"
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "kind": "proactive",
+    "result": {
+      "status": "ok"
+    }
+  }
+}
+```
+
+Alias compatível: `POST /api/autonomy/wake`.
+
 ## `POST /v1/control/supervisor/recover`
 
 Triggers operator-requested runtime supervisor recovery for one component or all tracked components.
