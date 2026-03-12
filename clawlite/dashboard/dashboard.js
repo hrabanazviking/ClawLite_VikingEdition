@@ -956,6 +956,41 @@ function renderTelegramBoard() {
   }
 }
 
+function renderMemoryBoard() {
+  const grid = byId("memory-grid");
+  if (!grid) {
+    return;
+  }
+  grid.innerHTML = "";
+  const memory = ((state.dashboardState || {}).memory) || {};
+  const profile = memory.profile || {};
+  const suggest = memory.suggestions || {};
+  const quality = memory.quality || {};
+  const profilePayload = profile.profile || {};
+  const qualityScores = quality.scores || {};
+
+  appendSummaryCard(grid, {
+    title: "Profile",
+    body: `${Array.isArray(profile.keys) ? profile.keys.length : 0} keys`,
+    detail: Array.isArray(profile.keys) && profile.keys.length ? profile.keys.slice(0, 4).join(", ") : "No profile keys captured yet.",
+  });
+  appendSummaryCard(grid, {
+    title: "Suggestions",
+    body: `${numeric(suggest.count, 0)} pending`,
+    detail: String(suggest.source || "pending"),
+  });
+  appendSummaryCard(grid, {
+    title: "Quality",
+    body: `${Number(qualityScores.overall || 0).toFixed(3)} overall`,
+    detail: `${Number(qualityScores.retrieval || 0).toFixed(3)} retrieval | ${Number(qualityScores.semantic || 0).toFixed(3)} semantic`,
+  });
+  appendSummaryCard(grid, {
+    title: "Identity context",
+    body: String(profilePayload.display_name || profilePayload.name || "unknown"),
+    detail: String(profilePayload.timezone || "timezone not set"),
+  });
+}
+
 function renderKnowledge() {
   const payload = state.dashboardState || {};
   const workspace = payload.workspace || {};
@@ -1021,6 +1056,9 @@ function renderKnowledge() {
   setCode("memory-preview", {
     monitor: memoryMonitor,
     analysis: memory.analysis || {},
+    profile: memory.profile || {},
+    suggestions: memory.suggestions || {},
+    quality: memory.quality || {},
   });
 
   setBadge("workspace-status", workspace.failed_count ? "attention" : "healthy", workspace.failed_count ? "warn" : "ok");
@@ -1031,6 +1069,7 @@ function renderKnowledge() {
   );
   setBadge("skills-status", `${numeric(((skills.summary || {}).available), 0)} available`, numeric(((skills.summary || {}).unavailable), 0) ? "warn" : "ok");
   setBadge("memory-status", memoryMonitor.enabled ? "monitoring" : "disabled", memoryMonitor.enabled ? "ok" : "warn");
+  renderMemoryBoard();
 }
 
 function hatchPending() {
@@ -1558,6 +1597,66 @@ async function triggerAutonomyWake() {
   }
 }
 
+async function triggerMemorySuggestRefresh() {
+  const button = byId("refresh-memory-suggestions");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.memory_suggest_refresh || "/v1/control/memory/suggest/refresh", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Memory suggestion refresh finished",
+      `${numeric(summary.count, 0)} suggestions | source ${String(summary.source || "unknown")}`,
+      "memory",
+    );
+    await refreshAll("memory-suggest-refresh");
+  } catch (error) {
+    recordEvent("danger", "Memory suggestion refresh failed", error.message, "memory");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function triggerMemorySnapshotCreate() {
+  const button = byId("create-memory-snapshot");
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const payload = await fetchJson(paths.memory_snapshot_create || "/v1/control/memory/snapshot/create", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tag: "dashboard" }),
+    });
+    const summary = payload.summary || {};
+    recordEvent(
+      summary.ok === false ? "warn" : "ok",
+      "Memory snapshot created",
+      `${String(summary.version_id || "unknown")} | tag ${String(summary.tag || "")}`,
+      "memory",
+    );
+    await refreshAll("memory-snapshot-create");
+  } catch (error) {
+    recordEvent("danger", "Memory snapshot creation failed", error.message, "memory");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function triggerTelegramRefresh() {
   const button = byId("refresh-telegram-transport");
   if (button) {
@@ -1882,6 +1981,12 @@ function bindEvents() {
   });
   byId("trigger-autonomy-wake").addEventListener("click", () => {
     void triggerAutonomyWake();
+  });
+  byId("refresh-memory-suggestions").addEventListener("click", () => {
+    void triggerMemorySuggestRefresh();
+  });
+  byId("create-memory-snapshot").addEventListener("click", () => {
+    void triggerMemorySnapshotCreate();
   });
   byId("recover-provider").addEventListener("click", () => {
     void triggerProviderRecovery();

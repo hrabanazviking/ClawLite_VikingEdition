@@ -370,8 +370,13 @@
               <article class="panel-card">
                 <div class="panel-card__header">
                   <h2>Memory Monitor</h2>
-                  <span class="badge" id="memory-status">pending</span>
+                  <div class="button-row">
+                    <button class="ghost-button" id="refresh-memory-suggestions" type="button">Refresh suggestions</button>
+                    <button class="ghost-button" id="create-memory-snapshot" type="button">Create memory snapshot</button>
+                    <span class="badge" id="memory-status">pending</span>
+                  </div>
                 </div>
+                <div class="summary-grid summary-grid--wide" id="memory-grid"></div>
                 <pre class="code-block" id="memory-preview">Waiting for memory telemetry...</pre>
               </article>
             </div>

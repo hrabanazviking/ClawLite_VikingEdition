@@ -2343,6 +2343,8 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"telegram_offset_commit": "/v1/control/channels/telegram/offset/commit"' in body
         assert '"telegram_offset_sync": "/v1/control/channels/telegram/offset/sync"' in body
         assert '"telegram_offset_reset": "/v1/control/channels/telegram/offset/reset"' in body
+        assert '"memory_suggest_refresh": "/v1/control/memory/suggest/refresh"' in body
+        assert '"memory_snapshot_create": "/v1/control/memory/snapshot/create"' in body
         assert '"provider_recover": "/v1/control/provider/recover"' in body
         assert '"autonomy_wake": "/v1/control/autonomy/wake"' in body
         assert '"supervisor_recover": "/v1/control/supervisor/recover"' in body
@@ -2388,6 +2390,8 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerTelegramOffsetCommit" in js.text
     assert "triggerTelegramOffsetSync" in js.text
     assert "triggerTelegramOffsetReset" in js.text
+    assert "triggerMemorySuggestRefresh" in js.text
+    assert "triggerMemorySnapshotCreate" in js.text
     assert "triggerProviderRecovery" in js.text
     assert "triggerAutonomyWake" in js.text
     assert "triggerSupervisorRecovery" in js.text
@@ -2427,6 +2431,9 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "operator" in payload["channels_recovery"]
     assert "manual_replay" in payload["channels_inbound"]["persistence"]
     assert payload["telegram"]["available"] is False
+    assert "profile" in payload["memory"]
+    assert "suggestions" in payload["memory"]
+    assert "quality" in payload["memory"]
     assert "status" in payload["cron"]
     assert "jobs" in payload["cron"]
     assert "workspace" in payload
@@ -5381,6 +5388,44 @@ def test_gateway_provider_recover_endpoint_calls_provider_operator_hook(tmp_path
     assert payload["ok"] is True
     assert payload["summary"]["cleared"] == 1
     assert payload["summary"]["role"] == "primary"
+
+
+def test_gateway_memory_suggest_refresh_endpoint_returns_snapshot(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/memory/suggest/refresh", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["ok"] is True
+    assert "count" in payload["summary"]
+
+
+def test_gateway_memory_snapshot_create_endpoint_returns_version(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/control/memory/snapshot/create", json={"tag": "manual"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["ok"] is True
+    assert payload["summary"]["version_id"]
 
 
 def test_gateway_autonomy_wake_endpoint_calls_runtime_wake_submitter(tmp_path: Path) -> None:

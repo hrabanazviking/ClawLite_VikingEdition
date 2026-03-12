@@ -88,7 +88,10 @@ Example response:
   "bootstrap": {},
   "memory": {
     "monitor": {},
-    "analysis": {}
+    "analysis": {},
+    "profile": {},
+    "suggestions": {},
+    "quality": {}
   },
   "skills": {},
   "provider": {
@@ -106,6 +109,51 @@ Example response:
 Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política de autenticação).
 
 This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload.
+
+## `POST /v1/control/memory/suggest/refresh`
+
+Refreshes proactive memory suggestions using the live runtime memory monitor.
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "count": 2,
+    "source": "scan"
+  }
+}
+```
+
+Alias compatível: `POST /api/memory/suggest/refresh`.
+
+## `POST /v1/control/memory/snapshot/create`
+
+Creates a new memory snapshot version from the live runtime state.
+
+Example request:
+
+```json
+{
+  "tag": "dashboard"
+}
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "ok": true,
+    "version_id": "20260312T120000Z-dashboard"
+  }
+}
+```
+
+Alias compatível: `POST /api/memory/snapshot/create`.
 
 ## `POST /v1/control/channels/replay`
 
