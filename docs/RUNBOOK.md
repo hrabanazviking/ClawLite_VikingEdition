@@ -33,6 +33,8 @@ clawlite hatch
 Telegram operator helpers are also available from the terminal:
 
 ```bash
+clawlite discord status
+clawlite discord refresh
 clawlite telegram status
 clawlite telegram refresh
 clawlite telegram offset-commit 144

@@ -307,6 +307,59 @@ def telegram_status(
     return payload
 
 
+def discord_status(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="GET",
+        endpoint="/api/dashboard/state",
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict):
+        payload["ok"] = True
+        payload["discord"] = dict(body.get("discord", {})) if isinstance(body.get("discord"), dict) else {}
+        return payload
+    detail = body.get("detail", body.get("error", "discord_status_failed")) if isinstance(body, dict) else str(body or "discord_status_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def discord_refresh(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/control/channels/discord/refresh",
+        json_body={},
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = body.get("summary", {})
+        return payload
+    detail = body.get("detail", body.get("error", "discord_refresh_failed")) if isinstance(body, dict) else str(body or "discord_refresh_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
 def telegram_refresh(
     config: AppConfig,
     *,

@@ -154,6 +154,8 @@ clawlite telegram refresh
 clawlite telegram offset-commit 144
 clawlite telegram offset-sync 145
 clawlite telegram offset-reset --yes
+clawlite discord status
+clawlite discord refresh
 clawlite provider recover
 clawlite supervisor recover --component heartbeat
 clawlite autonomy wake --kind proactive

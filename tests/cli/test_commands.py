@@ -3256,6 +3256,111 @@ def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monke
     )
 
 
+def test_cli_discord_status_uses_gateway_dashboard_state(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.9", "port": 8877, "auth": {"token": "gw-token-xyz"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {
+                "discord": {
+                    "available": True,
+                    "gateway_task_state": "running",
+                    "session_id": "sess-1",
+                    "hints": ["Discord gateway listener is not running; refresh transport to reconnect the gateway loop."],
+                }
+            }
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            captured["timeout"] = timeout
+            captured["headers"] = dict(headers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            captured["url"] = url
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "discord", "status"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["discord"]["session_id"] == "sess-1"
+    assert captured["url"] == "http://127.0.0.9:8877/api/dashboard/state"
+    assert captured["headers"] == {"Authorization": "Bearer gw-token-xyz"}
+
+
+def test_cli_discord_refresh_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "d-123"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, str, object]] = []
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.is_success = True
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "summary": {"gateway_restarted": True}}
+
+    class _FakeClient:
+        def __init__(self, *, timeout, headers):
+            del timeout, headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None):
+            calls.append(("POST", url, json))
+            return _FakeResponse()
+
+    monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
+
+    rc = main(["--config", str(config_path), "discord", "refresh"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["summary"]["gateway_restarted"] is True
+    assert calls[0] == ("POST", "http://127.0.0.1:8787/v1/control/channels/discord/refresh", {})
+
+
 def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

@@ -87,6 +87,7 @@ Recent progress:
 - Memory profile, pending suggestions, and quality state now surface in dashboard state, and operators can refresh suggestions or create snapshots from the control plane
 - Memory snapshot rollback is now available from the control plane/dashboard with explicit confirmation
 - Discord gateway session/reconnect state now has dedicated dashboard/operator visibility plus a live refresh action
+- Discord transport refresh is now also accessible from the CLI
 
 Exit criteria:
 

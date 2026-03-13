@@ -33,6 +33,8 @@ from clawlite.cli.ops import pairing_approve
 from clawlite.cli.ops import pairing_list
 from clawlite.cli.ops import pairing_reject
 from clawlite.cli.ops import pairing_revoke
+from clawlite.cli.ops import discord_refresh
+from clawlite.cli.ops import discord_status
 from clawlite.cli.ops import telegram_offset_commit
 from clawlite.cli.ops import telegram_offset_reset
 from clawlite.cli.ops import telegram_offset_sync
@@ -541,6 +543,30 @@ def cmd_pairing_revoke(args: argparse.Namespace) -> int:
         cfg,
         channel=str(args.channel or ""),
         entry=str(args.entry or ""),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_discord_status(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = discord_status(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_discord_refresh(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    payload = discord_refresh(
+        cfg,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
     )
     _print_json(payload)
     return 0 if payload.get("ok", False) else 2
@@ -1333,6 +1359,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_pairing_revoke.add_argument("channel")
     p_pairing_revoke.add_argument("entry")
     p_pairing_revoke.set_defaults(handler=cmd_pairing_revoke)
+
+    p_discord = sub.add_parser("discord", help="Discord operator control commands")
+    discord_sub = p_discord.add_subparsers(dest="discord_command", required=True)
+
+    p_discord_status = discord_sub.add_parser("status", help="Fetch Discord runtime status from the gateway")
+    p_discord_status.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_discord_status.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_discord_status.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_discord_status.set_defaults(handler=cmd_discord_status)
+
+    p_discord_refresh = discord_sub.add_parser("refresh", help="Refresh Discord transport state via the gateway")
+    p_discord_refresh.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_discord_refresh.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_discord_refresh.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_discord_refresh.set_defaults(handler=cmd_discord_refresh)
 
     p_telegram = sub.add_parser("telegram", help="Telegram operator control commands")
     telegram_sub = p_telegram.add_subparsers(dest="telegram_command", required=True)
