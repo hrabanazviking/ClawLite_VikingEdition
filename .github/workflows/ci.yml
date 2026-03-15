@@ -41,7 +41,7 @@ jobs:
           else
             pip install -e .
           fi
-          pip install pytest pytest-anyio httpx "fastapi[all]" uvicorn questionary rich
+          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn questionary rich
 
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
@@ -106,7 +106,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e .
-          pip install pytest pytest-anyio httpx "fastapi[all]" uvicorn questionary rich
+          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn questionary rich
 
       - name: Run autonomy contract tests
         run: python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py
