@@ -8,10 +8,13 @@ from clawlite.workspace.loader import WorkspaceLoader
 
 def test_workspace_bootstrap_renders_placeholders(tmp_path: Path) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
-    created = loader.bootstrap(variables={"assistant_name": "Atlas", "user_name": "Eder"})
+    created = loader.bootstrap(
+        variables={"assistant_name": "Atlas", "user_name": "Eder"}
+    )
     assert created
     identity = (tmp_path / "ws" / "IDENTITY.md").read_text(encoding="utf-8")
-    assert "Atlas" in identity
+    assert "## Name" in identity
+    assert "self-hosted autonomous AI agent" in identity
     profile = (tmp_path / "ws" / "USER.md").read_text(encoding="utf-8")
     assert "Eder" in profile
 
@@ -78,7 +81,10 @@ def test_workspace_bootstrap_status_and_state_persistence(tmp_path: Path) -> Non
     assert initial["last_status"] == ""
     assert initial["run_count"] == 0
 
-    assert loader.record_bootstrap_result(status="completed", session_id="cli:bootstrap") is True
+    assert (
+        loader.record_bootstrap_result(status="completed", session_id="cli:bootstrap")
+        is True
+    )
     assert loader.complete_bootstrap() is True
 
     final = loader.bootstrap_status()
@@ -89,28 +95,42 @@ def test_workspace_bootstrap_status_and_state_persistence(tmp_path: Path) -> Non
     assert final["last_session_id"] == "cli:bootstrap"
     assert final["completed_at"]
 
-    state_payload = json.loads((tmp_path / "ws" / "memory" / "bootstrap-state.json").read_text(encoding="utf-8"))
+    state_payload = json.loads(
+        (tmp_path / "ws" / "memory" / "bootstrap-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert state_payload["last_status"] == "completed"
     assert state_payload["run_count"] == 1
 
-    onboarding_payload = json.loads((tmp_path / "ws" / "memory" / "onboarding-state.json").read_text(encoding="utf-8"))
+    onboarding_payload = json.loads(
+        (tmp_path / "ws" / "memory" / "onboarding-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert onboarding_payload["bootstrap_seeded_at"]
     assert onboarding_payload["onboarding_completed_at"]
 
 
-def test_workspace_bootstrap_not_recreated_after_completed_state(tmp_path: Path) -> None:
+def test_workspace_bootstrap_not_recreated_after_completed_state(
+    tmp_path: Path,
+) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
     loader.bootstrap()
     assert (tmp_path / "ws" / "BOOTSTRAP.md").exists()
 
-    assert loader.record_bootstrap_result(status="completed", session_id="cli:1") is True
+    assert (
+        loader.record_bootstrap_result(status="completed", session_id="cli:1") is True
+    )
     assert loader.complete_bootstrap() is True
 
     loader.sync_templates(update_existing=False)
     assert not (tmp_path / "ws" / "BOOTSTRAP.md").exists()
 
 
-def test_workspace_onboarding_status_marks_legacy_workspace_complete(tmp_path: Path) -> None:
+def test_workspace_onboarding_status_marks_legacy_workspace_complete(
+    tmp_path: Path,
+) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
     loader.bootstrap()
 
@@ -128,7 +148,9 @@ def test_workspace_onboarding_status_marks_legacy_workspace_complete(tmp_path: P
     assert not bootstrap_path.exists()
 
 
-def test_workspace_runtime_health_repairs_empty_and_corrupt_core_docs(tmp_path: Path) -> None:
+def test_workspace_runtime_health_repairs_empty_and_corrupt_core_docs(
+    tmp_path: Path,
+) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
     loader.bootstrap()
 
@@ -151,7 +173,9 @@ def test_workspace_runtime_health_repairs_empty_and_corrupt_core_docs(tmp_path: 
     assert "Preferences:" in user_path.read_text(encoding="utf-8")
 
 
-def test_workspace_system_context_auto_repairs_missing_runtime_docs(tmp_path: Path) -> None:
+def test_workspace_system_context_auto_repairs_missing_runtime_docs(
+    tmp_path: Path,
+) -> None:
     loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
     loader.bootstrap()
 

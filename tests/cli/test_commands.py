@@ -54,10 +54,13 @@ def test_cli_onboard_generates_workspace_files(tmp_path: Path) -> None:
     assert rc == 0
     assert (tmp_path / "workspace" / "IDENTITY.md").exists()
     content = (tmp_path / "workspace" / "IDENTITY.md").read_text(encoding="utf-8")
-    assert "Atlas" in content
+    assert "## Name" in content
+    assert "self-hosted autonomous AI agent" in content
 
 
-def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_onboard_wizard_mode_routes_to_runner(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -82,7 +85,10 @@ def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkey
             "ok": True,
             "mode": "wizard",
             "flow": flow,
-            "final": {"gateway_url": "http://127.0.0.1:8787", "gateway_token": "tok-test-123"},
+            "final": {
+                "gateway_url": "http://127.0.0.1:8787",
+                "gateway_token": "tok-test-123",
+            },
         }
 
     monkeypatch.setattr("clawlite.cli.commands.run_onboarding_wizard", _fake_wizard)
@@ -107,7 +113,9 @@ def test_cli_onboard_wizard_mode_routes_to_runner(tmp_path: Path, capsys, monkey
     assert payload["flow"] == "quickstart"
 
 
-def test_cli_configure_routes_flow_override_to_wizard(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_configure_routes_flow_override_to_wizard(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -131,17 +139,22 @@ def test_cli_configure_routes_flow_override_to_wizard(tmp_path: Path, capsys, mo
             "ok": True,
             "mode": "wizard",
             "flow": flow,
-            "final": {"gateway_url": "http://127.0.0.1:8787", "gateway_token": "tok-test-123"},
+            "final": {
+                "gateway_url": "http://127.0.0.1:8787",
+                "gateway_token": "tok-test-123",
+            },
         }
 
     monkeypatch.setattr("clawlite.cli.commands.run_onboarding_wizard", _fake_wizard)
-    rc = main([
-        "--config",
-        str(config_path),
-        "configure",
-        "--flow",
-        "advanced",
-    ])
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "configure",
+            "--flow",
+            "advanced",
+        ]
+    )
 
     assert rc == 0
     assert called["flow"] == "advanced"
@@ -252,8 +265,13 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
                 "workspace_path": str(workspace_path),
                 "state_path": str(state_path),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "agents": {"defaults": {"memory_window": 17, "session_retention_messages": 77}},
-                "channels": {"telegram": {"enabled": True}, "discord": {"enabled": False}},
+                "agents": {
+                    "defaults": {"memory_window": 17, "session_retention_messages": 77}
+                },
+                "channels": {
+                    "telegram": {"enabled": True},
+                    "discord": {"enabled": False},
+                },
                 "scheduler": {"heartbeat_interval_seconds": 1234},
             }
         ),
@@ -280,7 +298,9 @@ def test_cli_status_and_version(tmp_path: Path, capsys) -> None:
     assert ver_out
 
 
-def test_cli_dashboard_no_open_returns_tokenized_handoff_and_bootstrap_state(tmp_path: Path, capsys) -> None:
+def test_cli_dashboard_no_open_returns_tokenized_handoff_and_bootstrap_state(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     workspace_path = tmp_path / "workspace"
     WorkspaceLoader(workspace_path=workspace_path).bootstrap()
@@ -303,7 +323,9 @@ def test_cli_dashboard_no_open_returns_tokenized_handoff_and_bootstrap_state(tmp
     assert payload["open_attempted"] is False
     assert payload["opened"] is False
     assert payload["gateway_url"] == "http://127.0.0.1:8787"
-    assert payload["dashboard_url_with_token"].startswith("http://127.0.0.1:8787#token=")
+    assert payload["dashboard_url_with_token"].startswith(
+        "http://127.0.0.1:8787#token="
+    )
     assert payload["bootstrap_pending"] is True
     assert payload["recommended_first_message"] == "Wake up, my friend!"
     assert payload["hatch_session_id"] == "hatch:operator"
@@ -315,7 +337,9 @@ def test_cli_dashboard_no_open_returns_tokenized_handoff_and_bootstrap_state(tmp
     assert saved["gateway"]["auth"]["token"]
 
 
-def test_cli_dashboard_opens_browser_when_allowed(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_dashboard_opens_browser_when_allowed(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -348,7 +372,9 @@ def test_cli_dashboard_opens_browser_when_allowed(tmp_path: Path, capsys, monkey
     assert opened["url"].startswith("http://127.0.0.1:8787#token=")
 
 
-def test_cli_hatch_skips_when_bootstrap_not_pending(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_hatch_skips_when_bootstrap_not_pending(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -362,7 +388,9 @@ def test_cli_hatch_skips_when_bootstrap_not_pending(tmp_path: Path, capsys, monk
     )
 
     def _boom(_config):
-        raise AssertionError("build_runtime should not be called when bootstrap is not pending")
+        raise AssertionError(
+            "build_runtime should not be called when bootstrap is not pending"
+        )
 
     monkeypatch.setattr("clawlite.gateway.server.build_runtime", _boom)
     rc = main(["--config", str(config_path), "hatch"])
@@ -373,7 +401,9 @@ def test_cli_hatch_skips_when_bootstrap_not_pending(tmp_path: Path, capsys, monk
     assert payload["reason"] == "not_pending"
 
 
-def test_cli_hatch_completes_pending_bootstrap(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_hatch_completes_pending_bootstrap(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     workspace_path = tmp_path / "workspace"
     loader = WorkspaceLoader(workspace_path=workspace_path)
     loader.bootstrap()
@@ -398,7 +428,9 @@ def test_cli_hatch_completes_pending_bootstrap(tmp_path: Path, capsys, monkeypat
             return types.SimpleNamespace(text="ready", model="openai/gpt-4o-mini")
 
     runtime = types.SimpleNamespace(engine=_Engine(), workspace=loader)
-    monkeypatch.setattr("clawlite.gateway.server.build_runtime", lambda _config: runtime)
+    monkeypatch.setattr(
+        "clawlite.gateway.server.build_runtime", lambda _config: runtime
+    )
 
     rc = main(["--config", str(config_path), "hatch"])
     assert rc == 0
@@ -433,7 +465,9 @@ def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     )
 
     store = TelegramPairingStore(token="123:abc", state_path=str(pairing_state_path))
-    request, created = store.issue_request(chat_id="55", user_id="321", username="guest", first_name="Guest")
+    request, created = store.issue_request(
+        chat_id="55", user_id="321", username="guest", first_name="Guest"
+    )
     assert created is True
     code = str(request["code"])
 
@@ -446,7 +480,9 @@ def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     assert payload_list["pending"][0]["code"] == code
     assert payload_list["pending"][0]["user_id"] == "321"
 
-    rc_approve = main(["--config", str(config_path), "pairing", "approve", "telegram", code])
+    rc_approve = main(
+        ["--config", str(config_path), "pairing", "approve", "telegram", code]
+    )
     assert rc_approve == 0
     payload_approve = json.loads(capsys.readouterr().out)
     assert payload_approve["ok"] is True
@@ -457,11 +493,15 @@ def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     assert "guest" in payload_approve["approved_entries"]
     assert "@guest" in payload_approve["approved_entries"]
 
-    request2, created2 = store.issue_request(chat_id="56", user_id="654", username="guest2", first_name="Guest2")
+    request2, created2 = store.issue_request(
+        chat_id="56", user_id="654", username="guest2", first_name="Guest2"
+    )
     assert created2 is True
     code2 = str(request2["code"])
 
-    rc_reject = main(["--config", str(config_path), "pairing", "reject", "telegram", code2])
+    rc_reject = main(
+        ["--config", str(config_path), "pairing", "reject", "telegram", code2]
+    )
     assert rc_reject == 0
     payload_reject = json.loads(capsys.readouterr().out)
     assert payload_reject["ok"] is True
@@ -469,7 +509,9 @@ def test_cli_pairing_list_and_approve(tmp_path: Path, capsys) -> None:
     assert payload_reject["code"] == code2
     assert payload_reject["request"]["user_id"] == "654"
 
-    rc_revoke = main(["--config", str(config_path), "pairing", "revoke", "telegram", "@guest"])
+    rc_revoke = main(
+        ["--config", str(config_path), "pairing", "revoke", "telegram", "@guest"]
+    )
     assert rc_revoke == 0
     payload_revoke = json.loads(capsys.readouterr().out)
     assert payload_revoke["ok"] is True
@@ -507,7 +549,9 @@ def test_cli_gateway_alias_parses(tmp_path: Path, monkeypatch) -> None:
     assert called["ok"] is True
 
 
-def test_cli_onboard_creates_missing_default_config_and_prints_notice(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_cli_onboard_creates_missing_default_config_and_prints_notice(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     default_config = tmp_path / ".clawlite" / "config.json"
     monkeypatch.setattr("clawlite.cli.commands.DEFAULT_CONFIG_PATH", default_config)
     monkeypatch.setattr("clawlite.config.loader.DEFAULT_CONFIG_PATH", default_config)
@@ -523,7 +567,9 @@ def test_cli_onboard_creates_missing_default_config_and_prints_notice(tmp_path: 
     assert (tmp_path / "workspace" / "IDENTITY.md").exists()
 
 
-def test_cli_start_creates_missing_default_config_and_prints_notice(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_cli_start_creates_missing_default_config_and_prints_notice(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     default_config = tmp_path / ".clawlite" / "config.json"
     monkeypatch.setattr("clawlite.cli.commands.DEFAULT_CONFIG_PATH", default_config)
     monkeypatch.setattr("clawlite.config.loader.DEFAULT_CONFIG_PATH", default_config)
@@ -549,14 +595,20 @@ def test_cli_start_creates_missing_default_config_and_prints_notice(tmp_path: Pa
     assert "Config criado em ~/.clawlite/config.json." in out
 
 
-def test_cli_start_uses_custom_config_values_for_runtime_and_port(tmp_path: Path, monkeypatch) -> None:
+def test_cli_start_uses_custom_config_values_for_runtime_and_port(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "custom.json"
     config_path.write_text(
         json.dumps(
             {
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
-                "gateway": {"host": "127.0.0.1", "port": 19999, "auth": {"mode": "required", "token": "tok-123456"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 19999,
+                    "auth": {"mode": "required", "token": "tok-123456"},
+                },
                 "provider": {"model": "openai/gpt-4o-mini"},
             }
         ),
@@ -613,7 +665,9 @@ def test_cli_help_version_status_do_not_import_gateway(tmp_path: Path, capsys) -
     assert "clawlite.gateway.server" not in sys.modules
 
 
-def test_cli_validate_provider_and_channels(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_provider_and_channels(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
@@ -655,7 +709,9 @@ def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> 
                 "workspace_path": str(workspace_path),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "gemini/gemini-2.5-flash"},
-                "agents": {"defaults": {"memory_window": 29, "session_retention_messages": 111}},
+                "agents": {
+                    "defaults": {"memory_window": 29, "session_retention_messages": 111}
+                },
             }
         ),
         encoding="utf-8",
@@ -686,7 +742,9 @@ def test_cli_validate_onboarding_fix_and_diagnostics(tmp_path: Path, capsys) -> 
     assert "validation" not in diagnostics["local"]
 
 
-def test_cli_non_runtime_validate_and_diagnostics_do_not_import_gateway(tmp_path: Path, capsys) -> None:
+def test_cli_non_runtime_validate_and_diagnostics_do_not_import_gateway(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -754,7 +812,9 @@ def test_cli_validate_config_invalid_key_returns_rc2(tmp_path: Path, capsys) -> 
     assert "invalid config keys" in payload["error"]
 
 
-def test_cli_validate_config_does_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_validate_config_does_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -774,7 +834,9 @@ def test_cli_validate_config_does_not_import_gateway_runtime(tmp_path: Path, cap
     capsys.readouterr()
 
 
-def test_cli_validate_preflight_local_success(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_preflight_local_success(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
     monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
@@ -810,7 +872,9 @@ def test_cli_validate_preflight_local_success(tmp_path: Path, capsys, monkeypatc
     assert payload["telegram_live_probe"] == {"enabled": False, "ok": True}
 
 
-def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_preflight_optional_probes_success(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
 
     workspace_path = tmp_path / "workspace"
@@ -905,14 +969,19 @@ def test_cli_validate_preflight_optional_probes_success(tmp_path: Path, capsys, 
     assert payload["provider_live_probe"]["transport"] == "openai_compatible"
     assert payload["provider_live_probe"]["probe_method"] == "GET"
     assert payload["provider_live_probe"]["recommended_model"] == "openai/gpt-4o-mini"
-    assert payload["provider_live_probe"]["recommended_models"] == ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
+    assert payload["provider_live_probe"]["recommended_models"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-mini",
+    ]
     assert "billing" in payload["provider_live_probe"]["onboarding_hint"].lower()
     assert payload["provider_live_probe"]["hints"] == ["Credenciais validas."]
     assert payload["telegram_live_probe"]["enabled"] is True
     assert payload["telegram_live_probe"]["ok"] is True
 
 
-def test_cli_validate_preflight_gateway_failure_returns_rc2(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_preflight_gateway_failure_returns_rc2(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
 
     workspace_path = tmp_path / "workspace"
@@ -963,7 +1032,9 @@ def test_cli_validate_preflight_gateway_failure_returns_rc2(tmp_path: Path, caps
     assert payload["gateway_probe"]["endpoints"]["/v1/status"]["status_code"] == 500
 
 
-def test_cli_validate_preflight_does_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_preflight_does_not_import_gateway_runtime(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-preflight-1234")
 
     workspace_path = tmp_path / "workspace"
@@ -991,7 +1062,9 @@ def test_cli_validate_preflight_does_not_import_gateway_runtime(tmp_path: Path, 
     capsys.readouterr()
 
 
-def test_cli_validate_channels_slack_bot_only_is_ok_with_warning(tmp_path: Path, capsys) -> None:
+def test_cli_validate_channels_slack_bot_only_is_ok_with_warning(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1119,7 +1192,9 @@ def test_cli_memory_version_lists_snapshot_ids_desc(tmp_path: Path, capsys) -> N
     assert payload["versions"] == sorted(payload["versions"], reverse=True)
 
 
-def test_cli_memory_doctor_repair_handles_corrupt_history_line(tmp_path: Path, capsys) -> None:
+def test_cli_memory_doctor_repair_handles_corrupt_history_line(
+    tmp_path: Path, capsys
+) -> None:
     state_path = tmp_path / "state"
     state_path.mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / "config.json"
@@ -1137,9 +1212,23 @@ def test_cli_memory_doctor_repair_handles_corrupt_history_line(tmp_path: Path, c
     history_path.write_text(
         "\n".join(
             [
-                json.dumps({"id": "a1", "text": "remember alpha", "source": "seed", "created_at": "2026-01-01T00:00:00+00:00"}),
+                json.dumps(
+                    {
+                        "id": "a1",
+                        "text": "remember alpha",
+                        "source": "seed",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ),
                 "{broken-json",
-                json.dumps({"id": "b2", "text": "remember beta", "source": "seed", "created_at": "2026-01-02T00:00:00+00:00"}),
+                json.dumps(
+                    {
+                        "id": "b2",
+                        "text": "remember beta",
+                        "source": "seed",
+                        "created_at": "2026-01-02T00:00:00+00:00",
+                    }
+                ),
             ]
         )
         + "\n",
@@ -1154,12 +1243,18 @@ def test_cli_memory_doctor_repair_handles_corrupt_history_line(tmp_path: Path, c
     assert payload["diagnostics"]["history_read_corrupt_lines"] >= 1
     assert payload["diagnostics"]["history_repaired_files"] >= 1
 
-    repaired_lines = [line for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    repaired_lines = [
+        line
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert len(repaired_lines) == 2
     assert all("broken-json" not in line for line in repaired_lines)
 
 
-def test_cli_memory_doctor_does_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_memory_doctor_does_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1202,7 +1297,9 @@ def test_cli_memory_eval_outputs_json_summary(tmp_path: Path, capsys) -> None:
     assert len(payload["details"]) == payload["cases"]
 
 
-def test_cli_memory_eval_does_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_memory_eval_does_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1222,7 +1319,9 @@ def test_cli_memory_eval_does_not_import_gateway_runtime(tmp_path: Path, capsys)
     capsys.readouterr()
 
 
-def test_cli_memory_quality_generates_and_persists_report(tmp_path: Path, capsys) -> None:
+def test_cli_memory_quality_generates_and_persists_report(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1241,8 +1340,18 @@ def test_cli_memory_quality_generates_and_persists_report(tmp_path: Path, capsys
     assert payload["ok"] is True
     report = payload["report"]
     assert 0 <= int(report["score"]) <= 100
-    assert set(report["retrieval"].keys()) == {"attempts", "hits", "rewrites", "hit_rate"}
-    assert set(report["turn_stability"].keys()) == {"successes", "errors", "success_rate", "error_rate"}
+    assert set(report["retrieval"].keys()) == {
+        "attempts",
+        "hits",
+        "rewrites",
+        "hit_rate",
+    }
+    assert set(report["turn_stability"].keys()) == {
+        "successes",
+        "errors",
+        "success_rate",
+        "error_rate",
+    }
     assert "reasoning_layers" in report
     reasoning_layers = report["reasoning_layers"]
     assert set(reasoning_layers.keys()) == {
@@ -1254,12 +1363,21 @@ def test_cli_memory_quality_generates_and_persists_report(tmp_path: Path, capsys
         "confidence",
     }
     assert isinstance(reasoning_layers["distribution"], dict)
-    assert set(reasoning_layers["distribution"].keys()) == {"fact", "hypothesis", "decision", "outcome"}
+    assert set(reasoning_layers["distribution"].keys()) == {
+        "fact",
+        "hypothesis",
+        "decision",
+        "outcome",
+    }
     for layer_payload in reasoning_layers["distribution"].values():
         assert isinstance(layer_payload, dict)
         assert set(layer_payload.keys()) == {"count", "ratio"}
     assert isinstance(reasoning_layers["confidence"], dict)
-    assert set(reasoning_layers["confidence"].keys()) == {"average", "minimum", "maximum"}
+    assert set(reasoning_layers["confidence"].keys()) == {
+        "average",
+        "minimum",
+        "maximum",
+    }
     assert "drift" in report
     assert isinstance(report["recommendations"], list)
     assert payload["state"]["current"]["score"] == report["score"]
@@ -1268,7 +1386,10 @@ def test_cli_memory_quality_generates_and_persists_report(tmp_path: Path, capsys
     assert isinstance(payload["analysis"]["reasoning_layers"], dict)
     assert isinstance(payload["analysis"]["confidence"], dict)
     assert "quality_highlights" in payload["analysis"]
-    assert payload["analysis"]["quality_highlights"]["total_records"] == reasoning_layers["total_records"]
+    assert (
+        payload["analysis"]["quality_highlights"]["total_records"]
+        == reasoning_layers["total_records"]
+    )
 
 
 def test_cli_memory_profile_returns_schema_fields(tmp_path: Path, capsys) -> None:
@@ -1294,7 +1415,9 @@ def test_cli_memory_profile_returns_schema_fields(tmp_path: Path, capsys) -> Non
     assert payload["profile"]["response_length_preference"]
 
 
-def test_cli_memory_suggest_returns_list_without_crashing_on_empty(tmp_path: Path, capsys) -> None:
+def test_cli_memory_suggest_returns_list_without_crashing_on_empty(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1315,7 +1438,9 @@ def test_cli_memory_suggest_returns_list_without_crashing_on_empty(tmp_path: Pat
     assert payload["count"] == len(payload["suggestions"])
 
 
-def test_cli_memory_snapshot_and_rollback_restores_previous_state(tmp_path: Path, capsys) -> None:
+def test_cli_memory_snapshot_and_rollback_restores_previous_state(
+    tmp_path: Path, capsys
+) -> None:
     state_path = tmp_path / "state"
     state_path.mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / "config.json"
@@ -1344,19 +1469,27 @@ def test_cli_memory_snapshot_and_rollback_restores_previous_state(tmp_path: Path
     }
     history_path.write_text(json.dumps(row_a) + "\n", encoding="utf-8")
 
-    rc_snapshot = main(["--config", str(config_path), "memory", "snapshot", "--tag", "baseline"])
+    rc_snapshot = main(
+        ["--config", str(config_path), "memory", "snapshot", "--tag", "baseline"]
+    )
     assert rc_snapshot == 0
     snapshot_payload = json.loads(capsys.readouterr().out)
     version_id = snapshot_payload["version_id"]
     assert version_id
 
-    history_path.write_text("\n".join([json.dumps(row_a), json.dumps(row_b)]) + "\n", encoding="utf-8")
+    history_path.write_text(
+        "\n".join([json.dumps(row_a), json.dumps(row_b)]) + "\n", encoding="utf-8"
+    )
 
     rc_rollback = main(["--config", str(config_path), "memory", "rollback", version_id])
     assert rc_rollback == 0
     rollback_payload = json.loads(capsys.readouterr().out)
     assert rollback_payload["ok"] is True
-    restored = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    restored = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     restored_ids = {item["id"] for item in restored}
     assert "row-a" in restored_ids
     assert "row-b" not in restored_ids
@@ -1413,7 +1546,9 @@ def test_cli_memory_export_and_import_roundtrip(tmp_path: Path, capsys) -> None:
     )
 
     export_path = tmp_path / "memory-export.json"
-    rc_export = main(["--config", str(config_path), "memory", "export", "--out", str(export_path)])
+    rc_export = main(
+        ["--config", str(config_path), "memory", "export", "--out", str(export_path)]
+    )
     assert rc_export == 0
     export_payload = json.loads(capsys.readouterr().out)
     assert export_payload["ok"] is True
@@ -1445,16 +1580,24 @@ def test_cli_memory_export_and_import_roundtrip(tmp_path: Path, capsys) -> None:
         encoding="utf-8",
     )
 
-    rc_import = main(["--config", str(config_path), "memory", "import", str(export_path)])
+    rc_import = main(
+        ["--config", str(config_path), "memory", "import", str(export_path)]
+    )
     assert rc_import == 0
     import_payload = json.loads(capsys.readouterr().out)
     assert import_payload["ok"] is True
-    rows_after_import = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows_after_import = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     ids = {row["id"] for row in rows_after_import}
     assert ids == {"exp-a"}
 
 
-def test_cli_memory_branching_commands_return_expected_shapes(tmp_path: Path, capsys) -> None:
+def test_cli_memory_branching_commands_return_expected_shapes(
+    tmp_path: Path, capsys
+) -> None:
     state_path = tmp_path / "state"
     state_path.mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / "config.json"
@@ -1483,7 +1626,9 @@ def test_cli_memory_branching_commands_return_expected_shapes(tmp_path: Path, ca
         encoding="utf-8",
     )
 
-    assert main(["--config", str(config_path), "memory", "snapshot", "--tag", "seed"]) == 0
+    assert (
+        main(["--config", str(config_path), "memory", "snapshot", "--tag", "seed"]) == 0
+    )
     capsys.readouterr()
 
     rc_branches = main(["--config", str(config_path), "memory", "branches"])
@@ -1493,7 +1638,9 @@ def test_cli_memory_branching_commands_return_expected_shapes(tmp_path: Path, ca
     assert branches_payload["current"] == "main"
     assert isinstance(branches_payload["branches"], dict)
 
-    rc_branch = main(["--config", str(config_path), "memory", "branch", "feature-x", "--checkout"])
+    rc_branch = main(
+        ["--config", str(config_path), "memory", "branch", "feature-x", "--checkout"]
+    )
     assert rc_branch == 0
     branch_payload = json.loads(capsys.readouterr().out)
     assert branch_payload["ok"] is True
@@ -1531,13 +1678,26 @@ def test_cli_memory_branching_commands_return_expected_shapes(tmp_path: Path, ca
     assert "target_head_before" in merge_payload
     assert "target_head_after" in merge_payload
 
-    rc_share = main(["--config", str(config_path), "memory", "share-optin", "--user", "42", "--enabled", "true"])
+    rc_share = main(
+        [
+            "--config",
+            str(config_path),
+            "memory",
+            "share-optin",
+            "--user",
+            "42",
+            "--enabled",
+            "true",
+        ]
+    )
     assert rc_share == 0
     share_payload = json.loads(capsys.readouterr().out)
     assert share_payload == {"ok": True, "user_id": "42", "enabled": True}
 
 
-def test_cli_memory_branching_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_memory_branching_commands_do_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1557,7 +1717,18 @@ def test_cli_memory_branching_commands_do_not_import_gateway_runtime(tmp_path: P
     capsys.readouterr()
 
     sys.modules.pop("clawlite.gateway.server", None)
-    rc_share = main(["--config", str(config_path), "memory", "share-optin", "--user", "99", "--enabled", "false"])
+    rc_share = main(
+        [
+            "--config",
+            str(config_path),
+            "memory",
+            "share-optin",
+            "--user",
+            "99",
+            "--enabled",
+            "false",
+        ]
+    )
     assert rc_share == 0
     assert "clawlite.gateway.server" not in sys.modules
 
@@ -1584,7 +1755,9 @@ def test_cli_memory_branches_empty_returns_main_branch(tmp_path: Path, capsys) -
     assert payload["branches"]["main"]["head"] == ""
 
 
-def test_cli_memory_branch_create_returns_branch_metadata(tmp_path: Path, capsys) -> None:
+def test_cli_memory_branch_create_returns_branch_metadata(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1620,7 +1793,10 @@ def test_cli_memory_checkout_switches_current_branch(tmp_path: Path, capsys) -> 
         encoding="utf-8",
     )
 
-    assert main(["--config", str(config_path), "memory", "branch", "feature-checkout"]) == 0
+    assert (
+        main(["--config", str(config_path), "memory", "branch", "feature-checkout"])
+        == 0
+    )
     capsys.readouterr()
 
     rc = main(["--config", str(config_path), "memory", "checkout", "feature-checkout"])
@@ -1636,7 +1812,9 @@ def test_cli_memory_checkout_switches_current_branch(tmp_path: Path, capsys) -> 
     assert branches_payload["current"] == "feature-checkout"
 
 
-def test_cli_memory_merge_returns_import_metadata(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_memory_merge_returns_import_metadata(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1688,7 +1866,9 @@ def test_cli_memory_merge_returns_import_metadata(tmp_path: Path, capsys, monkey
     assert payload["target_head_after"]
 
 
-def test_cli_memory_share_optin_enable_returns_enabled_true(tmp_path: Path, capsys) -> None:
+def test_cli_memory_share_optin_enable_returns_enabled_true(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1701,13 +1881,26 @@ def test_cli_memory_share_optin_enable_returns_enabled_true(tmp_path: Path, caps
         encoding="utf-8",
     )
 
-    rc = main(["--config", str(config_path), "memory", "share-optin", "--user", "42", "--enabled", "true"])
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "memory",
+            "share-optin",
+            "--user",
+            "42",
+            "--enabled",
+            "true",
+        ]
+    )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"ok": True, "user_id": "42", "enabled": True}
 
 
-def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_new_memory_commands_do_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1727,7 +1920,9 @@ def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, c
     capsys.readouterr()
 
     sys.modules.pop("clawlite.gateway.server", None)
-    rc_suggest = main(["--config", str(config_path), "memory", "suggest", "--no-refresh"])
+    rc_suggest = main(
+        ["--config", str(config_path), "memory", "suggest", "--no-refresh"]
+    )
     assert rc_suggest == 0
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()
@@ -1740,12 +1935,16 @@ def test_cli_new_memory_commands_do_not_import_gateway_runtime(tmp_path: Path, c
 
     export_path = tmp_path / "portable.json"
     sys.modules.pop("clawlite.gateway.server", None)
-    rc_export = main(["--config", str(config_path), "memory", "export", "--out", str(export_path)])
+    rc_export = main(
+        ["--config", str(config_path), "memory", "export", "--out", str(export_path)]
+    )
     assert rc_export == 0
     assert "clawlite.gateway.server" not in sys.modules
 
 
-def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_login_status_logout_openai_codex(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(tmp_path / "missing-auth.json"))
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -1778,7 +1977,9 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
     assert login_payload["ok"] is True
     assert login_payload["configured"] is True
 
-    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    rc_status = main(
+        ["--config", str(config_path), "provider", "status", "openai-codex"]
+    )
     assert rc_status == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["configured"] is True
@@ -1789,11 +1990,16 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
     assert status_payload["base_url"] == "https://chatgpt.com/backend-api"
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["auth"]["providers"]["openai_codex"]["access_token"] == "codex-token-1234"
+    assert (
+        persisted["auth"]["providers"]["openai_codex"]["access_token"]
+        == "codex-token-1234"
+    )
     assert persisted["auth"]["providers"]["openai_codex"]["account_id"] == "org-123"
     assert persisted["provider"]["model"] == "openai-codex/gpt-5.3-codex"
 
-    rc_logout = main(["--config", str(config_path), "provider", "logout", "openai-codex"])
+    rc_logout = main(
+        ["--config", str(config_path), "provider", "logout", "openai-codex"]
+    )
     assert rc_logout == 0
     logout_payload = json.loads(capsys.readouterr().out)
     assert logout_payload["configured"] is False
@@ -1803,7 +2009,9 @@ def test_cli_provider_login_status_logout_openai_codex(tmp_path: Path, capsys, m
     assert persisted_after["auth"]["providers"]["openai_codex"]["account_id"] == ""
 
 
-def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_status_openai_api_key_provider_success(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-1234")
     monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
@@ -1840,7 +2048,9 @@ def test_cli_provider_status_openai_api_key_provider_success(tmp_path: Path, cap
     assert any("live provider probe" in row.lower() for row in payload["hints"])
 
 
-def test_cli_provider_login_openai_codex_keep_model_preserves_active_model(tmp_path: Path, capsys) -> None:
+def test_cli_provider_login_openai_codex_keep_model_preserves_active_model(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1875,7 +2085,9 @@ def test_cli_provider_login_openai_codex_keep_model_preserves_active_model(tmp_p
     assert persisted["provider"]["model"] == "openai/gpt-4o-mini"
 
 
-def test_cli_provider_login_openai_codex_rejects_conflicting_model_flags(tmp_path: Path, capsys) -> None:
+def test_cli_provider_login_openai_codex_rejects_conflicting_model_flags(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1908,7 +2120,9 @@ def test_cli_provider_login_openai_codex_rejects_conflicting_model_flags(tmp_pat
     assert payload["error"] == "invalid_model_selection_options"
 
 
-def test_cli_provider_status_minimax_reports_anthropic_family(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_status_minimax_reports_anthropic_family(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("MINIMAX_API_KEY", "mini-key-1234")
     monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
@@ -1920,7 +2134,9 @@ def test_cli_provider_status_minimax_reports_anthropic_family(tmp_path: Path, ca
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "minimax/MiniMax-M2.5"},
-                "providers": {"minimax": {"api_base": "https://api.minimax.io/anthropic"}},
+                "providers": {
+                    "minimax": {"api_base": "https://api.minimax.io/anthropic"}
+                },
             }
         ),
         encoding="utf-8",
@@ -1938,7 +2154,9 @@ def test_cli_provider_status_minimax_reports_anthropic_family(tmp_path: Path, ca
     assert "/anthropic" in payload["onboarding_hint"]
 
 
-def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: Path, monkeypatch) -> None:
+def test_provider_live_probe_vllm_network_error_returns_runtime_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1946,7 +2164,9 @@ def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: P
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "vllm/meta-llama/Llama-3.2-3B-Instruct"},
-                "agents": {"defaults": {"model": "vllm/meta-llama/Llama-3.2-3B-Instruct"}},
+                "agents": {
+                    "defaults": {"model": "vllm/meta-llama/Llama-3.2-3B-Instruct"}
+                },
                 "providers": {"vllm": {"api_base": "http://127.0.0.1:8000/v1"}},
             }
         ),
@@ -1980,7 +2200,9 @@ def test_provider_live_probe_vllm_network_error_returns_runtime_hint(tmp_path: P
     assert any("Start the vLLM server" in row for row in payload["hints"])
 
 
-def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path, monkeypatch) -> None:
+def test_provider_live_probe_openai_codex_uses_responses_backend(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1989,7 +2211,9 @@ def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path,
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai-codex/gpt-5.3-codex"},
                 "agents": {"defaults": {"model": "openai-codex/gpt-5.3-codex"}},
-                "auth": {"providers": {"openai_codex": {"access_token": "tok-codex-1234"}}},
+                "auth": {
+                    "providers": {"openai_codex": {"access_token": "tok-codex-1234"}}
+                },
             }
         ),
         encoding="utf-8",
@@ -2044,7 +2268,10 @@ def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path,
     assert captured["headers"]["Accept"] == "text/event-stream"
     assert captured["json"]["store"] is False
     assert captured["json"]["stream"] is True
-    assert captured["json"]["instructions"] == "You are a concise assistant. Reply briefly."
+    assert (
+        captured["json"]["instructions"]
+        == "You are a concise assistant. Reply briefly."
+    )
     assert captured["json"]["tools"] == []
     assert captured["json"]["tool_choice"] == "auto"
     assert captured["json"]["parallel_tool_calls"] is False
@@ -2058,7 +2285,9 @@ def test_provider_live_probe_openai_codex_uses_responses_backend(tmp_path: Path,
     ]
 
 
-def test_provider_live_probe_ollama_success_detects_missing_model(tmp_path: Path, monkeypatch) -> None:
+def test_provider_live_probe_ollama_success_detects_missing_model(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2074,7 +2303,14 @@ def test_provider_live_probe_ollama_success_detects_missing_model(tmp_path: Path
     )
 
     class _Response:
-        def __init__(self, status_code: int, payload: dict[str, object], *, is_success: bool = True, text: str = "") -> None:
+        def __init__(
+            self,
+            status_code: int,
+            payload: dict[str, object],
+            *,
+            is_success: bool = True,
+            text: str = "",
+        ) -> None:
             self.status_code = status_code
             self._payload = payload
             self.is_success = is_success
@@ -2118,7 +2354,9 @@ def test_provider_live_probe_ollama_success_detects_missing_model(tmp_path: Path
     assert any("ollama pull llama3.2" in row for row in payload["hints"])
 
 
-def test_provider_live_probe_openai_model_not_listed_returns_soft_warning(tmp_path: Path, monkeypatch) -> None:
+def test_provider_live_probe_openai_model_not_listed_returns_soft_warning(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-1234")
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -2167,10 +2405,15 @@ def test_provider_live_probe_openai_model_not_listed_returns_soft_warning(tmp_pa
     assert payload["model_check"]["checked"] is True
     assert payload["model_check"]["ok"] is False
     assert payload["model_check"]["detail"] == "model_not_listed"
-    assert any("did not appear in the provider's remote list" in row.lower() for row in payload["hints"])
+    assert any(
+        "did not appear in the provider's remote list" in row.lower()
+        for row in payload["hints"]
+    )
 
 
-def test_provider_live_probe_prefers_configured_vendor_transport_over_generic_model(tmp_path: Path, monkeypatch) -> None:
+def test_provider_live_probe_prefers_configured_vendor_transport_over_generic_model(
+    tmp_path: Path, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2183,7 +2426,12 @@ def test_provider_live_probe_prefers_configured_vendor_transport_over_generic_mo
                     "litellm_api_key": "mini-key",
                 },
                 "agents": {"defaults": {"model": "claude-3.5-sonnet"}},
-                "providers": {"minimax": {"api_base": "https://api.minimax.io/anthropic", "api_key": "mini-key"}},
+                "providers": {
+                    "minimax": {
+                        "api_base": "https://api.minimax.io/anthropic",
+                        "api_key": "mini-key",
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -2229,7 +2477,9 @@ def test_provider_live_probe_prefers_configured_vendor_transport_over_generic_mo
     assert payload["probe_method"] == "POST"
 
 
-def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_status_unsupported_provider_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2242,7 +2492,9 @@ def test_cli_provider_status_unsupported_provider_returns_rc2(tmp_path: Path, ca
         encoding="utf-8",
     )
 
-    rc_status = main(["--config", str(config_path), "provider", "status", "unknown-provider"])
+    rc_status = main(
+        ["--config", str(config_path), "provider", "status", "unknown-provider"]
+    )
     assert rc_status == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"ok": False, "error": "unsupported_provider:unknown-provider"}
@@ -2300,14 +2552,19 @@ def test_cli_provider_logout_unsupported_returns_rc2(tmp_path: Path, capsys) -> 
     assert payload == {"ok": False, "error": "unsupported_provider:unknown-provider"}
 
 
-def test_cli_provider_use_success_updates_config_and_returns_rc0(tmp_path: Path, capsys) -> None:
+def test_cli_provider_use_success_updates_config_and_returns_rc0(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
-                "provider": {"model": "gemini/gemini-2.5-flash", "fallback_model": "openai/gpt-4.1-mini"},
+                "provider": {
+                    "model": "gemini/gemini-2.5-flash",
+                    "fallback_model": "openai/gpt-4.1-mini",
+                },
                 "agents": {"defaults": {"model": "gemini/gemini-2.5-flash"}},
             }
         ),
@@ -2345,7 +2602,9 @@ def test_cli_provider_use_success_updates_config_and_returns_rc0(tmp_path: Path,
     assert persisted["provider"]["fallback_model"] == "openai/gpt-4o-mini"
 
 
-def test_cli_provider_use_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_use_unsupported_provider_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2375,7 +2634,9 @@ def test_cli_provider_use_unsupported_provider_returns_rc2(tmp_path: Path, capsy
     assert payload["error"] == "unsupported_provider:unknown-provider"
 
 
-def test_cli_provider_use_provider_model_mismatch_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_use_provider_model_mismatch_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2411,7 +2672,9 @@ def test_cli_provider_use_provider_model_mismatch_returns_rc2(tmp_path: Path, ca
     assert "google generative language" in payload["onboarding_hint"].lower()
 
 
-def test_cli_provider_use_fallback_model_mismatch_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_use_fallback_model_mismatch_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2449,7 +2712,9 @@ def test_cli_provider_use_fallback_model_mismatch_returns_rc2(tmp_path: Path, ca
     assert "billing" in payload["onboarding_hint"].lower()
 
 
-def test_cli_validate_provider_surfaces_guidance_fields(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_provider_surfaces_guidance_fields(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.setenv("MINIMAX_API_KEY", "mini-key-1234")
     monkeypatch.delenv("CLAWLITE_LITELLM_API_KEY", raising=False)
     monkeypatch.delenv("CLAWLITE_API_KEY", raising=False)
@@ -2461,7 +2726,9 @@ def test_cli_validate_provider_surfaces_guidance_fields(tmp_path: Path, capsys, 
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "minimax/MiniMax-M2.5"},
-                "providers": {"minimax": {"api_base": "https://api.minimax.io/anthropic"}},
+                "providers": {
+                    "minimax": {"api_base": "https://api.minimax.io/anthropic"}
+                },
             }
         ),
         encoding="utf-8",
@@ -2486,7 +2753,10 @@ def test_cli_provider_use_clear_fallback_clears_config(tmp_path: Path, capsys) -
             {
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
-                "provider": {"model": "openai/gpt-4.1-mini", "fallback_model": "openai/gpt-4o-mini"},
+                "provider": {
+                    "model": "openai/gpt-4.1-mini",
+                    "fallback_model": "openai/gpt-4o-mini",
+                },
                 "agents": {"defaults": {"model": "openai/gpt-4.1-mini"}},
             }
         ),
@@ -2514,7 +2784,9 @@ def test_cli_provider_use_clear_fallback_clears_config(tmp_path: Path, capsys) -
     assert persisted["provider"]["fallback_model"] == ""
 
 
-def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, capsys) -> None:
+def test_cli_provider_commands_do_not_import_gateway_runtime(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2528,7 +2800,9 @@ def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, cap
     )
 
     sys.modules.pop("clawlite.gateway.server", None)
-    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    rc_status = main(
+        ["--config", str(config_path), "provider", "status", "openai-codex"]
+    )
     assert rc_status in {0, 2}
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()
@@ -2566,7 +2840,9 @@ def test_cli_provider_commands_do_not_import_gateway_runtime(tmp_path: Path, cap
     assert "clawlite.gateway.server" not in sys.modules
 
 
-def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_missing(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_missing(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
         json.dumps(
@@ -2599,7 +2875,9 @@ def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_mis
         encoding="utf-8",
     )
 
-    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+    rc_status = main(
+        ["--config", str(config_path), "provider", "status", "openai-codex"]
+    )
     assert rc_status == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["configured"] is True
@@ -2608,14 +2886,19 @@ def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_mis
     assert payload["account_id_masked"]
 
 
-def test_cli_validate_provider_reports_local_runtime_failure(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_provider_reports_local_runtime_failure(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
-                "provider": {"model": "openai/llama3.2", "litellm_base_url": "http://127.0.0.1:11434"},
+                "provider": {
+                    "model": "openai/llama3.2",
+                    "litellm_base_url": "http://127.0.0.1:11434",
+                },
                 "providers": {
                     "openai": {
                         "api_base": "http://127.0.0.1:11434",
@@ -2643,17 +2926,25 @@ def test_cli_validate_provider_reports_local_runtime_failure(tmp_path: Path, cap
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert any(check.get("name") == "local_runtime" and check.get("status") == "error" for check in payload["checks"])
+    assert any(
+        check.get("name") == "local_runtime" and check.get("status") == "error"
+        for check in payload["checks"]
+    )
 
 
-def test_cli_validate_provider_accepts_local_runtime_without_api_key(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_provider_accepts_local_runtime_without_api_key(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
-                "provider": {"model": "openai/llama3.2", "litellm_base_url": "http://127.0.0.1:11434/v1"},
+                "provider": {
+                    "model": "openai/llama3.2",
+                    "litellm_base_url": "http://127.0.0.1:11434/v1",
+                },
                 "providers": {
                     "ollama": {
                         "api_base": "http://127.0.0.1:11434/v1",
@@ -2681,11 +2972,19 @@ def test_cli_validate_provider_accepts_local_runtime_without_api_key(tmp_path: P
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert any(check.get("name") == "api_key" and check.get("status") == "ok" for check in payload["checks"])
-    assert any(check.get("name") == "local_runtime" and check.get("status") == "ok" for check in payload["checks"])
+    assert any(
+        check.get("name") == "api_key" and check.get("status") == "ok"
+        for check in payload["checks"]
+    )
+    assert any(
+        check.get("name") == "local_runtime" and check.get("status") == "ok"
+        for check in payload["checks"]
+    )
 
 
-def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, capsys) -> None:
+def test_cli_provider_set_auth_and_clear_auth_persist_config(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2734,9 +3033,21 @@ def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, cap
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["providers"]["openai"]["api_key"] == "sk-live-new-1234"
     assert persisted["providers"]["openai"]["api_base"] == "https://alt.example/v1"
-    assert persisted["providers"]["openai"]["extra_headers"] == {"X-Trace": "abc", "X-Env": "prod"}
+    assert persisted["providers"]["openai"]["extra_headers"] == {
+        "X-Trace": "abc",
+        "X-Env": "prod",
+    }
 
-    rc_clear = main(["--config", str(config_path), "provider", "clear-auth", "openai", "--clear-api-base"])
+    rc_clear = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "clear-auth",
+            "openai",
+            "--clear-api-base",
+        ]
+    )
     assert rc_clear == 0
     clear_payload = json.loads(capsys.readouterr().out)
     assert clear_payload["ok"] is True
@@ -2751,7 +3062,9 @@ def test_cli_provider_set_auth_and_clear_auth_persist_config(tmp_path: Path, cap
     assert persisted_after["providers"]["openai"]["extra_headers"] == {}
 
 
-def test_cli_provider_set_auth_supports_dynamic_provider_blocks(tmp_path: Path, capsys) -> None:
+def test_cli_provider_set_auth_supports_dynamic_provider_blocks(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2795,7 +3108,9 @@ def test_cli_provider_set_auth_supports_dynamic_provider_blocks(tmp_path: Path, 
     assert status_payload["configured"] is True
 
 
-def test_cli_provider_set_auth_invalid_header_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_set_auth_invalid_header_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2827,7 +3142,9 @@ def test_cli_provider_set_auth_invalid_header_returns_rc2(tmp_path: Path, capsys
     assert payload["error"] == "invalid_header_format:INVALID_HEADER"
 
 
-def test_cli_provider_set_auth_unsupported_provider_returns_rc2(tmp_path: Path, capsys) -> None:
+def test_cli_provider_set_auth_unsupported_provider_returns_rc2(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2857,7 +3174,9 @@ def test_cli_provider_set_auth_unsupported_provider_returns_rc2(tmp_path: Path, 
     assert payload["error"] == "unsupported_provider:unknown-provider"
 
 
-def test_cli_heartbeat_trigger_success_uses_default_url_and_token(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_heartbeat_trigger_success_uses_default_url_and_token(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2920,7 +3239,9 @@ def test_cli_heartbeat_trigger_success_uses_default_url_and_token(tmp_path: Path
     assert captured["headers"] == {"Authorization": "Bearer gw-token-abc"}
 
 
-def test_cli_heartbeat_trigger_failure_returns_rc2(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_heartbeat_trigger_failure_returns_rc2(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2957,7 +3278,16 @@ def test_cli_heartbeat_trigger_failure_returns_rc2(tmp_path: Path, capsys, monke
 
     monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
 
-    rc = main(["--config", str(config_path), "heartbeat", "trigger", "--gateway-url", "http://127.0.0.1:8787"])
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "heartbeat",
+            "trigger",
+            "--gateway-url",
+            "http://127.0.0.1:8787",
+        ]
+    )
     assert rc == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
@@ -2965,7 +3295,9 @@ def test_cli_heartbeat_trigger_failure_returns_rc2(tmp_path: Path, capsys, monke
     assert payload["error"] == "heartbeat_disabled"
 
 
-def test_cli_telegram_status_uses_gateway_dashboard_state(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_telegram_status_uses_gateway_dashboard_state(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -2973,7 +3305,11 @@ def test_cli_telegram_status_uses_gateway_dashboard_state(tmp_path: Path, capsys
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.9", "port": 8877, "auth": {"token": "gw-token-abc"}},
+                "gateway": {
+                    "host": "127.0.0.9",
+                    "port": 8877,
+                    "auth": {"token": "gw-token-abc"},
+                },
             }
         ),
         encoding="utf-8",
@@ -2991,7 +3327,9 @@ def test_cli_telegram_status_uses_gateway_dashboard_state(tmp_path: Path, capsys
                 "telegram": {
                     "available": True,
                     "offset_next": 42,
-                    "hints": ["Webhook mode is requested but not active; try refreshing Telegram transport."],
+                    "hints": [
+                        "Webhook mode is requested but not active; try refreshing Telegram transport."
+                    ],
                 }
             }
 
@@ -3017,12 +3355,16 @@ def test_cli_telegram_status_uses_gateway_dashboard_state(tmp_path: Path, capsys
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["telegram"]["offset_next"] == 42
-    assert payload["telegram"]["hints"] == ["Webhook mode is requested but not active; try refreshing Telegram transport."]
+    assert payload["telegram"]["hints"] == [
+        "Webhook mode is requested but not active; try refreshing Telegram transport."
+    ]
     assert captured["url"] == "http://127.0.0.9:8877/api/dashboard/state"
     assert captured["headers"] == {"Authorization": "Bearer gw-token-abc"}
 
 
-def test_cli_telegram_refresh_and_offset_commit_use_gateway_controls(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_telegram_refresh_and_offset_commit_use_gateway_controls(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3030,7 +3372,11 @@ def test_cli_telegram_refresh_and_offset_commit_use_gateway_controls(tmp_path: P
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "t-123"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "t-123"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3077,11 +3423,21 @@ def test_cli_telegram_refresh_and_offset_commit_use_gateway_controls(tmp_path: P
     assert commit_payload["ok"] is True
     assert commit_payload["summary"]["update_id"] == 144
 
-    assert calls[0] == ("POST", "http://127.0.0.1:8787/v1/control/channels/telegram/refresh", {})
-    assert calls[1] == ("POST", "http://127.0.0.1:8787/v1/control/channels/telegram/offset/commit", {"update_id": 144})
+    assert calls[0] == (
+        "POST",
+        "http://127.0.0.1:8787/v1/control/channels/telegram/refresh",
+        {},
+    )
+    assert calls[1] == (
+        "POST",
+        "http://127.0.0.1:8787/v1/control/channels/telegram/offset/commit",
+        {"update_id": 144},
+    )
 
 
-def test_cli_telegram_offset_sync_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_telegram_offset_sync_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3089,7 +3445,11 @@ def test_cli_telegram_offset_sync_uses_gateway_control(tmp_path: Path, capsys, m
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "t-123"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "t-123"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3133,7 +3493,9 @@ def test_cli_telegram_offset_sync_uses_gateway_control(tmp_path: Path, capsys, m
     )
 
 
-def test_cli_telegram_offset_reset_requires_confirmation(tmp_path: Path, capsys) -> None:
+def test_cli_telegram_offset_reset_requires_confirmation(
+    tmp_path: Path, capsys
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3153,7 +3515,9 @@ def test_cli_telegram_offset_reset_requires_confirmation(tmp_path: Path, capsys)
     assert payload["error"] == "confirmation_required"
 
 
-def test_cli_telegram_offset_reset_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_telegram_offset_reset_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3161,7 +3525,11 @@ def test_cli_telegram_offset_reset_uses_gateway_control(tmp_path: Path, capsys, 
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "t-123"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "t-123"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3204,7 +3572,9 @@ def test_cli_telegram_offset_reset_uses_gateway_control(tmp_path: Path, capsys, 
     )
 
 
-def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_recover_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3212,7 +3582,11 @@ def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monke
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "prov-token"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "prov-token"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3244,7 +3618,9 @@ def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monke
 
     monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
 
-    rc = main(["--config", str(config_path), "provider", "recover", "--role", "primary"])
+    rc = main(
+        ["--config", str(config_path), "provider", "recover", "--role", "primary"]
+    )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -3256,7 +3632,9 @@ def test_cli_provider_recover_uses_gateway_control(tmp_path: Path, capsys, monke
     )
 
 
-def test_cli_discord_status_uses_gateway_dashboard_state(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_discord_status_uses_gateway_dashboard_state(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3264,7 +3642,11 @@ def test_cli_discord_status_uses_gateway_dashboard_state(tmp_path: Path, capsys,
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.9", "port": 8877, "auth": {"token": "gw-token-xyz"}},
+                "gateway": {
+                    "host": "127.0.0.9",
+                    "port": 8877,
+                    "auth": {"token": "gw-token-xyz"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3283,7 +3665,9 @@ def test_cli_discord_status_uses_gateway_dashboard_state(tmp_path: Path, capsys,
                     "available": True,
                     "gateway_task_state": "running",
                     "session_id": "sess-1",
-                    "hints": ["Discord gateway listener is not running; refresh transport to reconnect the gateway loop."],
+                    "hints": [
+                        "Discord gateway listener is not running; refresh transport to reconnect the gateway loop."
+                    ],
                 }
             }
 
@@ -3313,7 +3697,9 @@ def test_cli_discord_status_uses_gateway_dashboard_state(tmp_path: Path, capsys,
     assert captured["headers"] == {"Authorization": "Bearer gw-token-xyz"}
 
 
-def test_cli_discord_refresh_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_discord_refresh_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3321,7 +3707,11 @@ def test_cli_discord_refresh_uses_gateway_control(tmp_path: Path, capsys, monkey
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "d-123"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "d-123"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3358,10 +3748,16 @@ def test_cli_discord_refresh_uses_gateway_control(tmp_path: Path, capsys, monkey
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["summary"]["gateway_restarted"] is True
-    assert calls[0] == ("POST", "http://127.0.0.1:8787/v1/control/channels/discord/refresh", {})
+    assert calls[0] == (
+        "POST",
+        "http://127.0.0.1:8787/v1/control/channels/discord/refresh",
+        {},
+    )
 
 
-def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_supervisor_recover_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3369,7 +3765,11 @@ def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, mon
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "sup-token"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "sup-token"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3401,7 +3801,16 @@ def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, mon
 
     monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
 
-    rc = main(["--config", str(config_path), "supervisor", "recover", "--component", "heartbeat"])
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "supervisor",
+            "recover",
+            "--component",
+            "heartbeat",
+        ]
+    )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
@@ -3413,7 +3822,9 @@ def test_cli_supervisor_recover_uses_gateway_control(tmp_path: Path, capsys, mon
     )
 
 
-def test_cli_autonomy_wake_uses_gateway_control(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_autonomy_wake_uses_gateway_control(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3421,7 +3832,11 @@ def test_cli_autonomy_wake_uses_gateway_control(tmp_path: Path, capsys, monkeypa
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai/gpt-4o-mini"},
-                "gateway": {"host": "127.0.0.1", "port": 8787, "auth": {"token": "aut-token"}},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 8787,
+                    "auth": {"token": "aut-token"},
+                },
             }
         ),
         encoding="utf-8",
@@ -3465,7 +3880,9 @@ def test_cli_autonomy_wake_uses_gateway_control(tmp_path: Path, capsys, monkeypa
     )
 
 
-def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -3485,7 +3902,10 @@ def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_p
             self.is_success = True
 
         def json(self) -> dict[str, object]:
-            return {"ok": True, "decision": {"action": "send", "reason": "ok", "text": ""}}
+            return {
+                "ok": True,
+                "decision": {"action": "send", "reason": "ok", "text": ""},
+            }
 
     class _FakeClient:
         def __init__(self, *, timeout, headers):
@@ -3504,7 +3924,17 @@ def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_p
     monkeypatch.setattr("clawlite.cli.ops.httpx.Client", _FakeClient)
 
     sys.modules.pop("clawlite.gateway.server", None)
-    rc_set = main(["--config", str(config_path), "provider", "set-auth", "openai", "--api-key", "sk-test-1234"])
+    rc_set = main(
+        [
+            "--config",
+            str(config_path),
+            "provider",
+            "set-auth",
+            "openai",
+            "--api-key",
+            "sk-test-1234",
+        ]
+    )
     assert rc_set == 0
     assert "clawlite.gateway.server" not in sys.modules
     capsys.readouterr()
@@ -3515,7 +3945,9 @@ def test_cli_provider_set_auth_and_heartbeat_do_not_import_gateway_runtime(tmp_p
     assert "clawlite.gateway.server" not in sys.modules
 
 
-def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
     monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
@@ -3538,7 +3970,10 @@ def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(t
     assert rc_missing == 2
     missing_payload = json.loads(capsys.readouterr().out)
     assert missing_payload["ok"] is False
-    assert any("oauth_access_token" == check.get("name") and check.get("status") == "error" for check in missing_payload["checks"])
+    assert any(
+        "oauth_access_token" == check.get("name") and check.get("status") == "error"
+        for check in missing_payload["checks"]
+    )
 
     config_path.write_text(
         json.dumps(
@@ -3546,7 +3981,9 @@ def test_cli_validate_provider_codex_requires_token_and_passes_when_configured(t
                 "workspace_path": str(tmp_path / "workspace"),
                 "state_path": str(tmp_path / "state"),
                 "provider": {"model": "openai-codex/gpt-5.3-codex"},
-                "auth": {"providers": {"openai_codex": {"access_token": "tok-codex-999"}}},
+                "auth": {
+                    "providers": {"openai_codex": {"access_token": "tok-codex-999"}}
+                },
             }
         ),
         encoding="utf-8",

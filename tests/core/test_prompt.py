@@ -28,7 +28,9 @@ def test_prompt_builder_reads_workspace_files(tmp_path: Path) -> None:
     assert "</untrusted_runtime_context>" in out.runtime_context
 
 
-def test_prompt_builder_keeps_stable_section_order_and_sorted_skills(tmp_path: Path) -> None:
+def test_prompt_builder_keeps_stable_section_order_and_sorted_skills(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "IDENTITY.md").write_text("I am Claw", encoding="utf-8")
     (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
 
@@ -47,7 +49,9 @@ def test_prompt_builder_keeps_stable_section_order_and_sorted_skills(tmp_path: P
     assert "- alpha\n- zeta" in out.system_prompt
 
 
-def test_prompt_builder_applies_token_budget_shaping_deterministically(tmp_path: Path) -> None:
+def test_prompt_builder_applies_token_budget_shaping_deterministically(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "IDENTITY.md").write_text("I am Claw " * 120, encoding="utf-8")
     (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
 
@@ -74,10 +78,16 @@ def test_prompt_builder_applies_token_budget_shaping_deterministically(tmp_path:
     assert "old-message" not in out.history_messages[0]["content"]
 
 
-def test_prompt_builder_preserves_soul_and_user_sections_under_workspace_pressure(tmp_path: Path) -> None:
+def test_prompt_builder_preserves_soul_and_user_sections_under_workspace_pressure(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "IDENTITY.md").write_text("I am ClawLite", encoding="utf-8")
-    (tmp_path / "SOUL.md").write_text("Always stay direct and autonomous.", encoding="utf-8")
-    (tmp_path / "USER.md").write_text("Prefer concise answers and mention timezone if relevant.", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text(
+        "Always stay direct and autonomous.", encoding="utf-8"
+    )
+    (tmp_path / "USER.md").write_text(
+        "Prefer concise answers and mention timezone if relevant.", encoding="utf-8"
+    )
     (tmp_path / "AGENTS.md").write_text("agent-rules " * 400, encoding="utf-8")
     (tmp_path / "TOOLS.md").write_text("tool-rules " * 400, encoding="utf-8")
 
@@ -93,13 +103,17 @@ def test_prompt_builder_preserves_soul_and_user_sections_under_workspace_pressur
     assert "## SOUL.md" in out.system_prompt
     assert "Always stay direct and autonomous." in out.system_prompt
     assert "## USER.md" in out.system_prompt
-    assert "Prefer concise answers and mention timezone if relevant." in out.system_prompt
+    assert (
+        "Prefer concise answers and mention timezone if relevant." in out.system_prompt
+    )
     assert "[Identity Guard]" in out.system_prompt
 
 
 def test_prompt_builder_injects_structured_user_profile_hint(tmp_path: Path) -> None:
     (tmp_path / "IDENTITY.md").write_text("I am ClawLite", encoding="utf-8")
-    (tmp_path / "SOUL.md").write_text("Always stay direct and autonomous.", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text(
+        "Always stay direct and autonomous.", encoding="utf-8"
+    )
     (tmp_path / "USER.md").write_text(
         "\n".join(
             [
@@ -132,7 +146,9 @@ def test_prompt_builder_injects_structured_user_profile_hint(tmp_path: Path) -> 
     assert "- Preferences: concise updates, direct actions" in out.system_prompt
 
 
-def test_prompt_builder_injects_identity_first_when_identity_missing(tmp_path: Path) -> None:
+def test_prompt_builder_injects_identity_first_when_identity_missing(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
 
     builder = PromptBuilder(tmp_path)
@@ -145,10 +161,14 @@ def test_prompt_builder_injects_identity_first_when_identity_missing(tmp_path: P
 
     assert out.system_prompt.startswith("## IDENTITY.md")
     assert "self-hosted autonomous AI agent" in out.system_prompt
-    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find("## IDENTITY.md")
+    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find(
+        "## IDENTITY.md"
+    )
 
 
-def test_prompt_builder_injects_identity_first_when_identity_empty(tmp_path: Path) -> None:
+def test_prompt_builder_injects_identity_first_when_identity_empty(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "IDENTITY.md").write_text("", encoding="utf-8")
     (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
 
@@ -161,8 +181,12 @@ def test_prompt_builder_injects_identity_first_when_identity_empty(tmp_path: Pat
     )
 
     assert out.system_prompt.startswith("## IDENTITY.md")
-    assert "Answer as ClawLite in every response." in out.system_prompt
-    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find("## IDENTITY.md")
+    assert "## Name" in out.system_prompt
+    assert "self-hosted autonomous AI agent" in out.system_prompt
+    assert "Always answer as ClawLite." in out.system_prompt
+    assert out.system_prompt.find("## SOUL.md") > out.system_prompt.find(
+        "## IDENTITY.md"
+    )
 
 
 def test_prompt_builder_adds_always_on_identity_guard_section(tmp_path: Path) -> None:
@@ -181,7 +205,10 @@ def test_prompt_builder_adds_always_on_identity_guard_section(tmp_path: Path) ->
     assert "Always answer as ClawLite." in out.system_prompt
     assert "Never claim to be a provider model" in out.system_prompt
     assert "[Execution Guard]" in out.system_prompt
-    assert "execute directly instead of asking for redundant confirmation" in out.system_prompt
+    assert (
+        "execute directly instead of asking for redundant confirmation"
+        in out.system_prompt
+    )
     assert "If you say you searched or checked the web" in out.system_prompt
 
 
