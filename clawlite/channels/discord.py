@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,8 @@ DISCORD_DEFAULT_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 # + 8192  DIRECT_MESSAGE_REACTIONS
 DISCORD_DEFAULT_GATEWAY_INTENTS = 46593
 DISCORD_TYPING_INTERVAL_S = 8.0
+DISCORD_VOICE_MESSAGE_FLAG = 1 << 13  # 8192 — IS_VOICE_MESSAGE
+DISCORD_VOICE_WAVEFORM_SAMPLES = 256
 
 
 @dataclass(slots=True, frozen=True)
@@ -125,6 +128,7 @@ class DiscordChannel(BaseChannel):
         self._session_id: str = ""
         self._resume_url: str = ""
         self._bot_user_id: str = ""
+        self._application_id: str = ""
 
     @staticmethod
     def _normalize_allow_from(raw: Any) -> list[str]:
@@ -362,6 +366,23 @@ class DiscordChannel(BaseChannel):
                 e for e in raw_embeds if isinstance(e, dict)
             ][:10]  # Discord max 10 embeds per message
 
+        # Message components (buttons, select menus) — pass as metadata key "discord_components"
+        raw_components = metadata_payload.get("discord_components") or metadata_payload.get("components")
+        if isinstance(raw_components, list) and raw_components:
+            payload["components"] = [c for c in raw_components if isinstance(c, dict)][:5]  # Discord max 5 action rows
+
+        # Poll — pass as metadata key "discord_poll": {"question": str, "answers": [str, ...], "duration_hours": int}
+        raw_poll = metadata_payload.get("discord_poll")
+        if isinstance(raw_poll, dict) and raw_poll.get("question") and raw_poll.get("answers"):
+            answers_raw = [str(a) for a in raw_poll["answers"] if a][:10]
+            payload["poll"] = {
+                "question": {"text": str(raw_poll["question"])[:300]},
+                "answers": [{"poll_media": {"text": a[:55]}} for a in answers_raw],
+                "duration": max(1, int(raw_poll.get("duration_hours", 24) or 24)),
+                "allow_multiselect": bool(raw_poll.get("allow_multiselect", False)),
+                "layout_type": 1,
+            }
+
         channel_id = ""
         try:
             if resolved_target.kind == "user":
@@ -584,6 +605,9 @@ class DiscordChannel(BaseChannel):
             user = payload.get("user")
             if isinstance(user, dict):
                 self._bot_user_id = str(user.get("id", "") or "").strip()
+            app = payload.get("application")
+            if isinstance(app, dict):
+                self._application_id = str(app.get("id", "") or "").strip()
             return True
 
         if event_type == "RESUMED":
@@ -599,6 +623,10 @@ class DiscordChannel(BaseChannel):
 
         if event_type == "MESSAGE_REACTION_REMOVE":
             return True  # Silently acknowledged
+
+        if event_type == "INTERACTION_CREATE":
+            await self._handle_interaction_create(payload)
+            return True
 
         return True
 
@@ -786,6 +814,448 @@ class DiscordChannel(BaseChannel):
             text=f"[reaction: {emoji_str}]",
             metadata=metadata,
         )
+
+    async def _handle_interaction_create(self, payload: dict[str, Any]) -> None:
+        """Handle Discord INTERACTION_CREATE — slash commands (type 2) and button clicks (type 3)."""
+        interaction_id = str(payload.get("id", "") or "").strip()
+        interaction_token = str(payload.get("token", "") or "").strip()
+        interaction_type = int(payload.get("type", 0) or 0)
+        channel_id = str(payload.get("channel_id", "") or "").strip()
+        data = payload.get("data") or {}
+        member = payload.get("member") or {}
+        user = payload.get("user") or member.get("user") or {}
+        user_id = str(user.get("id", "") or "").strip()
+        username = str(user.get("username", "") or "").strip()
+
+        if not interaction_id or not interaction_token:
+            return
+
+        # ACK the interaction immediately (type 5 = deferred channel message)
+        asyncio.create_task(self._ack_interaction(interaction_id, interaction_token))
+
+        if interaction_type == 2:
+            # APPLICATION_COMMAND (slash command)
+            command_name = str(data.get("name", "") or "").strip()
+            options = data.get("options") or []
+            args_text = " ".join(
+                f"{o.get('name')}={o.get('value')}" for o in options if isinstance(o, dict)
+            )
+            text = f"/{command_name}" + (f" {args_text}" if args_text else "")
+            metadata = {
+                "channel": "discord",
+                "channel_id": channel_id,
+                "update_kind": "slash_command",
+                "command_name": command_name,
+                "command_options": options,
+                "interaction_id": interaction_id,
+                "interaction_token": interaction_token,
+                "user_id": user_id,
+                "username": username,
+                "text": text,
+            }
+            await self.emit(
+                session_id=f"discord:{channel_id}",
+                user_id=user_id,
+                text=text,
+                metadata=metadata,
+            )
+
+        elif interaction_type == 3:
+            # MESSAGE_COMPONENT (button click)
+            custom_id = str(data.get("custom_id", "") or "").strip()
+            component_type = int(data.get("component_type", 0) or 0)
+            message = payload.get("message") or {}
+            message_id = str(message.get("id", "") or "").strip()
+            text = f"[button:{custom_id}]"
+            metadata = {
+                "channel": "discord",
+                "channel_id": channel_id,
+                "update_kind": "button_click",
+                "custom_id": custom_id,
+                "component_type": component_type,
+                "message_id": message_id,
+                "interaction_id": interaction_id,
+                "interaction_token": interaction_token,
+                "user_id": user_id,
+                "username": username,
+                "text": text,
+            }
+            await self.emit(
+                session_id=f"discord:{channel_id}",
+                user_id=user_id,
+                text=text,
+                metadata=metadata,
+            )
+
+    async def _ack_interaction(self, interaction_id: str, interaction_token: str) -> None:
+        """Immediately ACK a Discord interaction with deferred response (type 5)."""
+        try:
+            await self._post_json(
+                url=f"{self.api_base}/interactions/{interaction_id}/{interaction_token}/callback",
+                payload={"type": 5},
+                error_prefix="discord_interaction_ack",
+            )
+        except Exception:
+            pass  # ACK failure is non-fatal; Discord will timeout gracefully
+
+    async def register_slash_command(
+        self,
+        *,
+        name: str,
+        description: str,
+        options: list[dict[str, Any]] | None = None,
+        guild_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Register (or overwrite) a global or guild slash command."""
+        app_id = self._application_id
+        if not app_id:
+            raise RuntimeError("discord_application_id_unknown — wait for READY event")
+        clean_guild = str(guild_id or "").strip()
+        if clean_guild:
+            url = f"{self.api_base}/applications/{app_id}/guilds/{clean_guild}/commands"
+        else:
+            url = f"{self.api_base}/applications/{app_id}/commands"
+        body: dict[str, Any] = {
+            "name": str(name or "").strip(),
+            "description": str(description or "").strip(),
+            "type": 1,  # CHAT_INPUT
+        }
+        if options:
+            body["options"] = options
+        response = await self._post_json(url=url, payload=body, error_prefix="discord_register_slash")
+        try:
+            return dict(response.json() if response.content else {})
+        except Exception:
+            return {}
+
+    async def list_slash_commands(self, *, guild_id: str | None = None) -> list[dict[str, Any]]:
+        """List registered global or guild slash commands."""
+        app_id = self._application_id
+        if not app_id:
+            return []
+        clean_guild = str(guild_id or "").strip()
+        if clean_guild:
+            url = f"{self.api_base}/applications/{app_id}/guilds/{clean_guild}/commands"
+        else:
+            url = f"{self.api_base}/applications/{app_id}/commands"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bot {self.token}", "Content-Type": "application/json"},
+                )
+            return list(response.json() if response.content else [])
+        except Exception:
+            return []
+
+    async def reply_interaction(
+        self,
+        *,
+        interaction_id: str,
+        interaction_token: str,
+        text: str,
+        components: list[dict[str, Any]] | None = None,
+        embeds: list[dict[str, Any]] | None = None,
+        ephemeral: bool = False,
+    ) -> str:
+        """Edit the deferred interaction reply (follow-up to ACK type 5)."""
+        url = f"{self.api_base}/webhooks/{self._application_id}/{interaction_token}/messages/@original"
+        body: dict[str, Any] = {"content": str(text or "")}
+        if components:
+            body["components"] = components
+        if embeds:
+            body["embeds"] = embeds
+        if ephemeral:
+            body["flags"] = 64  # EPHEMERAL
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                response = await client.patch(
+                    url,
+                    json=body,
+                    headers={"Authorization": f"Bot {self.token}", "Content-Type": "application/json"},
+                )
+            data = response.json() if response.content else {}
+            return str(data.get("id", "") or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _generate_placeholder_waveform() -> str:
+        """Generate a placeholder sine-wave waveform (base64, 256 samples)."""
+        import base64
+        import math
+        samples = [
+            min(255, max(0, round(128 + 64 * math.sin((i / DISCORD_VOICE_WAVEFORM_SAMPLES) * math.pi * 8))))
+            for i in range(DISCORD_VOICE_WAVEFORM_SAMPLES)
+        ]
+        return base64.b64encode(bytes(samples)).decode("ascii")
+
+    async def _generate_waveform_from_audio(self, audio_bytes: bytes) -> str:
+        """Generate waveform by sampling raw PCM via ffmpeg. Falls back to placeholder."""
+        import base64
+        import os
+        import struct
+        import tempfile
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+                f.write(audio_bytes)
+                tmp_in = f.name
+            tmp_pcm = tmp_in + ".raw"
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", tmp_in, "-vn", "-f", "s16le",
+                "-acodec", "pcm_s16le", "-ac", "1", "-ar", "8000", tmp_pcm,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                return self._generate_placeholder_waveform()
+            with open(tmp_pcm, "rb") as fpcm:
+                pcm_data = fpcm.read()
+            samples_raw = struct.unpack(f"{len(pcm_data) // 2}h", pcm_data)
+            step = max(1, len(samples_raw) // DISCORD_VOICE_WAVEFORM_SAMPLES)
+            waveform = []
+            for i in range(DISCORD_VOICE_WAVEFORM_SAMPLES):
+                chunk = samples_raw[i * step:(i + 1) * step] or (0,)
+                avg = sum(abs(s) for s in chunk) / len(chunk)
+                waveform.append(min(255, round((avg / 32767) * 255)))
+            while len(waveform) < DISCORD_VOICE_WAVEFORM_SAMPLES:
+                waveform.append(0)
+            return base64.b64encode(bytes(waveform)).decode("ascii")
+        except Exception:
+            return self._generate_placeholder_waveform()
+        finally:
+            for p in (tmp_in, tmp_pcm):  # type: ignore[possibly-undefined]
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
+    async def send_voice_message(
+        self,
+        *,
+        channel_id: str,
+        audio_bytes: bytes,
+        duration_secs: float,
+        waveform: str | None = None,
+        reply_to_message_id: str | None = None,
+        silent: bool = False,
+    ) -> str:
+        """Send a Discord voice message (OGG/Opus, IS_VOICE_MESSAGE flag).
+
+        Three-step protocol:
+        1. POST /channels/{id}/attachments → get upload_url + upload_filename
+        2. PUT {upload_url} with audio bytes
+        3. POST /channels/{id}/messages with flag 8192 + attachment metadata
+        """
+        if not channel_id:
+            raise ValueError("channel_id is required")
+        clean_channel = str(channel_id).strip()
+        resolved_waveform = waveform or await self._generate_waveform_from_audio(audio_bytes)
+
+        # Step 1: Request upload URL
+        async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            r1 = await client.post(
+                f"{self.api_base}/channels/{clean_channel}/attachments",
+                json={"files": [{"filename": "voice-message.ogg", "file_size": len(audio_bytes), "id": "0"}]},
+                headers={"Authorization": f"Bot {self.token}", "Content-Type": "application/json"},
+            )
+        r1.raise_for_status()
+        attachment_info = r1.json().get("attachments", [{}])[0]
+        upload_url = str(attachment_info.get("upload_url", "") or "")
+        upload_filename = str(attachment_info.get("upload_filename", "") or "")
+        if not upload_url:
+            raise RuntimeError("discord_voice_upload_url_missing")
+
+        # Step 2: Upload the audio
+        async with httpx.AsyncClient(timeout=max(30.0, self.timeout_s)) as client:
+            r2 = await client.put(upload_url, content=audio_bytes, headers={"Content-Type": "audio/ogg"})
+        r2.raise_for_status()
+
+        # Step 3: Send message with voice flag
+        flags = DISCORD_VOICE_MESSAGE_FLAG
+        if silent:
+            flags |= (1 << 12)  # SUPPRESS_NOTIFICATIONS
+        msg_body: dict[str, Any] = {
+            "flags": flags,
+            "attachments": [{
+                "id": "0",
+                "filename": "voice-message.ogg",
+                "uploaded_filename": upload_filename,
+                "duration_secs": round(float(duration_secs or 0), 2),
+                "waveform": resolved_waveform,
+            }],
+        }
+        if reply_to_message_id:
+            msg_body["message_reference"] = {
+                "message_id": reply_to_message_id,
+                "fail_if_not_exists": False,
+            }
+
+        response = await self._post_json(
+            url=f"{self.api_base}/channels/{clean_channel}/messages",
+            payload=msg_body,
+            error_prefix="discord_voice_message",
+        )
+        try:
+            data = response.json() if response.content else {}
+        except Exception:
+            data = {}
+        message_id = str(data.get("id", "") or "").strip() or "unknown"
+        return f"discord:voice:{message_id}"
+
+    async def create_webhook(
+        self, *, channel_id: str, name: str, avatar: str | None = None
+    ) -> dict[str, Any]:
+        """Create a webhook in a channel. Returns {id, token, name, ...}."""
+        body: dict[str, Any] = {"name": str(name or "clawlite").strip()[:80]}
+        if avatar:
+            body["avatar"] = str(avatar)
+        response = await self._post_json(
+            url=f"{self.api_base}/channels/{channel_id}/webhooks",
+            payload=body,
+            error_prefix="discord_create_webhook",
+        )
+        try:
+            return dict(response.json() if response.content else {})
+        except Exception:
+            return {}
+
+    async def execute_webhook(
+        self,
+        *,
+        webhook_id: str,
+        webhook_token: str,
+        text: str = "",
+        username: str | None = None,
+        avatar_url: str | None = None,
+        embeds: list[dict[str, Any]] | None = None,
+        components: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Execute (post via) a webhook. Returns message_id or empty string."""
+        body: dict[str, Any] = {"content": str(text or "")}
+        if username:
+            body["username"] = str(username)[:80]
+        if avatar_url:
+            body["avatar_url"] = str(avatar_url)
+        if embeds:
+            body["embeds"] = embeds
+        if components:
+            body["components"] = components
+        response = await self._post_json(
+            url=f"{self.api_base}/webhooks/{webhook_id}/{webhook_token}?wait=true",
+            payload=body,
+            error_prefix="discord_execute_webhook",
+        )
+        try:
+            data = response.json() if response.content else {}
+            return str(data.get("id", "") or "")
+        except Exception:
+            return ""
+
+    async def create_poll(
+        self,
+        *,
+        channel_id: str,
+        question: str,
+        answers: list[str],
+        duration_hours: int = 24,
+        allow_multiselect: bool = False,
+    ) -> str:
+        """Create a Discord poll in a channel. Returns message_id."""
+        clean_answers = [str(a).strip()[:55] for a in answers if str(a).strip()][:10]
+        payload: dict[str, Any] = {
+            "poll": {
+                "question": {"text": str(question)[:300]},
+                "answers": [{"poll_media": {"text": a}} for a in clean_answers],
+                "duration": max(1, int(duration_hours or 24)),
+                "allow_multiselect": bool(allow_multiselect),
+                "layout_type": 1,
+            }
+        }
+        response = await self._post_json(
+            url=f"{self.api_base}/channels/{channel_id}/messages",
+            payload=payload,
+            error_prefix="discord_create_poll",
+        )
+        try:
+            data = response.json() if response.content else {}
+            return str(data.get("id", "") or "")
+        except Exception:
+            return ""
+
+    async def _patch_json(self, *, url: str, payload: dict[str, Any]) -> httpx.Response:
+        """PATCH JSON to Discord API with auth headers."""
+        async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            return await client.patch(
+                url,
+                json=payload,
+                headers={"Authorization": f"Bot {self.token}", "Content-Type": "application/json"},
+            )
+
+    async def send_streaming(
+        self,
+        *,
+        channel_id: str,
+        chunks: Any,  # AsyncGenerator[ProviderChunk, None]
+        min_edit_interval_s: float = 0.8,
+    ) -> str:
+        """Stream response to Discord: create placeholder message, edit as chunks arrive.
+
+        Args:
+            channel_id: target Discord channel
+            chunks: async generator yielding ProviderChunk objects
+            min_edit_interval_s: minimum seconds between edits (avoid rate limits)
+        Returns:
+            discord:streamed:{message_id}
+        """
+        clean_channel = str(channel_id).strip()
+
+        # Create initial placeholder
+        response = await self._post_json(
+            url=f"{self.api_base}/channels/{clean_channel}/messages",
+            payload={"content": "…"},
+            error_prefix="discord_stream_create",
+        )
+        try:
+            msg_id = str((response.json() if response.content else {}).get("id", "") or "")
+        except Exception:
+            msg_id = ""
+
+        if not msg_id:
+            return ""
+
+        accumulated = ""
+        last_edit_time = 0.0
+        last_sent_text = "…"
+        edit_url = f"{self.api_base}/channels/{clean_channel}/messages/{msg_id}"
+
+        async for chunk in chunks:
+            if chunk.text:
+                accumulated = chunk.accumulated or (accumulated + chunk.text)
+            now = time.monotonic()
+            should_edit = (
+                accumulated != last_sent_text
+                and (chunk.done or (now - last_edit_time) >= min_edit_interval_s)
+            )
+            if should_edit and accumulated:
+                try:
+                    await self._patch_json(url=edit_url, payload={"content": accumulated})
+                    last_sent_text = accumulated
+                    last_edit_time = now
+                except Exception:
+                    pass
+            if chunk.done:
+                break
+
+        # Final edit to ensure complete text
+        if accumulated and accumulated != last_sent_text:
+            try:
+                await self._patch_json(url=edit_url, payload={"content": accumulated})
+            except Exception:
+                pass
+
+        return f"discord:streamed:{msg_id}"
 
     async def _typing_loop(self, channel_id: str) -> None:
         client = self._client

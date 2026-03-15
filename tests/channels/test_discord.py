@@ -612,3 +612,297 @@ async def test_download_attachment_returns_none_for_non_https():
 
     result2 = await ch._download_attachment("")
     assert result2 is None
+
+
+# ─── Interaction / slash / button tests ──────────────────────────────────────
+
+def test_discord_handle_interaction_create_slash_emits_message() -> None:
+    """INTERACTION_CREATE type=2 (slash command) is emitted as a message."""
+    emitted: list[dict] = []
+
+    async def _on_message(session_id, user_id, text, metadata):
+        emitted.append({"session_id": session_id, "user_id": user_id, "text": text, "metadata": metadata})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=_on_message)
+    ch._running = True
+    ch._bot_user_id = "bot123"
+
+    payload = {
+        "op": 0,
+        "t": "INTERACTION_CREATE",
+        "s": 1,
+        "d": {
+            "id": "inter001",
+            "token": "intertoken",
+            "type": 2,
+            "application_id": "app001",
+            "channel_id": "chan001",
+            "user": {"id": "user001", "username": "alice"},
+            "data": {"id": "cmd001", "name": "ping", "options": []},
+        },
+    }
+
+    async def _scenario():
+        await ch._handle_gateway_payload(payload)
+
+    asyncio.run(_scenario())
+
+    assert len(emitted) == 1
+    meta = emitted[0]["metadata"]
+    assert meta["update_kind"] == "slash_command"
+    assert meta["command_name"] == "ping"
+    assert meta["interaction_id"] == "inter001"
+    assert meta["interaction_token"] == "intertoken"
+
+
+def test_discord_handle_interaction_create_button_emits_message() -> None:
+    """INTERACTION_CREATE type=3 (button) is emitted with custom_id."""
+    emitted: list[dict] = []
+
+    async def _on_message(session_id, user_id, text, metadata):
+        emitted.append({"session_id": session_id, "user_id": user_id, "text": text, "metadata": metadata})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=_on_message)
+    ch._running = True
+
+    payload = {
+        "op": 0,
+        "t": "INTERACTION_CREATE",
+        "s": 2,
+        "d": {
+            "id": "inter002",
+            "token": "tok2",
+            "type": 3,
+            "channel_id": "chan001",
+            "user": {"id": "u1", "username": "bob"},
+            "data": {"custom_id": "confirm_action", "component_type": 2},
+            "message": {"id": "msg001"},
+        },
+    }
+
+    async def _scenario():
+        await ch._handle_gateway_payload(payload)
+
+    asyncio.run(_scenario())
+
+    assert emitted[0]["metadata"]["update_kind"] == "button_click"
+    assert emitted[0]["metadata"]["custom_id"] == "confirm_action"
+
+
+def test_discord_register_slash_command_posts_correct_payload() -> None:
+    """register_slash_command posts to the correct application commands endpoint."""
+    posted: list[tuple[str, dict]] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        posted.append((url, payload))
+        return _response(status=201, url=url, payload={"id": "cmd001", "name": payload["name"]})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._application_id = "app001"
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+
+    async def _scenario():
+        return await ch.register_slash_command(
+            name="ping",
+            description="Ping the bot",
+            options=[],
+            guild_id=None,
+        )
+
+    result = asyncio.run(_scenario())
+    assert result["name"] == "ping"
+    url, body = posted[0]
+    assert "/applications/app001/commands" in url
+    assert body["name"] == "ping"
+
+
+def test_discord_send_includes_components_from_metadata() -> None:
+    """send() includes action_row components when metadata has discord_components."""
+    posted: list[dict] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        posted.append(payload)
+        return _response(status=200, url=url, payload={"id": "msg001"})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._running = True
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+
+    components = [
+        {
+            "type": 1,
+            "components": [
+                {"type": 2, "style": 1, "label": "Yes", "custom_id": "yes"},
+                {"type": 2, "style": 4, "label": "No", "custom_id": "no"},
+            ],
+        }
+    ]
+
+    async def _scenario():
+        return await ch.send(
+            target="#chan001",
+            text="Confirm?",
+            metadata={"discord_components": components},
+        )
+
+    asyncio.run(_scenario())
+
+    assert len(posted) == 1
+    assert "components" in posted[0]
+    assert posted[0]["components"][0]["type"] == 1
+    assert len(posted[0]["components"][0]["components"]) == 2
+
+
+def test_discord_send_with_poll_metadata() -> None:
+    """send() includes poll field when metadata has discord_poll."""
+    posted: list[dict] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        posted.append(payload)
+        return _response(status=200, url=url, payload={"id": "msg002"})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._running = True
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+
+    poll_meta = {
+        "question": "Favorite color?",
+        "answers": ["Red", "Blue", "Green"],
+        "duration_hours": 24,
+        "allow_multiselect": False,
+    }
+
+    asyncio.run(ch.send(target="#chan001", text="", metadata={"discord_poll": poll_meta}))
+
+    assert "poll" in posted[0]
+    assert posted[0]["poll"]["question"]["text"] == "Favorite color?"
+    assert len(posted[0]["poll"]["answers"]) == 3
+    assert posted[0]["poll"]["duration"] == 24
+
+
+def test_discord_create_webhook_posts_to_channel() -> None:
+    """create_webhook() posts to /channels/{id}/webhooks."""
+    posted: list[tuple[str, dict]] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        posted.append((url, payload))
+        return _response(status=200, url=url, payload={"id": "wh001", "token": "wht001", "name": "MyBot"})
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+
+    result = asyncio.run(ch.create_webhook(channel_id="chan001", name="MyBot"))
+    assert result["id"] == "wh001"
+    assert "/channels/chan001/webhooks" in posted[0][0]
+
+
+def test_discord_execute_webhook_sends_message() -> None:
+    """execute_webhook() posts to /webhooks/{id}/{token}."""
+    posted: list[tuple[str, dict]] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        posted.append((url, payload))
+        return _response(status=204, url=url)
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+
+    asyncio.run(ch.execute_webhook(webhook_id="wh001", webhook_token="wht001", text="Hello from webhook!"))
+    assert "/webhooks/wh001/wht001" in posted[0][0]
+    assert posted[0][1]["content"] == "Hello from webhook!"
+
+
+def test_discord_send_voice_message_builds_correct_payload() -> None:
+    """send_voice_message() uploads file and sends message with IS_VOICE_MESSAGE flag."""
+    import unittest.mock as mock
+
+    http_calls: list[tuple[str, str, Any]] = []
+
+    class _FakeVoiceClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def post(self, url, *, json=None, headers=None, content=None):
+            http_calls.append(("POST", url, json or content))
+            if "attachments" in url:
+                return _response(
+                    status=200,
+                    url=url,
+                    payload={"attachments": [{"id": 0, "upload_url": "https://cdn/upload", "upload_filename": "voice.ogg"}]},
+                )
+            return _response(status=200, url=url, payload={"id": "msg001"})
+
+        async def put(self, url, *, headers=None, content=None):
+            http_calls.append(("PUT", url, None))
+            return _response(status=200, url=url)
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._running = True
+
+    async def _fake_post_json(url, payload, error_prefix=""):
+        http_calls.append(("POST", url, payload))
+        return _response(status=200, url=url, payload={"id": "msg001"})
+
+    ch._post_json = _fake_post_json  # type: ignore[method-assign]
+
+    with mock.patch("httpx.AsyncClient", return_value=_FakeVoiceClient()):
+        async def _scenario():
+            return await ch.send_voice_message(
+                channel_id="chan001",
+                audio_bytes=b"\x4f\x67\x67\x53" + b"\x00" * 100,
+                duration_secs=2.5,
+                waveform="AAAA",  # provide explicit waveform to skip ffmpeg
+            )
+        result = asyncio.run(_scenario())
+
+    assert result.startswith("discord:voice:")
+    assert any("attachments" in c[1] for c in http_calls if c[0] == "POST")
+    assert any(c[0] == "PUT" for c in http_calls)
+    msg_posts = [c for c in http_calls if c[0] == "POST" and "messages" in c[1]]
+    assert msg_posts
+    assert msg_posts[0][2]["flags"] == 8192
+
+
+def test_discord_send_streaming_edits_message_in_place() -> None:
+    """send_streaming() creates a message then edits it as chunks arrive."""
+    from clawlite.core.engine import ProviderChunk
+
+    calls: list[tuple[str, str, dict]] = []
+
+    async def _fake_post(url, payload, error_prefix=""):
+        calls.append(("POST", url, payload))
+        return _response(status=200, url=url, payload={"id": "msg001"})
+
+    async def _fake_patch(url, payload):
+        calls.append(("PATCH", url, payload))
+        return _response(status=200, url=url, payload={"id": "msg001"})
+
+    async def fake_chunks():
+        yield ProviderChunk(text="Hello ", accumulated="Hello ", done=False)
+        yield ProviderChunk(text="world", accumulated="Hello world", done=False)
+        yield ProviderChunk(text="!", accumulated="Hello world!", done=True)
+
+    ch = DiscordChannel(config={"token": "tok"}, on_message=None)
+    ch._running = True
+    ch._post_json = _fake_post  # type: ignore[method-assign]
+    ch._patch_json = _fake_patch  # type: ignore[method-assign]
+
+    asyncio.run(ch.send_streaming(channel_id="chan001", chunks=fake_chunks()))
+
+    posts = [c for c in calls if c[0] == "POST"]
+    patches = [c for c in calls if c[0] == "PATCH"]
+    assert len(posts) == 1
+    assert len(patches) >= 1
+    assert patches[-1][2]["content"] == "Hello world!"
+
+
+def test_discord_placeholder_waveform_is_base64() -> None:
+    """_generate_placeholder_waveform() returns valid base64 of 256 bytes."""
+    import base64
+    ch = DiscordChannel(config={"token": "tok"})
+    wf = ch._generate_placeholder_waveform()
+    decoded = base64.b64decode(wf)
+    assert len(decoded) == 256
