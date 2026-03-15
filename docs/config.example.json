@@ -1,109 +1,42 @@
 {
-  "workspace_path": "/home/user/.clawlite/workspace",
-  "state_path": "/home/user/.clawlite/state",
-  "provider": {
-    "model": "gemini/gemini-2.5-flash",
-    "litellm_base_url": "https://api.openai.com/v1",
-    "litellm_api_key": "",
-    "retry_max_attempts": 3,
-    "retry_initial_backoff_s": 0.5,
-    "retry_max_backoff_s": 8.0,
-    "retry_jitter_s": 0.2,
-    "circuit_failure_threshold": 3,
-    "circuit_cooldown_s": 30.0,
-    "fallback_model": ""
-  },
+  "workspace_path": "~/.clawlite/workspace",
   "agents": {
     "defaults": {
       "model": "gemini/gemini-2.5-flash",
       "max_tokens": 8192,
-      "temperature": 0.1,
-      "max_tool_iterations": 40
+      "temperature": 0.1
     }
+  },
+  "providers": {
+    "gemini":     { "api_key": "" },
+    "openai":     { "api_key": "" },
+    "anthropic":  { "api_key": "" },
+    "openrouter": { "api_key": "" }
   },
   "gateway": {
     "host": "127.0.0.1",
     "port": 8787,
     "auth": {
       "mode": "off",
-      "token": "",
-      "allow_loopback_without_auth": true,
-      "header_name": "Authorization",
-      "query_param": "token",
-      "protect_health": false
-    },
-    "diagnostics": {
-      "enabled": true,
-      "require_auth": true,
-      "include_config": false
-    },
-    "heartbeat": {
-      "enabled": true,
-      "interval_s": 1800
-    },
-    "supervisor": {
-      "enabled": true,
-      "interval_s": 20,
-      "cooldown_s": 30
-    },
-    "autonomy": {
-      "enabled": false,
-      "interval_s": 900,
-      "cooldown_s": 300,
-      "timeout_s": 45.0,
-      "max_queue_backlog": 200,
-      "session_id": "autonomy:system",
-      "max_actions_per_run": 1,
-      "action_policy": "balanced",
-      "environment_profile": "dev",
-      "action_cooldown_s": 120.0,
-      "action_rate_limit_per_hour": 20,
-      "max_replay_limit": 50,
-      "min_action_confidence": 0.55,
-      "degraded_backlog_threshold": 300,
-      "degraded_supervisor_error_threshold": 3,
-      "audit_export_path": "",
-      "audit_max_entries": 200
+      "token": ""
     }
-  },
-  "scheduler": {
-    "heartbeat_interval_seconds": 1800,
-    "timezone": "UTC"
   },
   "channels": {
     "telegram": {
       "enabled": false,
       "token": "",
-      "mode": "polling",
-      "webhook_enabled": false,
-      "webhook_secret": "",
-      "webhook_path": "/api/webhooks/telegram",
-      "webhook_url": "",
-      "dedupe_state_path": "",
-      "offset_state_path": "",
-      "media_download_dir": "",
-      "allow_from": [],
-      "poll_interval_s": 1.0,
-      "poll_timeout_s": 20,
-      "reconnect_initial_s": 2.0,
-      "reconnect_max_s": 30.0,
-      "send_timeout_s": 15.0,
-      "send_retry_attempts": 3,
-      "send_backoff_base_s": 0.35,
-      "send_backoff_max_s": 8.0,
-      "send_backoff_jitter": 0.2,
-      "send_circuit_failure_threshold": 1,
-      "send_circuit_cooldown_s": 60.0,
-      "typing_enabled": true,
-      "typing_interval_s": 4.0,
-      "typing_max_ttl_s": 30.0,
-      "typing_timeout_s": 5.0,
-      "typing_circuit_failure_threshold": 1,
-      "typing_circuit_cooldown_s": 60.0,
-      "transcribe_voice": true,
-      "transcribe_audio": true,
-      "transcription_api_key": "",
-      "transcription_language": "pt"
+      "allow_from": []
+    },
+    "discord": {
+      "enabled": false,
+      "token": "",
+      "allow_from": []
+    },
+    "slack": {
+      "enabled": false,
+      "bot_token": "",
+      "app_token": "",
+      "allow_from": []
     }
   }
 }
