@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Robustness Milestone — Phases 1–4 (2026-03-15)
+### Robustness Milestone — Phases 1–5 (2026-03-15)
+
+#### Phase 5 — Runtime recovery and operational autonomy (`e8ddaf1`)
+- Fix critical bug: `JobQueue.start()` was never called — jobs submitted via `jobs` tool now execute
+- `JobQueue.worker_status()`: live health snapshot (workers_alive, pending_jobs, running_jobs)
+- `job_workers` lifecycle component: started in gateway startup sequence alongside other subsystems
+- `_run_job_dispatch`: worker function supporting `agent_run` and `skill_exec` job kinds
+- `RuntimeSupervisor` now monitors `job_workers`: detects dead worker pool and auto-restarts
+- `SupervisorComponentPolicy` for `job_workers` (max_recoveries=8 per hour)
+- `autonomy_stuck` supervisor detection: non-recoverable incident emitted when
+  `consecutive_error_count >= 5` or `no_progress_streak >= 3` in the autonomy service
+- 8 new tests: worker_status lifecycle, supervisor incident/recovery, job execution after late start
 
 #### Phase 4 — Core engine hardening + background jobs (`d91a585`)
 - `ContextWindowManager` — trims message history to model token budget; preserves system message and last user turn; `budget_chars` or `budget_tokens` constructor
