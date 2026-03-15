@@ -37,7 +37,7 @@ jobs:
           else
             pip install -e .
           fi
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov pytest-asyncio pytest-anyio anyio
 
       - name: Run tests with coverage
         run: |
