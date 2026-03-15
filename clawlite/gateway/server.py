@@ -50,6 +50,9 @@ from clawlite.runtime import (
 from clawlite.gateway.tool_catalog import build_tools_catalog_payload, parse_include_schema_flag
 from clawlite.cli.onboarding import build_dashboard_handoff
 from clawlite.cli.ops import memory_profile_snapshot, memory_snapshot_create, memory_snapshot_rollback, memory_suggest_snapshot, memory_version_snapshot
+from clawlite.jobs.queue import JobQueue
+from clawlite.jobs.journal import JobJournal
+from clawlite.tools.jobs import JobsTool
 from clawlite.tools.agents import AgentsListTool
 from clawlite.tools.cron import CronTool
 from clawlite.tools.apply_patch import ApplyPatchTool
@@ -1286,7 +1289,21 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     tools.register(SubagentsTool(engine.subagents, resume_runner_factory=_resume_runner_factory))
     tools.register(SessionStatusTool(sessions, engine.subagents))
 
+    # Jobs queue setup
+    _jobs_concurrency = int(getattr(config.jobs, "worker_concurrency", 2) if hasattr(config, "jobs") else 2)
+    job_queue = JobQueue(concurrency=_jobs_concurrency)
+    if hasattr(config, "jobs") and getattr(config.jobs, "persist_enabled", False):
+        _jobs_persist_path = str(getattr(config.jobs, "persist_path", "") or "").strip()
+        if not _jobs_persist_path:
+            _jobs_persist_path = str(Path(config.state_path) / "jobs.db")
+        _jobs_journal = JobJournal(_jobs_persist_path)
+        _jobs_journal.open()
+        job_queue.set_journal(_jobs_journal)
+        job_queue.restore_from_journal()
+    tools.register(JobsTool(job_queue))
+
     bus = MessageQueue()
+    engine._bus = bus  # wire bus for loop-detection observability
     channels = ChannelManager(bus=bus, engine=engine)
     autonomy_log = AutonomyLog(path=Path(config.state_path) / "autonomy-events.json")
     tools.register(MessageTool(_MessageAPI(channels)))

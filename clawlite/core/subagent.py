@@ -694,6 +694,7 @@ class SubagentManager:
         task: str,
         runner: Runner,
         metadata: dict[str, str | int | bool] | None = None,
+        parent_session_id: str | None = None,
     ) -> SubagentRun:
         self._bind_loop()
         clean_session_id = str(session_id or "").strip()
@@ -706,8 +707,14 @@ class SubagentManager:
 
         async with self._lock:
             self._sweep_locked()
-            self._ensure_limits(clean_session_id)
+            # When parent_session_id is set, derive child session_id from it
             run_id = uuid.uuid4().hex
+            if parent_session_id:
+                clean_parent = str(parent_session_id).strip()
+                clean_session_id = f"{clean_parent}:sub:{run_id[:8]}"
+                normalized_metadata["parent_session_id"] = clean_parent
+
+            self._ensure_limits(clean_session_id)
             now_dt = datetime.now(timezone.utc)
             now_iso = now_dt.isoformat()
             run = SubagentRun(

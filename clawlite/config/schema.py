@@ -1383,6 +1383,22 @@ class BusConfig(Base):
         return str(v or "").strip()
 
 
+class JobsConfig(Base):
+    persist_enabled: bool = False
+    persist_path: str = ""
+    worker_concurrency: int = 2
+
+    @field_validator("worker_concurrency", mode="before")
+    @classmethod
+    def _min_concurrency(cls, v: Any) -> int:
+        return max(1, int(v or 2))
+
+    @field_validator("persist_path", mode="before")
+    @classmethod
+    def _persist_path_default(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+
 class AppConfig(Base):
     workspace_path: str = _DEFAULT_WORKSPACE
     state_path: str = _DEFAULT_STATE
@@ -1395,6 +1411,7 @@ class AppConfig(Base):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     bus: BusConfig = Field(default_factory=BusConfig)
+    jobs: JobsConfig = Field(default_factory=JobsConfig)
 
     @field_validator("workspace_path", mode="before")
     @classmethod

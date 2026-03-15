@@ -1054,6 +1054,60 @@ def cmd_cron_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_jobs_list(args: argparse.Namespace) -> int:
+    from clawlite.jobs.journal import JobJournal
+    from pathlib import Path
+    cfg = load_config(args.config)
+    state_path = str(cfg.state_path)
+    persist_path = str(getattr(getattr(cfg, "jobs", None), "persist_path", "") or "").strip()
+    if not persist_path:
+        persist_path = str(Path(state_path) / "jobs.db")
+    journal = JobJournal(persist_path)
+    try:
+        journal.open()
+        jobs = journal.load_all()
+        rows = [{"id": j.id, "kind": j.kind, "status": j.status, "priority": j.priority,
+                 "session_id": j.session_id, "created_at": j.created_at} for j in jobs[:50]]
+        _print_json({"jobs": rows, "total": len(jobs)})
+    except Exception as exc:
+        _print_json({"ok": False, "error": str(exc)})
+    finally:
+        journal.close()
+    return 0
+
+
+def cmd_jobs_status(args: argparse.Namespace) -> int:
+    from clawlite.jobs.journal import JobJournal
+    from pathlib import Path
+    cfg = load_config(args.config)
+    state_path = str(cfg.state_path)
+    persist_path = str(getattr(getattr(cfg, "jobs", None), "persist_path", "") or "").strip()
+    if not persist_path:
+        persist_path = str(Path(state_path) / "jobs.db")
+    journal = JobJournal(persist_path)
+    try:
+        journal.open()
+        jobs = {j.id: j for j in journal.load_all()}
+        job = jobs.get(args.job_id)
+        if job is None:
+            _print_json({"ok": False, "error": f"job_not_found:{args.job_id}"})
+        else:
+            _print_json({"id": job.id, "kind": job.kind, "status": job.status,
+                         "result": job.result[:500], "error": job.error[:200],
+                         "created_at": job.created_at, "finished_at": job.finished_at})
+    except Exception as exc:
+        _print_json({"ok": False, "error": str(exc)})
+    finally:
+        journal.close()
+    return 0
+
+
+def cmd_jobs_cancel(args: argparse.Namespace) -> int:
+    # Cancel requires the live runtime — just print a note if journal-only mode
+    _print_json({"ok": False, "error": "cancel requires live runtime; use the API endpoint"})
+    return 1
+
+
 def cmd_skills_list(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
     rows = loader.discover(include_unavailable=args.all)
@@ -1531,6 +1585,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_cron_run = cron_sub.add_parser("run", help="Run job immediately by id")
     p_cron_run.add_argument("job_id")
     p_cron_run.set_defaults(handler=cmd_cron_run)
+
+    p_jobs = sub.add_parser("jobs", help="Inspect persisted background jobs")
+    jobs_sub = p_jobs.add_subparsers(dest="jobs_command", required=True)
+
+    p_jobs_list = jobs_sub.add_parser("list", help="List jobs from the persistence store")
+    p_jobs_list.set_defaults(handler=cmd_jobs_list)
+
+    p_jobs_status = jobs_sub.add_parser("status", help="Show status of a job by id")
+    p_jobs_status.add_argument("job_id")
+    p_jobs_status.set_defaults(handler=cmd_jobs_status)
+
+    p_jobs_cancel = jobs_sub.add_parser("cancel", help="Cancel a job (requires live runtime)")
+    p_jobs_cancel.add_argument("job_id")
+    p_jobs_cancel.set_defaults(handler=cmd_jobs_cancel)
 
     p_skills = sub.add_parser("skills", help="Inspect available skills")
     skills_sub = p_skills.add_subparsers(dest="skills_command", required=True)

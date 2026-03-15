@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
+from clawlite.core.context_window import ContextWindowManager
 from clawlite.core.memory import MemoryRecord, MemoryStore
 from clawlite.core.prompt import PromptBuilder
 from clawlite.core.skills import SkillsLoader
@@ -19,6 +20,21 @@ from clawlite.core.subagent_synthesizer import SubagentSynthesizer
 from clawlite.session.store import SessionStore
 from clawlite.utils.logging import bind_event
 from clawlite.workspace.identity_enforcer import IdentityEnforcer
+
+# Bus import is deferred to avoid circular imports at module load time
+# Used only for optional loop-detection observability
+_BUS_MODULE: Any = None
+
+
+def _get_bus_module() -> Any:
+    global _BUS_MODULE
+    if _BUS_MODULE is None:
+        try:
+            import clawlite.bus as _m  # noqa: PLC0415
+            _BUS_MODULE = _m
+        except Exception:
+            _BUS_MODULE = False
+    return _BUS_MODULE if _BUS_MODULE is not False else None
 
 
 @dataclass(slots=True)
@@ -41,6 +57,8 @@ class TurnBudget:
     max_tool_calls: int | None = None
     max_tool_result_chars: int | None = None
     max_progress_events: int | None = None
+    soft_limit_iterations: int | None = None   # emit budget_warning when reached
+    token_budget: int | None = None            # abort if response tokens exceed
 
 
 @dataclass(slots=True)
@@ -345,7 +363,9 @@ class AgentEngine:
         memory_window: int = 20,
         reasoning_effort_default: str | None = None,
         loop_detection: LoopDetectionSettings | None = None,
+        bus: Any | None = None,
     ) -> None:
+        self._bus = bus
         self.provider = provider
         self.tools = tools
         self.sessions = sessions or SessionStore()
@@ -2316,6 +2336,13 @@ class AgentEngine:
         if prompt.runtime_context:
             messages.append({"role": "user", "content": prompt.runtime_context})
         messages.append({"role": "user", "content": user_text})
+        # Context window budget trim
+        _cwm_budget = getattr(self, "_context_budget_chars", 0)
+        if _cwm_budget > 0:
+            try:
+                messages = ContextWindowManager(budget_chars=_cwm_budget).trim(messages)
+            except Exception as _cwm_exc:
+                run_log.warning("context_window_trim_failed error={}", _cwm_exc)
         base_message_count = len(messages)
         dynamic_message_cap = min(
             self._MAX_DYNAMIC_MESSAGES_PER_TURN,
@@ -2345,6 +2372,12 @@ class AgentEngine:
 
         while iteration < (budget.max_iterations or 1):
             iteration += 1
+            if budget.soft_limit_iterations and iteration >= budget.soft_limit_iterations:
+                await self._emit_progress(
+                    progress_hook=progress_hook,
+                    event=ProgressEvent(stage="budget_warning", session_id=session_id, iteration=iteration,
+                                        message=f"soft limit reached at iteration {iteration}"),
+                )
             if self._stop_requested(session_id=session_id, stop_event=stop_event):
                 final = ProviderResult(text="Stopped current task.", tool_calls=[], model="engine/stop")
                 run_log.info("turn cancelled before llm iteration={}", iteration)
@@ -2451,6 +2484,25 @@ class AgentEngine:
                             counter=progress_counter,
                             limit=budget.max_progress_events or 1,
                         )
+                        if self._bus is not None:
+                            try:
+                                _bm = _get_bus_module()
+                                if _bm is not None:
+                                    await self._bus.publish_inbound(
+                                        _bm.InboundEvent(
+                                            channel="_system",
+                                            session_id=session_id,
+                                            text="loop_detected",
+                                            metadata={
+                                                "detector": "provider_plan_no_progress",
+                                                "severity": plan_severity,
+                                                "session_id": session_id,
+                                            },
+                                        ),
+                                        nowait=True,
+                                    )
+                            except Exception:
+                                pass
                         break
                     provider_plan_history.append(_ProviderPlanRecord(signature=plan_signature))
                     max_history = self.loop_detection.history_size
@@ -2556,6 +2608,26 @@ class AgentEngine:
                                 counter=progress_counter,
                                 limit=budget.max_progress_events or 1,
                             )
+                            if self._bus is not None:
+                                try:
+                                    _bm = _get_bus_module()
+                                    if _bm is not None:
+                                        await self._bus.publish_inbound(
+                                            _bm.InboundEvent(
+                                                channel="_system",
+                                                session_id=session_id,
+                                                text="loop_detected",
+                                                metadata={
+                                                    "detector": "repeating_no_progress",
+                                                    "tool_name": name,
+                                                    "severity": severity,
+                                                    "session_id": session_id,
+                                                },
+                                            ),
+                                            nowait=True,
+                                        )
+                                except Exception:
+                                    pass
                             break
                         ping_pong_stop, ping_pong_severity, ping_pong_streak, alternating_tool_name = self._detect_ping_pong_loop(
                             tool_history,
@@ -2605,6 +2677,26 @@ class AgentEngine:
                                 counter=progress_counter,
                                 limit=budget.max_progress_events or 1,
                             )
+                            if self._bus is not None:
+                                try:
+                                    _bm = _get_bus_module()
+                                    if _bm is not None:
+                                        await self._bus.publish_inbound(
+                                            _bm.InboundEvent(
+                                                channel="_system",
+                                                session_id=session_id,
+                                                text="loop_detected",
+                                                metadata={
+                                                    "detector": "ping_pong_no_progress",
+                                                    "tool_name": name,
+                                                    "severity": ping_pong_severity,
+                                                    "session_id": session_id,
+                                                },
+                                            ),
+                                            nowait=True,
+                                        )
+                                except Exception:
+                                    pass
                             break
                     tool_calls_used += 1
                     await self._emit_progress(
