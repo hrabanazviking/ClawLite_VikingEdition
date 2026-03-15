@@ -57,31 +57,49 @@ clawlite run "hello — what can you do?"
 
 ## ⚙️ Configuration
 
-Config file: `~/.clawlite/config.json`
+Config lives at `~/.clawlite/config.json`. Run `clawlite configure --flow quickstart` to generate it interactively, or start from one of the starters below.
 
-**Minimal starter** — paste into `~/.clawlite/config.json`:
+<details>
+<summary><strong>Minimal — any provider</strong></summary>
 
 ```json
 {
-  "agents": { "defaults": { "model": "gemini/gemini-2.5-flash" } },
-  "providers": { "gemini": { "api_key": "YOUR_GEMINI_KEY" } },
+  "agents": {
+    "defaults": { "model": "gemini/gemini-2.5-flash" }
+  },
+  "providers": {
+    "gemini": { "api_key": "YOUR_GEMINI_KEY" }
+  },
   "gateway": { "port": 8787 }
 }
 ```
 
-**With Telegram:**
+</details>
+
+<details>
+<summary><strong>With Telegram bot</strong></summary>
 
 ```json
 {
-  "agents": { "defaults": { "model": "openai/gpt-4o" } },
-  "providers": { "openai": { "api_key": "sk-..." } },
+  "agents": {
+    "defaults": { "model": "openai/gpt-4o" }
+  },
+  "providers": {
+    "openai": { "api_key": "sk-..." }
+  },
   "channels": {
-    "telegram": { "enabled": true, "token": "BOT_TOKEN", "allow_from": ["123456789"] }
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "allow_from": ["YOUR_TELEGRAM_USER_ID"]
+    }
   }
 }
 ```
 
-Full field reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+</details>
+
+Full field reference → [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
 
 ---
 
@@ -124,76 +142,31 @@ clawlite run "every morning at 9am send me a briefing on HN top stories"
 
 ## ✨ Features
 
-<table>
-<tr>
-<td width="50%">
+**🧠 Memory**
+Hybrid BM25 + vector search · FTS5 full-text · temporal decay + salience scoring · episodic→knowledge consolidation · SQLite or pgvector · snapshot/rollback
 
-### 🧠 Memory
-- Hybrid BM25 + vector similarity search
-- SQLite (local) or pgvector (Postgres)
-- FTS5 full-text indexing
-- Temporal decay + salience scoring
-- Consolidation loop (episodic → knowledge)
-- Snapshot / rollback controls
+**🔁 Always-On Runtime**
+Heartbeat supervisor · persistent cron engine · autonomy wake coordinator · dead-letter queue + replay · background job queue (priority, retry, SQLite) · context window budget trimming · loop detection with bus events · self-evolution runner
 
-</td>
-<td width="50%">
+**🌊 Streaming**
+`engine.stream_run()` async generator · `ProviderChunk` (delta/accumulated/done) · edit-in-place streaming on Telegram and Discord
 
-### 🔁 Always-On Runtime
-- Heartbeat supervisor with recovery telemetry
-- Cron engine (persistent, replay-safe)
-- Autonomy wake coordinator
-- Dead-letter queue + inbound journal replay
-- Subagent lifecycle with parent/child context propagation
-- Background job queue (`JobQueue`) with priority, retry, and SQLite persistence
-- Context window budget management (auto-trims history to fit model limits)
-- Loop detection with bus observability
-- Self-evolution runner
+**🖥️ Operator Dashboard** — `http://localhost:8787`
+Live chat · sessions view · automation controls (cron, recovery, channels) · memory health · tools catalog · WebSocket frame preview
 
-</td>
-</tr>
-<tr>
-<td>
+**🧰 Tools (22+)**
 
-### 🧰 Tools (22+)
-`files` · `exec` · `spawn` · `process` · `web` · `browser` (Playwright)
-`pdf` · `tts` · `mcp` · `sessions` · `cron` · `memory` · `skills`
-`message` · `agents` · `discord_admin` · `apply_patch` · `jobs`
+| Category | Tools |
+|----------|-------|
+| Files | `files` `exec` `apply_patch` `process` |
+| Web | `web` `browser` (Playwright) |
+| AI | `sessions` `agents` `spawn` `memory` `skills` `jobs` |
+| Media | `pdf` `tts` |
+| Integrations | `cron` `mcp` `message` `discord_admin` |
 
-</td>
-<td>
+**🎯 Skills (25+)**
 
-### 🎯 Skills (25+)
-`web-search` · `cron` · `memory` · `coding-agent` · `summarize`
-`github-issues` · `notion` · `obsidian` · `spotify` · `docker`
-`jira` · `linear` · `trello` · `1password` · `apple-notes`
-`weather` · `tmux` · `model-usage` · `session-logs` · `skill-creator`
-`github` · `healthcheck`
-
-</td>
-</tr>
-<tr>
-<td>
-
-### 🌊 Streaming
-- `ProviderChunk` dataclass (delta + accumulated + done)
-- `engine.stream_run()` async generator
-- `send_streaming()` on Discord and Telegram
-- Edit-in-place draft updates as the agent types
-
-</td>
-<td>
-
-### 🖥️ Operator Dashboard
-- Live chat + WebSocket frame preview
-- Sessions view with one-click handoff
-- Automation: cron, channel controls, recovery
-- Knowledge: workspace files, skills, memory health
-- Tools catalog + group/alias browser
-
-</td>
-</tr>
-</table>
+`web-search` · `memory` · `coding-agent` · `summarize` · `github` · `notion` · `obsidian` · `spotify` · `docker` · `jira` · `linear` · `trello` · `1password` · `apple-notes` · `weather` · `tmux` · `model-usage` · `healthcheck` · `skill-creator` · and more
 
 ---
 
