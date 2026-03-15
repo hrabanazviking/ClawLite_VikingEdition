@@ -604,5 +604,105 @@ class LiteLLMProvider(LLMProvider):
         self._record_failure(error=error, status_code=429)
         raise RuntimeError(error)
 
+    async def stream(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ):
+        """Yield ProviderChunk objects from an SSE streaming response.
+
+        Uses the OpenAI-compatible ``stream=true`` endpoint.  Falls back to a
+        single done-chunk when the provider is not OpenAI-compatible (e.g.
+        Anthropic native transport) so callers never need to branch.
+
+        Yields:
+            ProviderChunk(text=delta, accumulated=full_so_far, done=False|True)
+        """
+        # Late import to avoid circular dependency (engine imports providers).
+        from clawlite.core.engine import ProviderChunk  # noqa: PLC0415
+
+        if circuit_error := self._check_circuit():
+            yield ProviderChunk(text="", accumulated="", done=True, error=circuit_error)
+            return
+
+        # Non-OpenAI-compatible providers: fall back to complete()
+        if not self.openai_compatible:
+            try:
+                result = await self.complete(messages=messages, tools=None,
+                                             max_tokens=max_tokens, temperature=temperature)
+                yield ProviderChunk(text=result.text, accumulated=result.text, done=True)
+            except Exception as exc:
+                yield ProviderChunk(text="", accumulated="", done=True, error=str(exc))
+            return
+
+        if not self.api_key.strip() and not self.allow_empty_api_key:
+            error = f"provider_auth_error:missing_api_key:{self.provider_name}"
+            self._record_failure(error=error, status_code=401)
+            yield ProviderChunk(text="", accumulated="", done=True, error=error)
+            return
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {"content-type": "application/json"}
+        if self.api_key.strip():
+            headers["authorization"] = f"Bearer {self.api_key}"
+        headers.update(self.extra_headers)
+
+        payload: dict[str, Any] = {"model": self.model, "messages": messages, "stream": True}
+        if max_tokens is not None:
+            payload["max_tokens"] = max(1, int(max_tokens))
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
+
+        accumulated = ""
+        self._diagnostics["requests"] = int(self._diagnostics["requests"]) + 1
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw = line[len("data:"):].strip()
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(raw)
+                        except Exception:
+                            continue
+                        choices = data.get("choices")
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        text = str(delta.get("content") or "")
+                        finish_reason = choices[0].get("finish_reason")
+                        accumulated += text
+                        done = finish_reason is not None
+                        yield ProviderChunk(text=text, accumulated=accumulated, done=done)
+                        if done:
+                            break
+
+            # Emit final done-chunk if stream ended without finish_reason
+            if not accumulated:
+                yield ProviderChunk(text="", accumulated="", done=True)
+            elif accumulated and not accumulated.endswith("\x00"):  # sentinel to avoid double-done
+                yield ProviderChunk(text="", accumulated=accumulated, done=True)
+
+            self._record_success()
+
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            detail = self._error_detail(exc.response)
+            error = f"provider_http_error:{status}:{detail}"
+            self._record_failure(error=error, status_code=status)
+            yield ProviderChunk(text="", accumulated=accumulated, done=True, error=error)
+        except Exception as exc:
+            error = f"provider_stream_error:{exc}"
+            self._record_failure(error=error)
+            yield ProviderChunk(text="", accumulated=accumulated, done=True, error=error)
+
     def get_default_model(self) -> str:
         return self.model
