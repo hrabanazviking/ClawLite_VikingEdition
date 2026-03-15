@@ -24,7 +24,7 @@
 - **Production channels out of the box** — Telegram, Discord (slash commands, voice, polls), Email, WhatsApp, Slack
 - **Persistent, searchable memory** — hybrid BM25 + vector search, temporal decay, consolidation loop
 - **Self-healing runtime** — heartbeat supervisor, dead-letter replay, automatic provider failover
-- **Batteries included** — 24+ skills, 21+ tools, streaming responses, operator dashboard
+- **Batteries included** — 25+ skills, 21+ tools, streaming responses, operator dashboard
 
 ---
 
@@ -156,11 +156,12 @@ clawlite run "every morning at 9am send me a briefing on HN top stories"
 </td>
 <td>
 
-### 🎯 Skills (24+)
+### 🎯 Skills (25+)
 `web-search` · `cron` · `memory` · `coding-agent` · `summarize`
 `github-issues` · `notion` · `obsidian` · `spotify` · `docker`
 `jira` · `linear` · `trello` · `1password` · `apple-notes`
 `weather` · `tmux` · `model-usage` · `session-logs` · `skill-creator`
+`github` · `healthcheck`
 
 </td>
 </tr>
@@ -265,7 +266,7 @@ Default: `gemini/gemini-2.5-flash` — fast and free-tier friendly.
   │         ▼                 ▼                  ▼                   │
   │   ┌──────────┐    ┌──────────────┐   ┌─────────────┐           │
   │   │ LiteLLM  │    │Tool Registry │   │Skills Loader│           │
-  │   │ 20+ provs│    │ 21+ tools    │   │ 24+ skills  │           │
+  │   │ 20+ provs│    │ 21+ tools    │   │ 25+ skills  │           │
   │   └──────────┘    └──────────────┘   └─────────────┘           │
   │                                                                  │
   │  ┌─────────────────────────────────────────────────────────┐    │

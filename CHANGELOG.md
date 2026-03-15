@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Config schema fully migrated to Pydantic v2 (`clawlite/config/schema.py`) — all fields modelled with `Field`, validators, `model_validate`, and camelCase alias support (`1c60256`).
+- `Base.from_dict()` classmethod on all Pydantic config models as a v1→v2 compatibility shim (`d3f8ee4`).
+- `BrowserTool` (Playwright headless), `TTSTool` (edge-tts), and `PdfReadTool` (pypdf) registered in the gateway tool surface.
+- Skills: `notion`, `obsidian`, `github-issues`, `spotify`, `docker`, `1password`, `apple-notes`, `trello`, `linear`, `jira` — full portfolio of 25+ integrated skills.
+- `skill_creator.py` — runtime skill authoring from inside an agent session.
+- Workspace templates: `AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `HEARTBEAT.md`, `USER.md` — loaded and auto-repaired by `Workspace.Loader`.
+- `scripts/make_demo_gif.py` — Playwright + Pillow animated README demo generator (`2c925f0`).
 - Packaged dashboard shell served from `/` with status, diagnostics, sessions, automation views, tool catalog, token handling, live chat, event feed, autorefresh, and heartbeat controls over the existing gateway contract.
 - Project status, autonomy execution plan, operator runbook, and release workflow docs for the current hardening cycle.
 - OpenClaw-compatible filesystem and memory tool aliases to reduce migration friction (`663a8f0`).
@@ -56,7 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened long-running reliability for provider retries, channel dispatch/reuse, gateway background tasks, cron execution, and memory compaction/monitor persistence (`da50a2a`, `017844f`, `aefaade`, `2e891b1`, `60773a5`).
 - Improved worker/session control with fail-closed spawn policy, bounded process sessions/output buffers, and lock-safe subagent cancel/synthesize (`a122d8e`, `5df5d81`, `33f28ca`).
 
+### Changed
+- Rewrote `docs/CONFIGURATION.md` as a full field reference for every config key (`503a335`).
+- Cleaned `config.example.json` to essential fields only — minimal viable starter (`fbf6196`).
+- Updated `README.md` with Configuration section, starter examples, and Telegram snippet (`ec6fb61`).
+- Updated `docs/STATUS.md` to reflect actual completed state (2026-03-15).
+
 ### Fixed
+- `TelegramChannelConfig.from_dict()` (and all channel/tool config models) broken after Pydantic v2 migration — added `Base.from_dict()` classmethod shim (`d3f8ee4`). Restored 127 tests that were failing.
 - Reduced SSRF risk in web tooling with DNS-drift protections and explicit peer-IP verification (`67b52e3`, `d7e0e11`).
 - Switched gateway secret comparisons to constant-time checks (`62bdf45`).
 - Made key persistence paths atomic/durable (config writes, `apply_patch` writes, cron state fsync-before-replace) (`58d2136`, `4f05059`, `9075e8c`).

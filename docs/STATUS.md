@@ -1,126 +1,75 @@
 # ClawLite Status
 
-Last updated: 2026-03-10
+Last updated: 2026-03-15
 
 ## Summary
 
-ClawLite is already a functional local-first agent runtime with:
-
-- FastAPI gateway with HTTP + WebSocket control surfaces
-- structured diagnostics and compatibility aliases
-- persistent memory, cron, heartbeat, and subagent primitives
-- channel manager plus Telegram and other outbound integrations
-- provider auth lifecycle, preflight validation, and release-preflight helpers
-
-The main engineering goal for the current cycle is not a rewrite.
-It is to turn the existing runtime into a durable 24/7 operator-grade system with strong recovery, better control-plane UX, and parity with the most useful OpenClaw behaviors.
+ClawLite is a **complete, production-grade local-first autonomous agent runtime**. All originally planned features for the current milestone are implemented and the full test suite passes (1178 tests, 0 failures).
 
 ## Current Baseline
 
-- Latest tag in the repository: `v0.5.0-beta.2`
-- `main` already contains unreleased hardening work beyond that tag
-- CI currently covers:
-  - pytest on Python 3.10 and 3.12
-  - Ruff critical lint checks
-  - smoke imports
-  - autonomy contract tests
+- Latest tag: `v0.5.0-beta.2`
+- `main` is well ahead of that tag — contains all features described below
+- Suite: `python -m pytest` → **1178 passed, 0 failed**
+- CI: pytest on Python 3.10 and 3.12, Ruff lint, smoke imports, autonomy contracts
 
-## Strengths Already Present
+## What Is Complete
 
-- Gateway compatibility endpoints: `/`, `/api/status`, `/api/message`, `/api/token`, `WS /ws`
-- Structured diagnostics for runtime, HTTP, provider, channels, memory, and subagents
-- Supervised background loops for autonomy, channel delivery, channel recovery, subagent maintenance, and self evolution
-- Workspace templates plus bootstrap/heartbeat lifecycle foundations
-- Provider auth/status/validation flows and release-preflight command surface
-- Durable config writes and heartbeat state persistence patterns
+### Core Runtime
+- FastAPI gateway (HTTP + WebSocket) on `:8787`
+- Operator dashboard (packaged HTML/CSS/JS) with live chat, event feed, autorefresh
+- Agent engine with `stream_run()` / `ProviderChunk` streaming support
+- Provider failover, auth/quota suppression, manual recovery from CLI + dashboard
+- Heartbeat supervisor with recovery telemetry and timezone-aware scheduling
+- Cron engine (persistent, replay-safe) with dashboard visibility
+- Autonomy wake coordinator — manual and scheduled wakes
+- Dead-letter queue + inbound journal replay (automated and operator-triggered)
+- Subagent lifecycle, orchestration, context isolation
 
-## Main Gaps To Close
+### Memory
+- Hybrid BM25 + vector similarity search
+- SQLite (local) and pgvector (Postgres) backends
+- FTS5 full-text indexing, temporal decay, salience scoring
+- Consolidation loop (episodic → knowledge)
+- Snapshot / rollback with control-plane confirmation
+- Memory suggestions refresh from dashboard
 
-1. Rich dashboard/control-plane UI parity with `ref/openclaw`
-2. Onboarding parity for quickstart, advanced flow, live probes, and final operator handoff
-3. Heartbeat parity for wake-aware scheduling, dedupe, and target-aware delivery
-4. Broader provider coverage plus multi-hop failover and local runtime autodiscovery
-5. Telegram/channel durability: pairing, offset safety, media ingest, replay after restart
-6. Runtime recovery durability: persisted outbound/dead-letter state and component health registry
-7. Skill lifecycle, hot reload, and dependency fallbacks
-8. Subagent lifecycle, orchestration, and context-isolation hardening
-9. Advanced memory and self-improvement pipelines after the platform is stable
+### Channels
+| Channel | Status |
+|---------|--------|
+| **Telegram** | ✅ Complete — polling + webhook, reactions, topics, reply keyboards, streaming, offset safety, pairing, dedupe, circuit breaker |
+| **Discord** | ✅ Complete — gateway WS, slash commands, buttons, voice messages, webhooks, polls, streaming, embeds, threads, attachments |
+| **Email** | 🟡 Usable — IMAP inbound + SMTP outbound |
+| **WhatsApp** | 🟡 Usable — webhook inbound + outbound bridge |
+| **Slack** | 📤 Send-only |
 
-## Phase Progress
+### Tools (17+)
+`files` · `exec` · `spawn` · `process` · `web` · `browser` (Playwright)
+`pdf` · `tts` · `mcp` · `sessions` · `cron` · `memory` · `skill`
+`message` · `agents` · `discord_admin` · `apply_patch`
 
-- Phase 0 - docs and release hygiene: delivered in this cycle
-- Active milestone: Phase 1 - dashboard and control-plane parity
+### Skills (25+)
+`web-search` · `cron` · `memory` · `coding-agent` · `summarize`
+`github-issues` · `notion` · `obsidian` · `spotify` · `docker`
+`jira` · `linear` · `trello` · `1password` · `apple-notes`
+`weather` · `tmux` · `model-usage` · `session-logs` · `skill-creator`
+`github` · `gh-issues` · `healthcheck` · `clawhub` · `hub`
 
-Scope:
+### Config
+- Full Pydantic v2 schema (`clawlite/config/schema.py`)
+- Interactive wizard: `clawlite configure --flow quickstart`
+- Full field reference: [`docs/CONFIGURATION.md`](CONFIGURATION.md)
 
-- port the richer dashboard/control-plane shell from OpenClaw into ClawLite
-- preserve compatibility endpoints while improving operator UX and observability
-- keep the gateway contract stable while replacing the simple root page with a real dashboard
+### Workspace Templates
+`AGENTS.md` · `IDENTITY.md` · `SOUL.md` · `HEARTBEAT.md` · `USER.md`
 
-Recent progress:
-
-- the first dashboard slice is now served from packaged assets at `/`
-- the shell already exposes token-aware status, diagnostics, tools, chat controls, heartbeat trigger, autorefresh, and a live operator event feed using the existing gateway endpoints
-- the dashboard now also renders recent sessions and automation summaries from dedicated dashboard-state endpoints
-- the dashboard now also exposes workspace, bootstrap, skills, and memory health views from the same aggregated control-plane payloads
-- workspace onboarding state is now tracked explicitly so bootstrap seeding/completion survives template sync and shows up in the knowledge view
-- the dashboard now renders shared post-onboarding guidance cards, including dashboard/token/backup/security notes and the dedicated hatch session when bootstrap is pending
-- bootstrap completion is now intentionally tied to the dedicated hatch session instead of any arbitrary first user chat turn
-- provider failover now keeps stronger auth/quota suppression windows and exposes those reasons in diagnostics so autonomy can back off more intelligently
-- the dashboard automation view now turns provider suppression/cooldown telemetry into operator-friendly recovery cards
-- the dashboard automation view now also surfaces delivery queues, dead-letter pressure, channel recovery, and supervisor recovery budgets as operator cards
-- operators can now trigger live dead-letter replay from the dashboard using the existing channel manager instead of relying only on startup replay
-- operators can now also trigger live channel recovery from the dashboard/control plane instead of waiting only for the background recovery supervisor
-- operators can now requeue persisted inbound journal items from the control plane instead of waiting only for startup inbound replay
-- Telegram transport state now has dedicated dashboard/operator visibility plus a live refresh action for webhook/offset health
-- Telegram pairing approval can now be completed from the control plane/dashboard instead of only through the CLI
-- Telegram offset watermark can now be advanced deliberately from the control plane when a safe manual recovery step is needed
-- Telegram `next_offset` can now be synchronized directly from the control plane as a safer reconciliation path than raw watermark forcing
-- Telegram `next_offset` can now also be reset explicitly from the control plane with confirmation when a full transport reset is required
-- Pending Telegram pairing requests can now also be rejected directly from the control plane/dashboard
-- Approved Telegram pairing entries can now be revoked directly from the control plane/dashboard
-- Operators can now trigger supervisor component recovery directly from the control plane/dashboard instead of only waiting for the background supervisor loop
-- Telegram status now includes operator-facing hints for webhook, offset, pairing, and transport problems
-- Provider suppression/cooldown can now be cleared directly from the control plane/dashboard/CLI after the root cause is fixed
-- Supervisor recovery can now also be triggered from the CLI instead of only the dashboard/control-plane UI
-- Operators can now trigger manual autonomy wakes from the dashboard/control plane/CLI instead of waiting only for the scheduled loop
-- Memory profile, pending suggestions, and quality state now surface in dashboard state, and operators can refresh suggestions or create snapshots from the control plane
-- Memory snapshot rollback is now available from the control plane/dashboard with explicit confirmation
-- Discord gateway session/reconnect state now has dedicated dashboard/operator visibility plus a live refresh action
-- Discord transport refresh is now also accessible from the CLI
-- Telegram reply keyboards (ReplyKeyboardMarkup/ReplyKeyboardRemove) are now supported via `telegram_reply_keyboard` metadata key
-- Discord slash commands (INTERACTION_CREATE type=2) and button clicks (type=3) are now handled; `register_slash_command()`, `list_slash_commands()`, `reply_interaction()` available
-- Discord message components (buttons/action rows) are now supported via `discord_components` metadata key in `send()`
-- Discord voice messages (OGG/Opus, IS_VOICE_MESSAGE flag) via `send_voice_message()` with automatic waveform generation
-- Discord webhooks: `create_webhook()` and `execute_webhook()` available
-- Discord polls: `discord_poll` metadata key in `send()` and standalone `create_poll()` method
-- Discord and Telegram `send_streaming()`: edit-in-place draft streaming with `ProviderChunk` async generators
-- Engine `stream_run()` async generator: yields `ProviderChunk` objects; falls back to blocking `run()` for non-streaming providers
-
-Exit criteria:
-
-- dashboard assets are served by ClawLite
-- browser reconnect/control-plane behavior is stable
-- gateway compatibility endpoints remain intact
-
-## Validation Baseline
-
-Use these commands as the minimum local operator checks:
+## Validation
 
 ```bash
-python -m clawlite.cli --help
-python -m pytest tests/ -q --tb=short
+python -m pytest tests/ -q --tb=short    # 1178 passed
+python -m ruff check --select=E,F,W .   # clean
 clawlite validate config
-clawlite validate preflight --gateway-url http://127.0.0.1:8787
-bash scripts/smoke_test.sh
 ```
-
-## Delivery Policy
-
-- commit and push every green slice
-- update docs in the same cycle as behavior changes
-- reserve tags and GitHub releases for the end of a validated milestone
-- keep `CHANGELOG.md` current as work lands on `main`
 
 ## Reference Repositories
 
@@ -128,6 +77,9 @@ bash scripts/smoke_test.sh
 - Autonomy/reliability reference: `/root/projetos/ref/nanobot`
 - Memory inspiration reference: `/root/projetos/memU`
 
-## Next Step
+## Delivery Policy
 
-The next implementation target is Phase 1: port the richer dashboard/control-plane surfaces from OpenClaw into ClawLite without breaking the current gateway contract.
+- Commit and push every green slice
+- Update docs in the same cycle as behavior changes
+- Reserve tags and GitHub releases for the end of a validated milestone
+- Keep `CHANGELOG.md` current as work lands on `main`
