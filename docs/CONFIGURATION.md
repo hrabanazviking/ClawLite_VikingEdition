@@ -2,267 +2,277 @@
 
 Default file: `~/.clawlite/config.json`
 
-Main fields (summary):
-- `workspace_path`, `state_path`
-- `provider` and `providers` (active model, credentials/base per provider)
-- `auth.providers.openai_codex` (OAuth token/account for Codex provider path)
-- `provider` reliability controls: retry (`retry_*`), circuit breaker (`circuit_*`), optional `fallback_model`
-- `agents.defaults` (model, limits, temperature)
-- `agents.defaults.memory` (semantic retrieval, proactive monitor, privacy/profile behavior, backend)
-- `gateway.host`, `gateway.port`
-- `gateway.auth` (API auth control)
-- `gateway.diagnostics` (exposure and protection of `/v1/diagnostics`)
-- `gateway.heartbeat` (enable/disable and interval for gateway heartbeat)
-- `gateway.supervisor` (runtime health checks + bounded auto-recovery loop)
-- `gateway.autonomy` (opt-in periodic autonomy review worker)
-- `scheduler.timezone` (timezone for cron)
-- `channels` (telegram/discord/slack/whatsapp + extras)
+Both snake_case and camelCase keys are accepted everywhere. Unknown keys are silently ignored.
+
+## Quick start (minimum config)
+
+```json
+{
+  "agents": { "defaults": { "model": "gemini/gemini-2.5-flash" } },
+  "providers": { "gemini": { "api_key": "YOUR_KEY" } }
+}
+```
+
+---
+
+## Top-level fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `workspace_path` | string | `~/.clawlite/workspace` | Working directory for agent file tools |
+| `state_path` | string | `~/.clawlite/state` | Persistent state (sessions, memory DB) |
+
+---
+
+## `agents.defaults`
+
+| Field | Default | Description |
+|---|---|---|
+| `model` | `gemini/gemini-2.5-flash` | LiteLLM model string |
+| `max_tokens` | `8192` | Max tokens per LLM call |
+| `temperature` | `0.1` | Sampling temperature |
+| `max_tool_iterations` | `40` | Max tool calls per agent turn |
+| `memory_window` | `100` | Recent messages kept in context |
+| `session_retention_messages` | `2000` | Max messages per session (null = unlimited) |
+| `reasoning_effort` | `null` | `"low"`, `"medium"`, `"high"`, or null |
+| `provider` | `"auto"` | Provider hint (overridden by model prefix) |
+
+### `agents.defaults.memory`
+
+| Field | Default | Description |
+|---|---|---|
+| `semantic_search` | `false` | Enable semantic search on memory retrieval |
+| `auto_categorize` | `false` | Auto-tag memories |
+| `proactive` | `false` | Proactive memory injection |
+| `proactive_retry_backoff_s` | `300.0` | Backoff between proactive retries |
+| `proactive_max_retry_attempts` | `3` | Max proactive retries |
+| `emotional_tracking` | `false` | Track emotional context in memories |
+| `backend` | `"sqlite"` | `"sqlite"` or `"pgvector"` |
+| `pgvector_url` | `""` | Postgres URL for pgvector backend |
+
+---
+
+## `providers`
+
+Each key is a provider name. Built-in keys: `openrouter`, `gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `ollama`, `vllm`, `custom`. Any other key is a custom provider.
+
+```json
+"providers": {
+  "gemini":     { "api_key": "AIza..." },
+  "openai":     { "api_key": "sk-..." },
+  "anthropic":  { "api_key": "sk-ant-..." },
+  "openrouter": { "api_key": "sk-or-..." },
+  "mycompany":  { "api_key": "...", "api_base": "https://api.mycompany.com/v1" }
+}
+```
+
+Per-provider fields: `api_key`, `api_base`, `extra_headers` (dict).
+
+---
+
+## `provider` (advanced LiteLLM settings)
+
+| Field | Default | Description |
+|---|---|---|
+| `model` | `gemini/gemini-2.5-flash` | Sync'd with `agents.defaults.model` |
+| `litellm_api_key` | `""` | Global API key override for LiteLLM |
+| `litellm_base_url` | `https://api.openai.com/v1` | Global base URL override |
+| `fallback_model` | `""` | Fallback model on primary failure |
+| `retry_max_attempts` | `3` | Max LLM call retries |
+| `retry_initial_backoff_s` | `0.5` | Initial retry backoff |
+| `retry_max_backoff_s` | `8.0` | Maximum retry backoff |
+| `retry_jitter_s` | `0.2` | Retry jitter |
+| `circuit_failure_threshold` | `3` | Failures before circuit opens |
+| `circuit_cooldown_s` | `30.0` | Circuit breaker cooldown |
+
+---
+
+## `gateway`
+
+| Field | Default | Description |
+|---|---|---|
+| `host` | `127.0.0.1` | Listen address |
+| `port` | `8787` | Listen port |
+
+### `gateway.auth`
+
+| Field | Default | Description |
+|---|---|---|
+| `mode` | `"off"` | `"off"`, `"optional"`, or `"required"` |
+| `token` | `""` | Bearer token |
+| `allow_loopback_without_auth` | `true` | Skip auth for 127.0.0.1 connections |
+| `header_name` | `"Authorization"` | Auth header name |
+| `query_param` | `"token"` | URL query param for token |
+| `protect_health` | `false` | Require auth on `/health` endpoint |
+
+### `gateway.heartbeat`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Enable heartbeat pings |
+| `interval_s` | `1800` | Heartbeat interval in seconds (min 5) |
+
+### `gateway.supervisor`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Enable supervisor watchdog |
+| `interval_s` | `20` | Supervisor check interval |
+| `cooldown_s` | `30` | Cooldown between supervisor actions |
+
+### `gateway.autonomy`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable autonomous action loop |
+| `interval_s` | `900` | Check interval |
+| `action_policy` | `"balanced"` | `"balanced"` or `"conservative"` |
+| `environment_profile` | `"dev"` | `"dev"`, `"staging"`, or `"prod"` (prod forces conservative defaults) |
+| `action_cooldown_s` | `120.0` | Min seconds between actions |
+| `action_rate_limit_per_hour` | `20` | Max actions per hour |
+| `min_action_confidence` | `0.55` | Minimum confidence to act (0.0-1.0) |
+| `max_actions_per_run` | `1` | Max actions per cycle |
+| `timeout_s` | `45.0` | Action execution timeout |
+| `max_queue_backlog` | `200` | Max pending queue depth |
+| `session_id` | `"autonomy:system"` | Session ID for autonomous runs |
+| `audit_export_path` | `""` | Path to export audit log |
+| `audit_max_entries` | `200` | Max audit log entries |
+
+**Advanced tuning fields:** `tuning_loop_enabled`, `tuning_loop_interval_s`, `tuning_loop_timeout_s`, `tuning_loop_cooldown_s`, `tuning_degrading_streak_threshold`, `tuning_recent_actions_limit`, `tuning_error_backoff_s`, `self_evolution_enabled`, `self_evolution_cooldown_s`.
+
+---
+
+## `channels`
+
+### `channels.telegram`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable Telegram channel |
+| `token` | `""` | Bot token from @BotFather |
+| `allow_from` | `[]` | Allowed user IDs (empty = all) |
+| `mode` | `"polling"` | `"polling"` or `"webhook"` |
+| `dm_policy` | `"open"` | DM access: `"open"` or `"allowlist"` |
+| `group_policy` | `"open"` | Group access: `"open"` or `"allowlist"` |
+| `transcribe_voice` | `true` | Transcribe voice messages |
+| `transcription_language` | `"pt"` | Whisper language hint |
+| `transcription_model` | `"whisper-large-v3-turbo"` | Whisper model |
+| `transcription_base_url` | `https://api.groq.com/openai/v1` | Whisper API base |
+| `webhook_enabled` | `false` | Use webhook instead of polling |
+| `webhook_url` | `""` | Public webhook URL |
+| `webhook_path` | `"/api/webhooks/telegram"` | Webhook path |
+
+### `channels.discord`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable Discord channel |
+| `token` | `""` | Bot token |
+| `allow_from` | `[]` | Allowed user/guild IDs |
+| `typing_enabled` | `true` | Send typing indicators |
+
+### `channels.slack`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable Slack channel |
+| `bot_token` | `""` | Bot OAuth token |
+| `app_token` | `""` | App-level token (for Socket Mode) |
+| `allow_from` | `[]` | Allowed user IDs |
+
+### `channels.email`
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable email channel |
+| `imap_host` | `""` | IMAP server hostname |
+| `imap_port` | `993` | IMAP port |
+| `imap_user` | `""` | IMAP username |
+| `imap_password` | `""` | IMAP password |
+| `imap_use_ssl` | `true` | Use SSL for IMAP |
+| `smtp_host` | `""` | SMTP server hostname |
+| `smtp_port` | `465` | SMTP port |
+| `smtp_user` | `""` | SMTP username |
+| `smtp_password` | `""` | SMTP password |
+| `allow_from` | `[]` | Allowed sender addresses |
+| `poll_interval_s` | `30.0` | IMAP poll interval |
+
+---
+
+## `tools.web`
+
+| Field | Default | Description |
+|---|---|---|
+| `proxy` | `""` | HTTP proxy URL |
+| `timeout` | `15.0` | Fetch timeout in seconds |
+| `search_timeout` | `10.0` | Search timeout in seconds |
+| `max_redirects` | `5` | Max HTTP redirects |
+| `max_chars` | `12000` | Max response characters |
+| `block_private_addresses` | `true` | Block RFC-1918 addresses |
+| `brave_api_key` | `""` | Brave Search API key |
+| `brave_base_url` | `https://api.search.brave.com/...` | Brave Search endpoint |
+| `searxng_base_url` | `""` | SearXNG base URL (alternative search) |
+| `allowlist` | `[]` | Allowed URL patterns |
+| `denylist` | `[]` | Denied URL patterns |
+
+## `tools.exec`
+
+| Field | Default | Description |
+|---|---|---|
+| `timeout` | `60` | Command timeout in seconds |
+| `path_append` | `""` | Extra PATH entries |
+| `deny_patterns` | `[]` | Blocked command patterns (regex) |
+| `allow_patterns` | `[]` | Allowed command patterns (regex) |
+| `deny_path_patterns` | `[]` | Blocked path patterns |
+| `allow_path_patterns` | `[]` | Allowed path patterns |
+
+## `tools.mcp`
+
+| Field | Default | Description |
+|---|---|---|
+| `default_timeout_s` | `20.0` | Default MCP call timeout |
+| `servers` | `{}` | Named MCP server configs |
+
+Each server under `tools.mcp.servers`:
+
+```json
+"tools": {
+  "mcp": {
+    "servers": {
+      "my_server": {
+        "url": "https://mcp.example.com",
+        "timeout_s": 30.0,
+        "headers": { "Authorization": "Bearer token" }
+      }
+    }
+  }
+}
+```
+
+---
 
 ## Environment variables
 
-- `CLAWLITE_MODEL`
-- `CLAWLITE_WORKSPACE`
-- `CLAWLITE_LITELLM_BASE_URL`
-- `CLAWLITE_LITELLM_API_KEY`
-- `CLAWLITE_GATEWAY_HOST`
-- `CLAWLITE_GATEWAY_PORT`
-- `CLAWLITE_GATEWAY_AUTH_MODE` (`off|optional|required`)
-- `CLAWLITE_GATEWAY_AUTH_TOKEN`
-- `CLAWLITE_GATEWAY_AUTH_ALLOW_LOOPBACK` (`true/false`)
-- `CLAWLITE_GATEWAY_DIAGNOSTICS_ENABLED` (`true/false`)
-- `CLAWLITE_GATEWAY_DIAGNOSTICS_REQUIRE_AUTH` (`true/false`)
-- `CLAWLITE_GATEWAY_DIAGNOSTICS_INCLUDE_PROVIDER_TELEMETRY` (`true/false`)
-- `CLAWLITE_CODEX_ACCESS_TOKEN`
-- `OPENAI_CODEX_ACCESS_TOKEN`
-- `OPENAI_ACCESS_TOKEN`
-- `CLAWLITE_CODEX_ACCOUNT_ID`
-- `OPENAI_ORG_ID`
+| Variable | Effect |
+|---|---|
+| `CLAWLITE_MODEL` | Override `agents.defaults.model` |
+| `CLAWLITE_WORKSPACE` | Override `workspace_path` |
+| `CLAWLITE_LITELLM_BASE_URL` | Override `provider.litellm_base_url` |
+| `CLAWLITE_LITELLM_API_KEY` | Override `provider.litellm_api_key` |
+| `CLAWLITE_GATEWAY_HOST` | Override `gateway.host` |
+| `CLAWLITE_GATEWAY_PORT` | Override `gateway.port` |
+| `CLAWLITE_GATEWAY_AUTH_MODE` | Override `gateway.auth.mode` |
+| `CLAWLITE_GATEWAY_AUTH_TOKEN` | Override `gateway.auth.token` |
+| `CLAWLITE_CONFIG_STRICT` | Set `1` to reject unknown config keys |
 
-Note: provider-specific key variables (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, etc.) are still valid for provider credential resolution.
+---
 
-## Current gateway schema
+## Compatibility notes
 
-`gateway` no longer uses `gateway.token` as the main field. The current format is:
+**camelCase accepted:** All fields accept camelCase equivalents (e.g. `maxTokens`, `intervalS`, `blockPrivateAddresses`).
 
-```json
-{
-  "gateway": {
-    "host": "127.0.0.1",
-    "port": 8787,
-    "auth": {
-      "mode": "off",
-      "token": "",
-      "allow_loopback_without_auth": true,
-      "header_name": "Authorization",
-      "query_param": "token",
-      "protect_health": false
-    },
-    "diagnostics": {
-      "enabled": true,
-      "require_auth": true,
-      "include_config": false,
-      "include_provider_telemetry": true
-    },
-    "heartbeat": {
-      "enabled": true,
-      "interval_s": 1800
-    },
-    "supervisor": {
-      "enabled": true,
-      "interval_s": 20,
-      "cooldown_s": 30
-    },
-    "autonomy": {
-      "enabled": false,
-      "interval_s": 900,
-      "cooldown_s": 300,
-      "timeout_s": 45.0,
-      "max_queue_backlog": 200,
-      "session_id": "autonomy:system",
-      "max_actions_per_run": 1,
-      "action_policy": "balanced",
-      "environment_profile": "dev",
-      "action_cooldown_s": 120.0,
-      "action_rate_limit_per_hour": 20,
-      "max_replay_limit": 50,
-      "min_action_confidence": 0.55,
-      "degraded_backlog_threshold": 300,
-      "degraded_supervisor_error_threshold": 3,
-      "audit_export_path": "",
-      "audit_max_entries": 200
-    }
-  }
-}
-```
+**Legacy fields migrated automatically:**
+- `gateway.token` → `gateway.auth.token` (and sets mode to `required`)
+- `scheduler.heartbeat_interval_seconds` → `gateway.heartbeat.interval_s`
 
-Compatibility: if legacy `gateway.token` exists, the loader migrates it to `gateway.auth.token` and sets `gateway.auth.mode=required` when needed.
-
-## Heartbeat (compatibility note)
-
-- Current preference: `gateway.heartbeat.interval_s`.
-- Legacy field: `scheduler.heartbeat_interval_seconds`.
-- If `gateway.heartbeat.interval_s` is not explicitly set, the loader uses the legacy value from `scheduler`.
-
-## Memory config (`agents.defaults.memory`)
-
-Supported keys:
-- `agents.defaults.memory.semantic_search` (default: `false`): enables hybrid ranking (`BM25 + vector`) during retrieval.
-- `agents.defaults.memory.auto_categorize` (default: `false`): enables category assignment heuristics during memorize/consolidation.
-- `agents.defaults.memory.proactive` (default: `false`): enables `MemoryMonitor` integration in gateway runtime (heartbeat scans + proactive delivery).
-- `agents.defaults.memory.emotional_tracking` (default: `false`): stores emotional tone markers on memory records.
-- `agents.defaults.memory.backend` (default: `sqlite`; accepted: `sqlite`, `pgvector`; legacy `jsonl` normalizes to `sqlite`).
-- `agents.defaults.memory.pgvector_url` (default: empty): PostgreSQL DSN for pgvector backend.
-
-Fallback and runtime behavior:
-- Unknown `backend` values are normalized to `sqlite`.
-- `semantic_search=false` keeps lexical-only retrieval behavior.
-- Gateway runtime validates `pgvector`: if `backend=pgvector` and URL/driver support is missing, startup fails with an explicit runtime error telling the operator to configure `pgvector_url` or switch to `sqlite`.
-- Memory store backend operations are fail-soft (embedding upsert/query/delete exceptions do not crash turns); retrieval falls back to local embedding/BM25 paths when backend similarity calls are unavailable.
-
-Example:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "memory": {
-        "semantic_search": true,
-        "auto_categorize": true,
-        "proactive": true,
-        "emotional_tracking": true,
-        "backend": "sqlite",
-        "pgvector_url": ""
-      }
-    }
-  }
-}
-```
-
-## Runtime supervisor
-
-- `gateway.supervisor.enabled` enables the 24/7 health supervisor loop.
-- `gateway.supervisor.interval_s` controls supervisor tick cadence.
-- `gateway.supervisor.cooldown_s` applies per-component cooldown before another recovery attempt.
-- Snake case and camelCase are accepted (`interval_s` / `intervalS`, `cooldown_s` / `cooldownS`).
-
-## Runtime autonomy bootstrap
-
-- `gateway.autonomy.enabled` is opt-in and defaults to `false` to avoid unexpected model usage/cost.
-- `gateway.autonomy.interval_s` controls periodic autonomy ticks.
-- `gateway.autonomy.cooldown_s` enforces minimum spacing between non-forced runs.
-- `gateway.autonomy.timeout_s` bounds each autonomy turn with timeout containment.
-- `gateway.autonomy.max_queue_backlog` skips non-forced ticks when `outbound_size + dead_letter_size` is high.
-- `gateway.autonomy.session_id` defines the engine session used for autonomy turns.
-- `gateway.autonomy.max_actions_per_run` bounds autonomous action execution per run (default `1`).
-- `gateway.autonomy.action_policy` supports `balanced` (default) and `conservative` profiles.
-- `gateway.autonomy.environment_profile` supports `dev` (default), `staging`, and `prod` policy layering.
-- `gateway.autonomy.action_cooldown_s` enforces per-action cooldown (default `120s`).
-- `gateway.autonomy.action_rate_limit_per_hour` enforces per-action hourly cap (default `20`).
-- `gateway.autonomy.max_replay_limit` clamps `dead_letter_replay_dry_run.limit` (default `50`).
-- `gateway.autonomy.min_action_confidence` blocks low-confidence action proposals before execution.
-- `gateway.autonomy.degraded_backlog_threshold` and `gateway.autonomy.degraded_supervisor_error_threshold` define degraded-runtime guardrails.
-- `gateway.autonomy.audit_export_path` sets JSONL persistence path for autonomy action audit rows. Empty uses runtime default (`<state_path>/autonomy-actions-audit.jsonl`).
-- `gateway.autonomy.audit_max_entries` bounds in-memory/export batch size for recent audit reads.
-- Environment profile behavior applies only to omitted guardrail fields (explicit values always win): `dev` keeps current defaults, `staging` applies moderate tightening, and `prod` applies strict defaults aligned with conservative behavior.
-- Action policy fallback: if `action_policy` is omitted and `environment_profile=prod`, policy defaults to `conservative`; otherwise it defaults to `balanced`.
-- Conservative policy behavior remains additive: omitted guardrail fields auto-tighten to `action_cooldown_s=300`, `action_rate_limit_per_hour=8`, `min_action_confidence=0.75`, `degraded_backlog_threshold=150`, and `degraded_supervisor_error_threshold=1`.
-- Snake case and camelCase are accepted (`interval_s`/`intervalS`, `cooldown_s`/`cooldownS`, `timeout_s`/`timeoutS`, `max_queue_backlog`/`maxQueueBacklog`, `session_id`/`sessionId`, `max_actions_per_run`/`maxActionsPerRun`, `action_policy`/`actionPolicy`, `environment_profile`/`environmentProfile`, `action_cooldown_s`/`actionCooldownS`, `action_rate_limit_per_hour`/`actionRateLimitPerHour`, `max_replay_limit`/`maxReplayLimit`, `min_action_confidence`/`minActionConfidence`, `degraded_backlog_threshold`/`degradedBacklogThreshold`, `degraded_supervisor_error_threshold`/`degradedSupervisorErrorThreshold`, `audit_export_path`/`auditExportPath`, `audit_max_entries`/`auditMaxEntries`).
-
-## Automatic provider resolution
-
-- `provider.model` defines the preferred provider (`gemini/...`, `openrouter/...`, `openai/...`, `groq/...`).
-- If the key is not in `provider.litellm_api_key`, the runtime tries provider-specific environment variables.
-- `provider.litellm_base_url` is optional for common providers: runtime applies provider default base URL.
-- Provider reliability fields are additive and backward-compatible:
-  - `retry_max_attempts`, `retry_initial_backoff_s`, `retry_max_backoff_s`, `retry_jitter_s`
-  - `circuit_failure_threshold`, `circuit_cooldown_s`
-  - `fallback_model` (optional second model path for retryable provider failures)
-- Runtime note: the gateway helper currently forwards `model`, `auth`, and `providers` into provider construction, but not the top-level `provider.retry_*`, `provider.circuit_*`, or `provider.fallback_model` fields. The provider classes still use their built-in default retry/circuit behavior, but persisted provider-level failover intent is not fully wired through the live gateway path yet.
-
-## Codex OAuth auth block
-
-Use this block to persist Codex OAuth credentials (same values can be overridden by env vars):
-
-```json
-{
-  "auth": {
-    "providers": {
-      "openai_codex": {
-        "access_token": "<oauth-access-token>",
-        "account_id": "org_123",
-        "source": "cli:access_token"
-      }
-    }
-  }
-}
-```
-
-Accepted aliases in config parsing:
-- provider keys: `openai_codex`, `openai-codex`, `codex`, `openaiCodex`
-- token keys: `access_token`, `accessToken`, `token`
-- account keys: `account_id`, `accountId`, `org_id`, `orgId`, `organization`
-
-## Telegram (main options)
-
-In `channels.telegram`, besides `enabled` and `token`, the most used operational fields are:
-- `mode` (`polling` or `webhook`; webhook mode is active runtime when configured)
-- `webhook_enabled`, `webhook_secret`, `webhook_path`, `webhook_url`
-- `poll_interval_s`, `poll_timeout_s`
-- `reconnect_initial_s`, `reconnect_max_s`
-- `send_timeout_s`, `send_retry_attempts`
-- `send_backoff_base_s`, `send_backoff_max_s`, `send_backoff_jitter`
-- `send_circuit_failure_threshold`, `send_circuit_cooldown_s`
-- `typing_enabled` (enable Telegram typing keepalive during processing)
-- `typing_interval_s` (cadence between typing refresh calls)
-- `typing_max_ttl_s` (max total typing keepalive duration per inbound)
-- `typing_timeout_s` (HTTP timeout for typing API calls)
-- `typing_circuit_failure_threshold` (consecutive typing auth failures before opening typing circuit)
-- `typing_circuit_cooldown_s` (cooldown while typing auth circuit is open)
-- `reaction_notifications` (`off|own|all`, default `own`; `own` only forwards reactions for messages sent by this bot instance)
-- `reaction_own_cache_limit` (max cached `(chat_id,message_id)` keys used by `reaction_notifications=own`, default `4096`)
-- `dedupe_state_path`, `offset_state_path` (override persisted Telegram dedupe/watermark files)
-- `media_download_dir` (override where inbound Telegram media files are stored)
-- `transcribe_voice`, `transcribe_audio` (enable voice/audio transcription enrichment on inbound media; default `true` when an API key is available)
-- `transcription_api_key`, `transcription_language`, `transcription_base_url`, `transcription_model`, `transcription_timeout_s` (voice/audio transcription settings; `transcription_api_key` falls back to `GROQ_API_KEY`)
-- `dm_policy`, `group_policy`, `topic_policy` (`open|allowlist|disabled|pairing`; `pairing` is only meaningful for private chats, invalid values default to `open`)
-- `dm_allow_from`, `group_allow_from`, `topic_allow_from` (per-context allowlists used when matching `*_policy=allowlist`; when `dm_policy=pairing`, approved pairing entries are merged into DM access)
-- `group_overrides` (per-chat policy override map; supports per-topic overrides by `message_thread_id`)
-
-Context-aware Telegram access policy:
-- Base routing: `private -> dm_*`, non-private without thread -> `group_*`, non-private with thread -> `topic_*`.
-- `allowlist` is fail-closed when its active allowlist is empty.
-- Legacy global `allow_from` remains active as an additional guard in every context.
-- Snake case and camelCase are accepted for new keys (`dm_policy`/`dmPolicy`, `group_policy`/`groupPolicy`, `topic_policy`/`topicPolicy`, `dm_allow_from`/`dmAllowFrom`, `group_allow_from`/`groupAllowFrom`, `topic_allow_from`/`topicAllowFrom`, `group_overrides`/`groupOverrides`).
-
-`group_overrides` shape example:
-
-```json
-{
-  "channels": {
-    "telegram": {
-      "group_overrides": {
-        "-100123456": {
-          "policy": "open",
-          "allow_from": ["@owner"],
-          "topics": {
-            "42": {
-              "policy": "allowlist",
-              "allow_from": ["@alice", "123456789"]
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-Webhook notes:
-- Webhook activates when `mode=webhook` or `webhook_enabled=true` and both `webhook_url` + `webhook_secret` are configured.
-- Gateway ingests Telegram updates on configured `webhook_path` (default `/api/webhooks/telegram`) and validates header `X-Telegram-Bot-Api-Secret-Token`.
-- If webhook activation is not possible (missing fields or Telegram setWebhook failure), channel falls back safely to polling.
-- Inbound voice/audio can be transcribed and appended to the forwarded user text when `transcription_api_key` or `GROQ_API_KEY` is available.
-
-## Example
-
-See: [config.example.json](./config.example.json)
+**Model sync:** Setting `provider.model` or `agents.defaults.model` keeps both in sync automatically.
