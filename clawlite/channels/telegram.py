@@ -4368,7 +4368,10 @@ class TelegramChannel(BaseChannel):
         except (TypeError, ValueError):
             reply_to_message_id = None
         message_ids: list[int] = []
-        reply_markup = self._build_inline_keyboard_reply_markup(metadata_payload)
+        reply_markup = (
+            self._build_reply_keyboard_reply_markup(metadata_payload)
+            or self._build_inline_keyboard_reply_markup(metadata_payload)
+        )
         media_items = self._normalize_outbound_media_items(metadata_payload)
         outbound_parse_mode = self._normalize_outbound_parse_mode(metadata_payload)
         total_messages = 0
@@ -4519,3 +4522,35 @@ class TelegramChannel(BaseChannel):
             return InlineKeyboardMarkup(telegram_rows)
         except Exception:
             return {"inline_keyboard": inline_keyboard_rows}
+
+    def _build_reply_keyboard_reply_markup(self, metadata: dict) -> Any | None:
+        if "telegram_reply_keyboard" not in metadata:
+            return None
+        keyboard_source = metadata["telegram_reply_keyboard"]
+        if keyboard_source is False or keyboard_source is None:
+            try:
+                from telegram import ReplyKeyboardRemove
+                return ReplyKeyboardRemove()
+            except Exception:
+                return {"remove_keyboard": True}
+        if not isinstance(keyboard_source, list):
+            return None
+        keyboard_rows = []
+        for row in keyboard_source:
+            if not isinstance(row, list):
+                return None
+            btn_row = []
+            for btn in row:
+                if not isinstance(btn, str) or not btn.strip():
+                    return None
+                btn_row.append({"text": btn.strip()})
+            if btn_row:
+                keyboard_rows.append(btn_row)
+        if not keyboard_rows:
+            return None
+        try:
+            from telegram import KeyboardButton, ReplyKeyboardMarkup
+            tg_rows = [[KeyboardButton(b["text"]) for b in row] for row in keyboard_rows]
+            return ReplyKeyboardMarkup(tg_rows, resize_keyboard=True, one_time_keyboard=False)
+        except Exception:
+            return {"keyboard": keyboard_rows, "resize_keyboard": True}

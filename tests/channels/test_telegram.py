@@ -5681,3 +5681,37 @@ def test_telegram_message_reaction_bot_user_is_ignored() -> None:
         assert signals["message_reaction_blocked_count"] == 0
 
     asyncio.run(_scenario())
+
+
+def test_telegram_build_reply_keyboard_valid() -> None:
+    from clawlite.channels.telegram import TelegramChannel
+    ch = TelegramChannel.__new__(TelegramChannel)
+    keyboard = [["Yes", "No"], ["Cancel"]]
+    result = ch._build_reply_keyboard_reply_markup({"telegram_reply_keyboard": keyboard})
+    assert result is not None
+    if isinstance(result, dict):
+        rows = result["keyboard"]
+        assert rows[0][0]["text"] == "Yes"
+        assert rows[0][1]["text"] == "No"
+        assert rows[1][0]["text"] == "Cancel"
+
+
+def test_telegram_build_reply_keyboard_remove() -> None:
+    from clawlite.channels.telegram import TelegramChannel
+    ch = TelegramChannel.__new__(TelegramChannel)
+    result = ch._build_reply_keyboard_reply_markup({"telegram_reply_keyboard": False})
+    assert result is not None
+    if isinstance(result, dict):
+        assert result.get("remove_keyboard") is True
+
+
+def test_telegram_build_reply_keyboard_returns_none_without_key() -> None:
+    from clawlite.channels.telegram import TelegramChannel
+    ch = TelegramChannel.__new__(TelegramChannel)
+    assert ch._build_reply_keyboard_reply_markup({}) is None
+
+
+def test_telegram_build_reply_keyboard_invalid_row_returns_none() -> None:
+    from clawlite.channels.telegram import TelegramChannel
+    ch = TelegramChannel.__new__(TelegramChannel)
+    assert ch._build_reply_keyboard_reply_markup({"telegram_reply_keyboard": [[123, None]]}) is None

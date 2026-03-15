@@ -88,6 +88,7 @@ Recent progress:
 - Memory snapshot rollback is now available from the control plane/dashboard with explicit confirmation
 - Discord gateway session/reconnect state now has dedicated dashboard/operator visibility plus a live refresh action
 - Discord transport refresh is now also accessible from the CLI
+- Telegram reply keyboards (ReplyKeyboardMarkup/ReplyKeyboardRemove) are now supported via `telegram_reply_keyboard` metadata key
 
 Exit criteria:
 
