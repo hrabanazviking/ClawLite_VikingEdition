@@ -5715,3 +5715,41 @@ def test_telegram_build_reply_keyboard_invalid_row_returns_none() -> None:
     from clawlite.channels.telegram import TelegramChannel
     ch = TelegramChannel.__new__(TelegramChannel)
     assert ch._build_reply_keyboard_reply_markup({"telegram_reply_keyboard": [[123, None]]}) is None
+
+
+def test_telegram_send_streaming_edits_message() -> None:
+    """send_streaming() sends initial message then edits it as chunks arrive."""
+    import asyncio
+
+    sent_texts: list[str] = []
+    edited_texts: list[str] = []
+
+    from clawlite.core.engine import ProviderChunk
+
+    async def fake_chunks():
+        yield ProviderChunk(text="Hi ", accumulated="Hi ", done=False)
+        yield ProviderChunk(text="there", accumulated="Hi there", done=True)
+
+    from clawlite.channels.telegram import TelegramChannel
+
+    ch = TelegramChannel.__new__(TelegramChannel)
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            sent_texts.append(text)
+
+            class Msg:
+                message_id = 42
+
+            return Msg()
+
+        async def edit_message_text(self, text, chat_id, message_id, **kwargs):
+            edited_texts.append(text)
+
+    ch.bot = FakeBot()
+
+    asyncio.run(ch.send_streaming(chat_id="123", chunks=fake_chunks()))
+
+    assert len(sent_texts) == 1  # initial placeholder
+    assert len(edited_texts) >= 1
+    assert edited_texts[-1] == "Hi there"

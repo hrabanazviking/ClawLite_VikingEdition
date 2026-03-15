@@ -4554,3 +4554,70 @@ class TelegramChannel(BaseChannel):
             return ReplyKeyboardMarkup(tg_rows, resize_keyboard=True, one_time_keyboard=False)
         except Exception:
             return {"keyboard": keyboard_rows, "resize_keyboard": True}
+
+    async def send_streaming(
+        self,
+        *,
+        chat_id: str,
+        chunks: Any,  # AsyncGenerator[ProviderChunk, None]
+        message_thread_id: int | None = None,
+        min_edit_interval_s: float = 1.0,
+    ) -> str:
+        """Stream response to Telegram: send placeholder, edit as chunks arrive.
+
+        Args:
+            chat_id: Telegram chat id
+            chunks: async generator yielding ProviderChunk objects
+            message_thread_id: optional thread/topic id
+            min_edit_interval_s: minimum seconds between edits (Telegram limit ~1/s)
+        Returns:
+            telegram:streamed:{message_id}
+        """
+        kwargs: dict[str, Any] = {}
+        if message_thread_id is not None:
+            kwargs["message_thread_id"] = message_thread_id
+
+        initial = await self.bot.send_message(chat_id=chat_id, text="…", **kwargs)
+        msg_id = getattr(initial, "message_id", None)
+        if not msg_id:
+            return ""
+
+        accumulated = ""
+        last_edit_time = 0.0
+        last_sent_text = "…"
+
+        async for chunk in chunks:
+            if chunk.text:
+                accumulated = chunk.accumulated or (accumulated + chunk.text)
+            now = time.monotonic()
+            should_edit = (
+                accumulated != last_sent_text
+                and (chunk.done or (now - last_edit_time) >= min_edit_interval_s)
+                and accumulated.strip()
+            )
+            if should_edit:
+                try:
+                    await self.bot.edit_message_text(
+                        text=accumulated[:4096],
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                    )
+                    last_sent_text = accumulated
+                    last_edit_time = now
+                except Exception:
+                    pass
+            if chunk.done:
+                break
+
+        # Final edit to ensure complete text is shown
+        if accumulated and accumulated != last_sent_text:
+            try:
+                await self.bot.edit_message_text(
+                    text=accumulated[:4096],
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                )
+            except Exception:
+                pass
+
+        return f"telegram:streamed:{msg_id}"
