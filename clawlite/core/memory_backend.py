@@ -198,6 +198,157 @@ class SQLiteMemoryBackend:
                         DELETE FROM layer_records_fts WHERE record_id = old.record_id;
                     END
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS resources (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        kind TEXT NOT NULL DEFAULT 'project',
+                        description TEXT NOT NULL DEFAULT '',
+                        tags TEXT NOT NULL DEFAULT '[]',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS record_resources (
+                        record_id TEXT NOT NULL,
+                        resource_id TEXT NOT NULL,
+                        PRIMARY KEY (record_id, resource_id)
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_record_resources_rid ON record_resources (resource_id)")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_ttl (
+                        record_id TEXT PRIMARY KEY,
+                        expires_at TEXT NOT NULL
+                    )
+                """)
+                conn.commit()
+
+    # ------------------------------------------------------------------
+    # Resource CRUD
+    # ------------------------------------------------------------------
+
+    def upsert_resource(self, resource: dict[str, Any]) -> None:
+        if self._db_file is None:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO resources (id, name, kind, description, tags, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           name=excluded.name, kind=excluded.kind,
+                           description=excluded.description, tags=excluded.tags,
+                           updated_at=excluded.updated_at""",
+                    (
+                        resource["id"], resource["name"], resource.get("kind", "project"),
+                        resource.get("description", ""), resource.get("tags", "[]"),
+                        resource.get("created_at", ""), resource.get("updated_at", ""),
+                    ),
+                )
+                conn.commit()
+
+    def fetch_resource(self, resource_id: str) -> dict[str, Any] | None:
+        if self._db_file is None:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT id, name, kind, description, tags, created_at, updated_at FROM resources WHERE id=?",
+                    (resource_id,),
+                ).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "name": row[1], "kind": row[2], "description": row[3],
+                "tags": row[4], "created_at": row[5], "updated_at": row[6]}
+
+    def fetch_all_resources(self) -> list[dict[str, Any]]:
+        if self._db_file is None:
+            return []
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, name, kind, description, tags, created_at, updated_at FROM resources ORDER BY created_at DESC"
+                ).fetchall()
+        return [{"id": r[0], "name": r[1], "kind": r[2], "description": r[3],
+                 "tags": r[4], "created_at": r[5], "updated_at": r[6]} for r in rows]
+
+    def delete_resource(self, resource_id: str) -> None:
+        if self._db_file is None:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM resources WHERE id=?", (resource_id,))
+                conn.execute("DELETE FROM record_resources WHERE resource_id=?", (resource_id,))
+                conn.commit()
+
+    def link_record_resource(self, record_id: str, resource_id: str) -> None:
+        if self._db_file is None:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO record_resources (record_id, resource_id) VALUES (?, ?)",
+                    (record_id, resource_id),
+                )
+                conn.commit()
+
+    def fetch_records_by_resource(self, resource_id: str) -> list[str]:
+        if self._db_file is None:
+            return []
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT record_id FROM record_resources WHERE resource_id=? ORDER BY rowid ASC",
+                    (resource_id,),
+                ).fetchall()
+        return [r[0] for r in rows]
+
+    # ------------------------------------------------------------------
+    # TTL CRUD
+    # ------------------------------------------------------------------
+
+    def set_ttl(self, record_id: str, expires_at: str) -> None:
+        if self._db_file is None:
+            return
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_ttl (record_id, expires_at) VALUES (?, ?)",
+                    (record_id, expires_at),
+                )
+                conn.commit()
+
+    def get_ttl(self, record_id: str) -> dict[str, str] | None:
+        if self._db_file is None:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT record_id, expires_at FROM memory_ttl WHERE record_id=?", (record_id,)
+                ).fetchone()
+        return {"record_id": row[0], "expires_at": row[1]} if row else None
+
+    def fetch_expired_record_ids(self) -> list[str]:
+        if self._db_file is None:
+            return []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT record_id FROM memory_ttl WHERE expires_at <= ?", (now,)
+                ).fetchall()
+        return [r[0] for r in rows]
+
+    def delete_ttl_entries(self, record_ids: list[str]) -> None:
+        if not record_ids or self._db_file is None:
+            return
+        placeholders = ", ".join("?" for _ in record_ids)
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(f"DELETE FROM memory_ttl WHERE record_id IN ({placeholders})", record_ids)
                 conn.commit()
 
     def upsert_layer_record(

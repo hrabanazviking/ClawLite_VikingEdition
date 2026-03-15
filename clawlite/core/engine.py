@@ -2256,6 +2256,13 @@ class AgentEngine:
         progress_counter = [0]
         history = self.sessions.read(session_id, limit=self.memory_window)
         memory_policy = await self._memory_integration_policy_async(actor="agent", session_id=session_id)
+        proactive_snippets: list[str] = []
+        _proactive = getattr(self, "proactive_loader", None)
+        if _proactive is not None:
+            try:
+                proactive_snippets = _proactive.warm(user_text, session_id=session_id)
+            except Exception:
+                pass
         memories = self._plan_memory_snippets(
             session_id=session_id,
             user_id=runtime_chat_id,
@@ -2263,6 +2270,12 @@ class AgentEngine:
             run_log=run_log,
             policy=memory_policy,
         )
+        if proactive_snippets:
+            seen: set[str] = set(memories)
+            for s in proactive_snippets:
+                if s not in seen:
+                    seen.add(s)
+                    memories = [s] + memories
         skills = self.skills_loader.render_for_prompt()
         always_names = [item.name for item in self.skills_loader.always_on()]
         skills_context = self.skills_loader.load_skills_for_context(always_names)

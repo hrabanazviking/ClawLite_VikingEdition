@@ -154,6 +154,29 @@ class MemoryRecord:
     memory_type: str = "knowledge"
     happened_at: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    resource_id: str | None = None
+    consolidated: bool = False
+
+
+@dataclass(slots=True)
+class ResourceContext:
+    """Hierarchical context container — groups related memory records."""
+
+    name: str
+    kind: str = "project"  # "project" | "person" | "conversation" | "document"
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: __import__("uuid").uuid4().hex)
+    created_at: str = field(
+        default_factory=lambda: __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+    )
+    updated_at: str = field(
+        default_factory=lambda: __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+    )
 
 
 class MemoryLayer(str, Enum):
@@ -5013,6 +5036,144 @@ class MemoryStore:
             )
         return deleted_count
 
+    # ------------------------------------------------------------------
+    # ResourceContext CRUD
+    # ------------------------------------------------------------------
+
+    def create_resource(self, resource: "ResourceContext") -> str:
+        self.backend.upsert_resource({
+            "id": resource.id, "name": resource.name, "kind": resource.kind,
+            "description": resource.description, "tags": json.dumps(resource.tags),
+            "created_at": resource.created_at, "updated_at": resource.updated_at,
+        })
+        return resource.id
+
+    def get_resource(self, resource_id: str) -> "ResourceContext | None":
+        row = self.backend.fetch_resource(resource_id)
+        if row is None:
+            return None
+        tags: list[str] = []
+        try:
+            tags = json.loads(row.get("tags") or "[]")
+        except Exception:
+            pass
+        return ResourceContext(
+            id=row["id"], name=row["name"], kind=row["kind"],
+            description=row.get("description", ""),
+            tags=tags,
+            created_at=row.get("created_at", ""),
+            updated_at=row.get("updated_at", ""),
+        )
+
+    def list_resources(self) -> list["ResourceContext"]:
+        rows = self.backend.fetch_all_resources()
+        return [r for r in (self.get_resource(row["id"]) for row in rows if row.get("id")) if r is not None]
+
+    def delete_resource(self, resource_id: str) -> None:
+        self.backend.delete_resource(resource_id)
+
+    def get_resource_records(self, resource_id: str) -> list["MemoryRecord"]:
+        record_ids = self.backend.fetch_records_by_resource(resource_id)
+        results: list[MemoryRecord] = []
+        for rid in record_ids:
+            rec = self._fetch_record_by_id(rid)
+            if rec is not None:
+                results.append(rec)
+        return results
+
+    def _fetch_record_by_id(self, record_id: str) -> "MemoryRecord | None":
+        """Fetch a single MemoryRecord from the backend by its ID."""
+        rows = self.backend.fetch_layer_records(layer=MemoryLayer.ITEM.value, limit=1)
+        # Fetch all item rows and find by id (simple scan — resource lookups are small)
+        all_rows = self.backend.fetch_layer_records(layer=MemoryLayer.ITEM.value, limit=50000)
+        for row in all_rows:
+            if row.get("record_id") == record_id:
+                payload = row.get("payload", {})
+                if isinstance(payload, dict) and payload.get("text"):
+                    return MemoryRecord(
+                        id=str(payload.get("id", record_id)),
+                        text=str(payload.get("text", "")),
+                        source=str(payload.get("source", "user")),
+                        created_at=str(payload.get("created_at", row.get("created_at", ""))),
+                        category=str(payload.get("category", row.get("category", "context"))),
+                        user_id=str(payload.get("user_id", "default")),
+                        layer=str(payload.get("layer", MemoryLayer.ITEM.value)),
+                        reasoning_layer=str(payload.get("reasoning_layer", "fact")),
+                        modality=str(payload.get("modality", "text")),
+                        updated_at=str(payload.get("updated_at", "")),
+                        confidence=float(payload.get("confidence", 1.0)),
+                        decay_rate=float(payload.get("decay_rate", 0.0)),
+                        emotional_tone=str(payload.get("emotional_tone", "neutral")),
+                        memory_type=str(payload.get("memory_type", "knowledge")),
+                        happened_at=str(payload.get("happened_at", "")),
+                        metadata=payload.get("metadata", {}),
+                    )
+        return None
+
+    # ------------------------------------------------------------------
+    # TTL
+    # ------------------------------------------------------------------
+
+    def set_record_ttl(self, record_id: str, ttl_seconds: float) -> None:
+        from datetime import timedelta
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        self.backend.set_ttl(record_id, expires_at)
+
+    def get_record_ttl(self, record_id: str) -> dict[str, str] | None:
+        return self.backend.get_ttl(record_id)
+
+    def purge_expired_records(self) -> int:
+        expired_ids = self.backend.fetch_expired_record_ids()
+        if not expired_ids:
+            return 0
+        deleted = self.backend.delete_layer_records(set(expired_ids))
+        self.backend.delete_ttl_entries(expired_ids)
+        return int(deleted) if isinstance(deleted, int) else len(expired_ids)
+
+    # ------------------------------------------------------------------
+    # Multi-modal file ingest
+    # ------------------------------------------------------------------
+
+    def ingest_file(
+        self,
+        path: str,
+        *,
+        source: str = "file",
+        resource_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Ingest .txt/.md/.pdf into memory. Returns {ok, modality, record_id, reason}."""
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if not p.exists():
+            return {"ok": False, "modality": "", "record_id": "", "reason": f"file not found: {path}"}
+
+        suffix = p.suffix.lower()
+
+        if suffix in (".txt", ".md"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception as exc:
+                return {"ok": False, "modality": "text", "record_id": "", "reason": str(exc)}
+            if not text:
+                return {"ok": False, "modality": "text", "record_id": "", "reason": "empty file"}
+            record = self.add(text, source=source, modality="text", resource_id=resource_id)
+            return {"ok": True, "modality": "text", "record_id": str(getattr(record, "id", "")), "reason": ""}
+
+        if suffix == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(str(p))
+                pages = [page.extract_text() or "" for page in reader.pages]
+                text = "\n\n".join(pages).strip()
+            except Exception as exc:
+                return {"ok": False, "modality": "document", "record_id": "", "reason": f"pdf read error: {exc}"}
+            if not text:
+                return {"ok": False, "modality": "document", "record_id": "", "reason": "pdf has no extractable text"}
+            record = self.add(text, source=source, modality="document", resource_id=resource_id)
+            return {"ok": True, "modality": "document", "record_id": str(getattr(record, "id", "")), "reason": ""}
+
+        return {"ok": False, "modality": "", "record_id": "", "reason": f"unsupported file type: {suffix}"}
+
     def add(
         self,
         text: str,
@@ -5028,6 +5189,7 @@ class MemoryStore:
         memory_type: str | None = None,
         happened_at: str | None = None,
         decay_rate: float | None = None,
+        resource_id: str | None = None,
     ) -> MemoryRecord:
         clean = text.strip()
         if not clean:
@@ -5145,6 +5307,11 @@ class MemoryStore:
             self._diagnostics["reinforcement_hits"] = int(self._diagnostics["reinforcement_hits"]) + 1
         self._update_profile_from_record(row)
         self._prune_history()
+        if resource_id:
+            try:
+                self.backend.link_record_resource(row.id, resource_id)
+            except Exception:
+                pass
         return row
 
     def _read_history_records(self) -> list[MemoryRecord]:

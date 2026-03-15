@@ -568,4 +568,11 @@ class MemoryMonitor:
         suggestions.extend(self._trigger_recurring_birthdays(records, now))
         self._telemetry["generated"] += len(suggestions)
         await asyncio.to_thread(self._persist_pending, suggestions)
+        # TTL purge (best-effort)
+        try:
+            purge_fn = getattr(self.store, "purge_expired_records", None)
+            if callable(purge_fn):
+                await asyncio.to_thread(purge_fn)
+        except Exception:
+            pass
         return await asyncio.to_thread(self.deliverable)
