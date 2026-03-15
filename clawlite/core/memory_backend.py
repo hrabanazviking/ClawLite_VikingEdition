@@ -95,6 +95,15 @@ class MemoryBackend(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
+    def search_text(
+        self,
+        query: str,
+        layer: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Full-text BM25 search. Returns list of {record_id, score} dicts."""
+        ...
+
 
 @dataclass(slots=True)
 class SQLiteMemoryBackend:
@@ -157,6 +166,38 @@ class SQLiteMemoryBackend:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_category ON layer_records(category)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_layer_records_updated_at ON layer_records(updated_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_created_at ON embeddings(created_at)")
+                # FTS5 virtual table for fast full-text search (BM25 native).
+                # Uses a standalone (non-content) table so FTS5 manages its own
+                # copy of the indexed text; triggers keep it in sync.
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS layer_records_fts
+                    USING fts5(
+                        record_id UNINDEXED,
+                        content,
+                        tokenize='unicode61 remove_diacritics 2'
+                    )
+                """)
+                # Keep FTS index in sync via triggers
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS layer_records_fts_insert
+                    AFTER INSERT ON layer_records BEGIN
+                        INSERT INTO layer_records_fts(rowid, record_id, content)
+                        VALUES (new.rowid, new.record_id, new.payload);
+                    END
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS layer_records_fts_update
+                    AFTER UPDATE ON layer_records BEGIN
+                        UPDATE layer_records_fts SET content = new.payload
+                        WHERE record_id = new.record_id;
+                    END
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS layer_records_fts_delete
+                    AFTER DELETE ON layer_records BEGIN
+                        DELETE FROM layer_records_fts WHERE record_id = old.record_id;
+                    END
+                """)
                 conn.commit()
 
     def upsert_layer_record(
@@ -339,6 +380,57 @@ class SQLiteMemoryBackend:
             scored.append({"record_id": row_id, "score": float(score)})
         scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
         return scored[:bounded_limit]
+
+    def search_text(
+        self,
+        query: str,
+        layer: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """BM25 full-text search via SQLite FTS5.
+
+        Returns list of {record_id, score} sorted best-match first.
+        Score is the raw FTS5 rank (negative; closer to 0 = better).
+        """
+        query = str(query or "").strip()
+        if not query or self._db_file is None:
+            return []
+        limit = max(1, min(int(limit or 10), 200))
+        # Convert plain multi-word queries to AND boolean so each token is matched
+        # independently (FTS5 treats bare phrases as exact adjacency matches).
+        import re as _re
+        if not any(op in query for op in ("AND", "OR", "NOT", '"', "*", "NEAR")):
+            tokens = _re.findall(r'\w+', query)
+            query = " AND ".join(tokens) if tokens else query
+        with self._lock:
+            with self._connect() as conn:
+                try:
+                    if layer:
+                        rows = conn.execute(
+                            """
+                            SELECT f.record_id, rank AS score
+                            FROM layer_records_fts f
+                            JOIN layer_records r ON r.record_id = f.record_id
+                            WHERE layer_records_fts MATCH ? AND r.layer = ?
+                            ORDER BY rank
+                            LIMIT ?
+                            """,
+                            (query, str(layer), limit),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT record_id, rank AS score
+                            FROM layer_records_fts
+                            WHERE layer_records_fts MATCH ?
+                            ORDER BY rank
+                            LIMIT ?
+                            """,
+                            (query, limit),
+                        ).fetchall()
+                    return [{"record_id": r[0], "score": float(r[1])} for r in rows]
+                except Exception:
+                    return []
 
 
 @dataclass(slots=True)
@@ -955,6 +1047,9 @@ class PgvectorMemoryBackend:
             scored.append({"record_id": row_id, "score": _cosine_similarity(normalized_query, vector)})
         scored.sort(key=lambda item: (float(item.get("score", 0.0)), str(item.get("record_id", ""))), reverse=True)
         return scored[:bounded_limit]
+
+    def search_text(self, query: str, layer: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        return []
 
 
 def resolve_memory_backend(backend_name: str, pgvector_url: str = "") -> MemoryBackend:

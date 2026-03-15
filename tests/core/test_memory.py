@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 import base64
 import sys
 import types
@@ -1406,6 +1408,211 @@ def test_memory_search_and_retrieve_support_reasoning_layer_and_min_confidence_f
     asyncio.run(_scenario())
 
 
+def test_memory_search_and_retrieve_reject_unknown_filter_keys(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.add("project alpha memory", source="session:a")
+
+        with pytest.raises(ValueError, match="unknown retrieval filter: unknown"):
+            store.search("project alpha", filters={"unknown": ["value"]})
+
+        with pytest.raises(ValueError, match="unknown retrieval filter: unknown"):
+            await store.retrieve("project alpha", method="rag", filters={"unknown": ["value"]})
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_apply_list_filters_case_insensitively(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.history_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "match-row", "text": "alpha release rehearsal", "source": "Session:Alpha", "created_at": "2026-03-10T00:00:00+00:00", "category": "Decisions", "memory_type": "skill", "modality": "Audio"}),
+                    json.dumps({"id": "wrong-category", "text": "alpha release rehearsal", "source": "Session:Alpha", "created_at": "2026-03-10T00:00:01+00:00", "category": "Context", "memory_type": "skill", "modality": "Audio"}),
+                    json.dumps({"id": "wrong-type", "text": "alpha release rehearsal", "source": "Session:Alpha", "created_at": "2026-03-10T00:00:02+00:00", "category": "Decisions", "memory_type": "event", "modality": "Audio"}),
+                    json.dumps({"id": "wrong-modality", "text": "alpha release rehearsal", "source": "Session:Alpha", "created_at": "2026-03-10T00:00:03+00:00", "category": "Decisions", "memory_type": "skill", "modality": "Text"}),
+                    json.dumps({"id": "wrong-source", "text": "alpha release rehearsal", "source": "Session:Beta", "created_at": "2026-03-10T00:00:04+00:00", "category": "Decisions", "memory_type": "skill", "modality": "Audio"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {
+            "categories": ["decisions", "DECISIONS"],
+            "memory_types": ["SKILL", "skill"],
+            "modalities": ["audio", "AUDIO"],
+            "sources": ["session:alpha", "SESSION:ALPHA"],
+        }
+        found = store.search("alpha", limit=5, filters=filters)
+        assert [row.id for row in found] == ["match-row"]
+
+        retrieved = await store.retrieve("alpha", method="rag", limit=5, filters=filters)
+        assert [hit["id"] for hit in retrieved["hits"]] == ["match-row"]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_apply_inclusive_created_at_window(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.history_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "created-before", "text": "alpha rollout", "source": "session:a", "created_at": "2026-03-09T23:59:59+00:00"}),
+                    json.dumps({"id": "created-start", "text": "alpha rollout", "source": "session:b", "created_at": "2026-03-10T00:00:00+00:00"}),
+                    json.dumps({"id": "created-end", "text": "alpha rollout", "source": "session:c", "created_at": "2026-03-12T00:00:00+00:00"}),
+                    json.dumps({"id": "created-after", "text": "alpha rollout", "source": "session:d", "created_at": "2026-03-12T00:00:01+00:00"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {"created_after": "2026-03-10T00:00:00+00:00", "created_before": "2026-03-12T00:00:00+00:00"}
+        found = store.search("alpha", limit=5, filters=filters)
+        assert [row.id for row in found] == ["created-end", "created-start"]
+
+        retrieved = await store.retrieve("alpha", method="rag", limit=5, filters=filters)
+        assert [hit["id"] for hit in retrieved["hits"]] == ["created-end", "created-start"]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_apply_happened_at_window_with_missing_and_invalid_rows_non_matching(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.history_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "happened-start", "text": "alpha incident", "source": "session:a", "created_at": "2026-03-10T00:00:00+00:00", "happened_at": "2026-03-01T00:00:00+00:00"}),
+                    json.dumps({"id": "happened-end", "text": "alpha incident", "source": "session:b", "created_at": "2026-03-10T00:00:01+00:00", "happened_at": "2026-03-02T00:00:00+00:00"}),
+                    json.dumps({"id": "happened-missing", "text": "alpha incident", "source": "session:c", "created_at": "2026-03-10T00:00:02+00:00"}),
+                    json.dumps({"id": "happened-invalid", "text": "alpha incident", "source": "session:d", "created_at": "2026-03-10T00:00:03+00:00", "happened_at": "not-an-iso-date"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {"happened_after": "2026-03-01T00:00:00+00:00", "happened_before": "2026-03-02T00:00:00+00:00"}
+        found = store.search("alpha", limit=5, filters=filters)
+        assert [row.id for row in found] == ["happened-end", "happened-start"]
+
+        retrieved = await store.retrieve("alpha", method="rag", limit=5, filters=filters)
+        assert [hit["id"] for hit in retrieved["hits"]] == ["happened-end", "happened-start"]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_support_curated_modality_filters(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.curated_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "facts": [
+                        {"id": "curated-audio", "text": "alpha retrospective recording", "source": "curated:test", "created_at": "2026-03-10T00:00:00+00:00", "category": "context", "modality": "audio"},
+                        {"id": "curated-text", "text": "alpha retrospective recording", "source": "curated:test", "created_at": "2026-03-10T00:00:01+00:00", "category": "context", "modality": "text"},
+                    ],
+                },
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {"modalities": ["audio"]}
+        found = store.search("alpha retrospective", limit=5, filters=filters)
+        assert [row.id for row in found] == ["curated-audio"]
+
+        retrieved = await store.retrieve("alpha retrospective", method="rag", limit=5, filters=filters)
+        assert [hit["id"] for hit in retrieved["hits"]] == ["curated-audio"]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_accept_naive_record_timestamps_in_date_filters(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        store.history_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "naive-created", "text": "alpha schedule", "source": "session:a", "created_at": "2026-03-10T00:00:00", "happened_at": "2026-03-11T00:00:00"}),
+                    json.dumps({"id": "aware-created", "text": "alpha schedule", "source": "session:b", "created_at": "2026-03-10T00:00:01+00:00", "happened_at": "2026-03-11T00:00:01+00:00"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {
+            "created_after": "2026-03-10T00:00:00+00:00",
+            "created_before": "2026-03-10T00:00:01+00:00",
+            "happened_after": "2026-03-11T00:00:00+00:00",
+            "happened_before": "2026-03-11T00:00:01+00:00",
+        }
+        found = store.search("alpha schedule", limit=5, filters=filters)
+        assert [row.id for row in found] == ["aware-created", "naive-created"]
+
+        retrieved = await store.retrieve("alpha schedule", method="rag", limit=5, filters=filters)
+        assert [hit["id"] for hit in retrieved["hits"]] == ["aware-created", "naive-created"]
+
+    asyncio.run(_scenario())
+
+
+def test_memory_search_and_retrieve_combine_filters_with_reasoning_confidence_and_shared_scope(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        store = MemoryStore(tmp_path / "memory.jsonl")
+        alice_scope = store._scope_paths(user_id="alice", shared=False)
+        shared_scope = store._scope_paths(shared=True)
+        store._ensure_scope_paths(alice_scope)
+        store._ensure_scope_paths(shared_scope)
+        store.set_shared_opt_in("alice", True)
+
+        alice_scope["history"].write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "alice-low-confidence", "text": "deploy alpha plan", "source": "session:alice", "created_at": "2026-03-10T00:00:00+00:00", "category": "decisions", "user_id": "alice", "reasoning_layer": "decision", "confidence": 0.6, "memory_type": "skill"}),
+                    json.dumps({"id": "alice-wrong-type", "text": "deploy alpha plan", "source": "session:alice", "created_at": "2026-03-10T00:00:01+00:00", "category": "decisions", "user_id": "alice", "reasoning_layer": "decision", "confidence": 0.95, "memory_type": "event"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+        shared_scope["history"].write_text(
+            "\n".join(
+                [
+                    json.dumps({"id": "shared-match", "text": "deploy alpha plan", "source": "shared:release", "created_at": "2026-03-10T00:00:02+00:00", "category": "decisions", "user_id": "shared", "reasoning_layer": "decision", "confidence": 0.92, "memory_type": "skill"}),
+                    json.dumps({"id": "shared-wrong-layer", "text": "deploy alpha plan", "source": "shared:release", "created_at": "2026-03-10T00:00:03+00:00", "category": "decisions", "user_id": "shared", "reasoning_layer": "fact", "confidence": 0.99, "memory_type": "skill"}),
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        filters = {"categories": ["decisions"], "memory_types": ["skill"], "sources": ["shared:release"]}
+        found = store.search(
+            "deploy alpha",
+            user_id="alice",
+            include_shared=True,
+            reasoning_layers=["decision"],
+            min_confidence=0.8,
+            filters=filters,
+            limit=5,
+        )
+        assert [row.id for row in found] == ["shared-match"]
+
+        retrieved = await store.retrieve(
+            "deploy alpha",
+            method="rag",
+            user_id="alice",
+            include_shared=True,
+            reasoning_layers=["decision"],
+            min_confidence=0.8,
+            filters=filters,
+            limit=5,
+        )
+        assert [hit["id"] for hit in retrieved["hits"]] == ["shared-match"]
+
+    asyncio.run(_scenario())
+
+
 def test_memory_search_decay_penalty_demotes_stale_high_decay_record_on_tie(tmp_path: Path, monkeypatch) -> None:
     class _FakeBM25:
         def __init__(self, _corpus: object) -> None:
@@ -2204,6 +2411,38 @@ def test_memory_quality_state_reasoning_layers_report_structure_and_recommendati
     assert any("decision" in item.lower() for item in recommendations)
     assert any("confidence" in item.lower() for item in recommendations)
 
+
+def test_memory_type_constants_exist():
+    from clawlite.core.memory import MEMORY_TYPES, MEMORY_TYPE_PROFILE, MEMORY_TYPE_EVENT
+    from clawlite.core.memory import MEMORY_TYPE_KNOWLEDGE, MEMORY_TYPE_BEHAVIOR
+    from clawlite.core.memory import MEMORY_TYPE_SKILL, MEMORY_TYPE_TOOL
+    assert "profile" in MEMORY_TYPES
+    assert "event" in MEMORY_TYPES
+    assert "knowledge" in MEMORY_TYPES
+    assert "behavior" in MEMORY_TYPES
+    assert "skill" in MEMORY_TYPES
+    assert "tool" in MEMORY_TYPES
+    assert MEMORY_TYPE_PROFILE == "profile"
+    assert MEMORY_TYPE_EVENT == "event"
+
+
+def test_compute_salience_score_recent_beats_old():
+    from clawlite.core.memory import compute_salience_score
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    recent = (now - datetime.timedelta(hours=1)).isoformat()
+    old = (now - datetime.timedelta(days=30)).isoformat()
+
+    score_recent = compute_salience_score(
+        similarity=0.9, updated_at=recent, reinforcement_count=2, now=now
+    )
+    score_old = compute_salience_score(
+        similarity=0.9, updated_at=old, reinforcement_count=0, now=now
+    )
+    assert score_recent > score_old
+    assert 0.0 <= score_recent <= 1.0
+    assert 0.0 <= score_old <= 1.0
 
 def test_memory_quality_state_legacy_call_without_reasoning_metrics_keeps_score_and_defaults(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory.jsonl")

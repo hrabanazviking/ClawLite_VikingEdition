@@ -468,3 +468,37 @@ def test_backends_share_module_level_embedding_and_similarity_helpers(monkeypatc
 
     assert normalize_calls
     assert cosine_calls
+
+
+def test_sqlite_fts5_search_text(tmp_path):
+    from clawlite.core.memory_backend import resolve_memory_backend
+    backend = resolve_memory_backend("sqlite")
+    backend.initialize(tmp_path)
+
+    backend.upsert_layer_record(
+        layer="item", record_id="r1",
+        payload={"text": "python is a great language"},
+        category="knowledge",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    backend.upsert_layer_record(
+        layer="item", record_id="r2",
+        payload={"text": "rust is fast and safe"},
+        category="knowledge",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+    results = backend.search_text("python language", limit=5)
+    assert results, "Expected at least one FTS5 result"
+    assert results[0]["record_id"] == "r1"
+    assert results[0].get("score") is not None
+
+
+def test_sqlite_fts5_search_text_empty_query(tmp_path):
+    from clawlite.core.memory_backend import resolve_memory_backend
+    backend = resolve_memory_backend("sqlite")
+    backend.initialize(tmp_path)
+    results = backend.search_text("", limit=5)
+    assert results == []

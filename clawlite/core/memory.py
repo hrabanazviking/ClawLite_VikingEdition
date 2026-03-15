@@ -48,8 +48,27 @@ EMOTIONAL_MARKERS: dict[str, tuple[str, ...]] = {
 }
 REASONING_LAYERS: tuple[str, ...] = ("fact", "hypothesis", "decision", "outcome")
 REASONING_LAYER_SET: frozenset[str] = frozenset(REASONING_LAYERS)
+# Memory type taxonomy (inspired by memU)
+MEMORY_TYPE_PROFILE = "profile"      # User identity, preferences, roles
+MEMORY_TYPE_EVENT = "event"          # Time-bound occurrences, interactions
+MEMORY_TYPE_KNOWLEDGE = "knowledge"  # Facts, documentation, learned info
+MEMORY_TYPE_BEHAVIOR = "behavior"    # Observed patterns, habits
+MEMORY_TYPE_SKILL = "skill"          # Agent capabilities, learned procedures
+MEMORY_TYPE_TOOL = "tool"            # Tool usage patterns, configs
+
 MEMORY_TYPES: tuple[str, ...] = ("profile", "event", "knowledge", "behavior", "skill", "tool")
 MEMORY_TYPE_SET: frozenset[str] = frozenset(MEMORY_TYPES)
+MEMORY_TYPES_FROZENSET: frozenset[str] = frozenset({
+    MEMORY_TYPE_PROFILE,
+    MEMORY_TYPE_EVENT,
+    MEMORY_TYPE_KNOWLEDGE,
+    MEMORY_TYPE_BEHAVIOR,
+    MEMORY_TYPE_SKILL,
+    MEMORY_TYPE_TOOL,
+})
+RETRIEVAL_LIST_FILTER_KEYS: frozenset[str] = frozenset({"categories", "memory_types", "modalities", "sources"})
+RETRIEVAL_DATE_FILTER_KEYS: frozenset[str] = frozenset({"created_after", "created_before", "happened_after", "happened_before"})
+RETRIEVAL_FILTER_KEYS: frozenset[str] = RETRIEVAL_LIST_FILTER_KEYS.union(RETRIEVAL_DATE_FILTER_KEYS)
 PROFILE_TOPIC_STOPWORDS: frozenset[str] = frozenset(
     {
         "the",
@@ -80,6 +99,41 @@ try:
     import fcntl
 except Exception:  # pragma: no cover - platform fallback
     fcntl = None
+
+
+def compute_salience_score(
+    *,
+    similarity: float,
+    updated_at: str,
+    reinforcement_count: int = 0,
+    now: "datetime.datetime | None" = None,
+    decay_half_life_days: float = 30.0,
+) -> float:
+    """Compute a [0,1] salience score combining similarity, recency, and reinforcement.
+
+    Formula: 0.5 * similarity + 0.3 * recency_decay + 0.2 * reinforcement_boost
+    """
+    import datetime as _datetime
+    similarity = max(0.0, min(1.0, float(similarity or 0.0)))
+
+    recency = 0.0
+    if updated_at:
+        try:
+            dt = _datetime.datetime.fromisoformat(str(updated_at))
+            if now is None:
+                now = _datetime.datetime.now(_datetime.timezone.utc)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_datetime.timezone.utc)
+            age_days = (now - dt).total_seconds() / 86400.0
+            recency = math.exp(-math.log(2) * max(0.0, age_days) / max(1.0, decay_half_life_days))
+        except Exception:
+            recency = 0.5
+
+    count = max(0, int(reinforcement_count or 0))
+    reinforcement = math.log1p(count) / math.log1p(10)
+    reinforcement = min(1.0, reinforcement)
+
+    return 0.5 * similarity + 0.3 * recency + 0.2 * reinforcement
 
 
 @dataclass(slots=True)
@@ -606,6 +660,103 @@ class MemoryStore:
             if clean in REASONING_LAYER_SET:
                 normalized.add(clean)
         return normalized
+
+    @staticmethod
+    def _parse_required_iso_timestamp(value: Any, *, key: str) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError(f"retrieval filter '{key}' must be an ISO-8601 string")
+        clean = value.strip()
+        if not clean:
+            raise ValueError(f"retrieval filter '{key}' must be an ISO-8601 string")
+        parsed = MemoryStore._parse_iso_timestamp(clean)
+        if parsed.year <= 1:
+            raise ValueError(f"retrieval filter '{key}' must be an ISO-8601 string")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _parse_optional_iso_timestamp(value: str) -> datetime | None:
+        clean = str(value or '').strip()
+        if not clean:
+            return None
+        parsed = MemoryStore._parse_iso_timestamp(clean)
+        if parsed.year <= 1:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @classmethod
+    def _normalize_retrieval_filters(cls, filters: dict[str, Any] | None) -> dict[str, Any]:
+        if filters is None:
+            return {}
+        if not isinstance(filters, dict):
+            raise ValueError('filters must be a dict')
+
+        unknown_keys = sorted(key for key in filters.keys() if str(key) not in RETRIEVAL_FILTER_KEYS)
+        if unknown_keys:
+            raise ValueError(f'unknown retrieval filter: {unknown_keys[0]}')
+
+        normalized: dict[str, Any] = {}
+        for key in sorted(filters.keys()):
+            value = filters[key]
+            if key in RETRIEVAL_LIST_FILTER_KEYS:
+                if not isinstance(value, list):
+                    raise ValueError(f"retrieval filter '{key}' must be a list of non-empty strings")
+                deduped: list[str] = []
+                seen: set[str] = set()
+                for item in value:
+                    if not isinstance(item, str):
+                        raise ValueError(f"retrieval filter '{key}' must be a list of non-empty strings")
+                    clean = item.strip().lower()
+                    if not clean:
+                        raise ValueError(f"retrieval filter '{key}' must be a list of non-empty strings")
+                    if clean in seen:
+                        continue
+                    seen.add(clean)
+                    deduped.append(clean)
+                normalized[key] = tuple(deduped)
+                continue
+            normalized[key] = cls._parse_required_iso_timestamp(value, key=key)
+        return normalized
+
+    @classmethod
+    def _record_matches_retrieval_filters(cls, row: MemoryRecord, filters: dict[str, Any]) -> bool:
+        if not filters:
+            return True
+
+        for key, attr in (("categories", "category"), ("memory_types", "memory_type"), ("modalities", "modality"), ("sources", "source")):
+            allowed = filters.get(key, ())
+            if allowed and str(getattr(row, attr, '') or '').strip().lower() not in allowed:
+                return False
+
+        created_at = cls._parse_optional_iso_timestamp(str(getattr(row, 'created_at', '') or ''))
+        created_after = filters.get('created_after')
+        if created_after is not None and (created_at is None or created_at < created_after):
+            return False
+        created_before = filters.get('created_before')
+        if created_before is not None and (created_at is None or created_at > created_before):
+            return False
+
+        happened_after = filters.get('happened_after')
+        happened_before = filters.get('happened_before')
+        if happened_after is not None or happened_before is not None:
+            happened_at = cls._parse_optional_iso_timestamp(str(getattr(row, 'happened_at', '') or ''))
+            if happened_at is None:
+                return False
+            if happened_after is not None and happened_at < happened_after:
+                return False
+            if happened_before is not None and happened_at > happened_before:
+                return False
+
+        return True
+
+    @classmethod
+    def _apply_retrieval_filters(cls, records: list[MemoryRecord], filters: dict[str, Any]) -> list[MemoryRecord]:
+        if not filters:
+            return records
+        return [row for row in records if cls._record_matches_retrieval_filters(row, filters)]
 
     @classmethod
     def _record_from_payload(cls, payload: dict[str, Any]) -> MemoryRecord | None:
@@ -2857,6 +3008,7 @@ class MemoryStore:
             row.get("decay_rate", row.get("decayRate", cls._default_decay_rate(memory_type=memory_type)))
         )
         reasoning_layer = cls._normalize_reasoning_layer(row.get("reasoning_layer", row.get("reasoningLayer", "fact")))
+        modality = str(row.get("modality", "text") or "text").strip().lower() or "text"
         happened_at = str(row.get("happened_at", row.get("happenedAt", "")) or "")
         metadata = cls._normalize_memory_metadata(row.get("metadata", {}))
 
@@ -2883,6 +3035,7 @@ class MemoryStore:
             "decay_rate": decay_rate,
             "reasoning_layer": reasoning_layer,
             "memory_type": memory_type,
+            "modality": modality,
             "happened_at": happened_at,
             "metadata": metadata,
         }
@@ -5271,10 +5424,12 @@ class MemoryStore:
         session_id: str,
         reasoning_layers: Iterable[str] | None,
         min_confidence: float | None,
+        filters: dict[str, Any] | None,
     ) -> tuple[list[MemoryRecord], dict[str, float], dict[str, int], list[dict[str, Path]], bool]:
         clean_user = self._normalize_user_id(user_id or "default")
         reasoning_filter = self._normalize_reasoning_layers_filter(reasoning_layers)
         min_conf_filter = self._normalize_confidence(min_confidence, default=0.0) if min_confidence is not None else None
+        normalized_filters = self._normalize_retrieval_filters(filters)
         scopes = self._resolve_retrieval_scopes(user_id=clean_user, include_shared=include_shared)
 
         records: list[MemoryRecord] = []
@@ -5297,6 +5452,7 @@ class MemoryStore:
                     category=str(item.get("category", "context") or "context"),
                     user_id=scope_user_id,
                     reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
+                    modality=str(item.get("modality", "text") or "text"),
                     confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
                     decay_rate=self._normalize_decay_rate(item.get("decay_rate", item.get("decayRate", self._default_decay_rate(memory_type=item.get("memory_type", item.get("memoryType", "knowledge")))))),
                     memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
@@ -5312,6 +5468,7 @@ class MemoryStore:
 
             records.extend(self._read_history_records_from(scope["history"]))
 
+        records = self._apply_retrieval_filters(records, normalized_filters)
         if reasoning_filter:
             records = [row for row in records if self._normalize_reasoning_layer(row.reasoning_layer) in reasoning_filter]
         if min_conf_filter is not None:
@@ -5543,6 +5700,7 @@ class MemoryStore:
         include_shared: bool,
         reasoning_layers: Iterable[str] | None,
         min_confidence: float | None,
+        filters: dict[str, Any] | None,
     ) -> dict[str, Any]:
         rewritten_query = self._rewrite_retrieval_query(query)
         active_query = rewritten_query or query
@@ -5552,6 +5710,7 @@ class MemoryStore:
             session_id=session_id,
             reasoning_layers=reasoning_layers,
             min_confidence=min_confidence,
+            filters=filters,
         )
 
         category_hits = self._retrieve_category_hits(active_query, records, limit=max(3, min(6, limit)))
@@ -5728,6 +5887,7 @@ class MemoryStore:
         include_shared: bool = False,
         reasoning_layers: Iterable[str] | None = None,
         min_confidence: float | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         clean_query = str(query or "").strip()
         if not clean_query:
@@ -5743,6 +5903,7 @@ class MemoryStore:
             include_shared=include_shared,
             reasoning_layers=reasoning_layers,
             min_confidence=min_confidence,
+            filters=filters,
         )
         hits = progressive["hits"]
         category_hits = progressive["category_hits"]
@@ -5982,11 +6143,13 @@ class MemoryStore:
         include_shared: bool = False,
         reasoning_layers: Iterable[str] | None = None,
         min_confidence: float | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[MemoryRecord]:
         bounded_limit = max(1, int(limit or 1))
         clean_user = self._normalize_user_id(user_id or "default")
         reasoning_filter = self._normalize_reasoning_layers_filter(reasoning_layers)
         min_conf_filter = self._normalize_confidence(min_confidence, default=0.0) if min_confidence is not None else None
+        normalized_filters = self._normalize_retrieval_filters(filters)
 
         if clean_user == "default" and not include_shared:
             curated_rows = self._read_curated_facts()
@@ -5998,6 +6161,7 @@ class MemoryStore:
                     created_at=str(item.get("created_at", "")),
                     category=str(item.get("category", "context") or "context"),
                     reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
+                    modality=str(item.get("modality", "text") or "text"),
                     confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
                     memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
                     happened_at=str(item.get("happened_at", item.get("happenedAt", "")) or ""),
@@ -6009,6 +6173,7 @@ class MemoryStore:
             curated_importance = {str(item.get("id", "")): float(item.get("importance", 1.0)) for item in curated_rows}
             curated_mentions = {str(item.get("id", "")): int(item.get("mentions", 1)) for item in curated_rows}
             records = curated_records + self.all()
+            records = self._apply_retrieval_filters(records, normalized_filters)
             if reasoning_filter:
                 records = [row for row in records if self._normalize_reasoning_layer(row.reasoning_layer) in reasoning_filter]
             if min_conf_filter is not None:
@@ -6035,6 +6200,7 @@ class MemoryStore:
                     category=str(item.get("category", "context") or "context"),
                     user_id=clean_user,
                     reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
+                    modality=str(item.get("modality", "text") or "text"),
                     confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
                     decay_rate=self._normalize_decay_rate(item.get("decay_rate", item.get("decayRate", self._default_decay_rate(memory_type=item.get("memory_type", item.get("memoryType", "knowledge")))))),
                     memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
@@ -6062,6 +6228,7 @@ class MemoryStore:
                     category=str(item.get("category", "context") or "context"),
                     user_id="shared",
                     reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
+                    modality=str(item.get("modality", "text") or "text"),
                     confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
                     decay_rate=self._normalize_decay_rate(item.get("decay_rate", item.get("decayRate", self._default_decay_rate(memory_type=item.get("memory_type", item.get("memoryType", "knowledge")))))),
                     memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
@@ -6073,6 +6240,7 @@ class MemoryStore:
             )
             records.extend(self._read_history_records_from(shared_scope["history"]))
 
+        records = self._apply_retrieval_filters(records, normalized_filters)
         if reasoning_filter:
             records = [row for row in records if self._normalize_reasoning_layer(row.reasoning_layer) in reasoning_filter]
         if min_conf_filter is not None:
