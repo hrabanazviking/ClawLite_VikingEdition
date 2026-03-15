@@ -67,6 +67,9 @@ from clawlite.tools.memory import (
     MemorySearchTool,
 )
 from clawlite.tools.registry import ToolRegistry
+from clawlite.tools.browser import BrowserTool
+from clawlite.tools.tts import TTSTool
+from clawlite.tools.pdf import PdfReadTool
 from clawlite.tools.process import ProcessTool
 from clawlite.tools.skill import SkillTool
 from clawlite.tools.sessions import (
@@ -1226,6 +1229,9 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     tools.register(MemoryLearnTool(memory))
     tools.register(MemoryForgetTool(memory))
     tools.register(MemoryAnalyzeTool(memory))
+    tools.register(BrowserTool())
+    tools.register(TTSTool())
+    tools.register(PdfReadTool())
     prompt = PromptBuilder(workspace_path=config.workspace_path)
 
     engine = AgentEngine(

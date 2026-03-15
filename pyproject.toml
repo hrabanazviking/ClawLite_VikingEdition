@@ -30,6 +30,7 @@ dependencies = [
   "loguru>=0.7.2",
   "json-repair>=0.30.0",
   "croniter>=6.0.0",
+  "pypdf>=4.0.0",
 ]
 
 [project.scripts]

@@ -272,3 +272,27 @@ Call an MCP tool:
 ```json
 {"name":"mcp","arguments":{"tool":"docs::search","arguments":{"query":"gateway auth"}}}
 ```
+
+## browser
+
+Control a headless Chromium browser via Playwright. Actions: `navigate`, `click`, `fill`, `screenshot`, `evaluate`, `close`.
+
+```json
+{"name":"browser","arguments":{"action":"navigate","url":"https://example.com"}}
+```
+
+## tts
+
+Convert text to speech using edge-tts. Returns path to an MP3 file.
+
+```json
+{"name":"tts","arguments":{"text":"Hello world","voice":"en-US-AriaNeural","rate":"+0%"}}
+```
+
+## pdf_read
+
+Extract text from a PDF file (local path or HTTPS URL). Supports page ranges.
+
+```json
+{"name":"pdf_read","arguments":{"path":"/workspace/doc.pdf","pages":"1-5"}}
+```
