@@ -51,6 +51,36 @@ clawlite run "hello — what can you do?"
 
 ---
 
+## ⚙️ Configuration
+
+Config file: `~/.clawlite/config.json`
+
+**Minimal starter** — paste into `~/.clawlite/config.json`:
+
+```json
+{
+  "agents": { "defaults": { "model": "gemini/gemini-2.5-flash" } },
+  "providers": { "gemini": { "api_key": "YOUR_GEMINI_KEY" } },
+  "gateway": { "port": 8787 }
+}
+```
+
+**With Telegram:**
+
+```json
+{
+  "agents": { "defaults": { "model": "openai/gpt-4o" } },
+  "providers": { "openai": { "api_key": "sk-..." } },
+  "channels": {
+    "telegram": { "enabled": true, "token": "BOT_TOKEN", "allow_from": ["123456789"] }
+  }
+}
+```
+
+Full field reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+
+---
+
 ## 💡 Examples
 
 **One-shot question:**
