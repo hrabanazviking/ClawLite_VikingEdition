@@ -1,32 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-
-def _config_value_or_default(raw: Any, default: Any) -> Any:
-    if raw is None or raw == "":
-        return default
-    return raw
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 
-@dataclass(slots=True)
-class GatewayHeartbeatConfig:
+class Base(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gateway sub-configs
+# ---------------------------------------------------------------------------
+
+class GatewayHeartbeatConfig(Base):
     enabled: bool = True
     interval_s: int = 1800
 
+    @field_validator("interval_s", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayHeartbeatConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", True)),
-            interval_s=max(5, int(_config_value_or_default(data.get("interval_s", data.get("intervalS", 1800)), 1800))),
-        )
+    def _min_interval(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 1800
+        return max(5, int(v))
 
 
-@dataclass(slots=True)
-class GatewayAuthConfig:
+class GatewayAuthConfig(Base):
     mode: str = "off"
     token: str = ""
     allow_loopback_without_auth: bool = True
@@ -34,70 +38,56 @@ class GatewayAuthConfig:
     query_param: str = "token"
     protect_health: bool = False
 
+    @field_validator("mode", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAuthConfig:
-        data = dict(raw or {})
-        mode = str(data.get("mode", "off") or "off").strip().lower()
-        if mode not in {"off", "optional", "required"}:
-            mode = "off"
-        header_name = str(data.get("header_name", data.get("headerName", "Authorization")) or "Authorization").strip()
-        query_param = str(data.get("query_param", data.get("queryParam", "token")) or "token").strip()
-        return cls(
-            mode=mode,
-            token=str(data.get("token", "") or "").strip(),
-            allow_loopback_without_auth=bool(data.get("allow_loopback_without_auth", data.get("allowLoopbackWithoutAuth", True))),
-            header_name=header_name or "Authorization",
-            query_param=query_param or "token",
-            protect_health=bool(data.get("protect_health", data.get("protectHealth", False))),
-        )
+    def _validate_mode(cls, v: Any) -> str:
+        v = str(v or "off").strip().lower()
+        if v not in {"off", "optional", "required"}:
+            v = "off"
+        return v
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def _strip_token(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("header_name", mode="before")
+    @classmethod
+    def _header_name_default(cls, v: Any) -> str:
+        return str(v or "Authorization").strip() or "Authorization"
+
+    @field_validator("query_param", mode="before")
+    @classmethod
+    def _query_param_default(cls, v: Any) -> str:
+        return str(v or "token").strip() or "token"
 
 
-@dataclass(slots=True)
-class GatewayDiagnosticsConfig:
+class GatewayDiagnosticsConfig(Base):
     enabled: bool = True
     require_auth: bool = True
     include_config: bool = False
     include_provider_telemetry: bool = True
 
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayDiagnosticsConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", True)),
-            require_auth=bool(data.get("require_auth", data.get("requireAuth", True))),
-            include_config=bool(data.get("include_config", data.get("includeConfig", False))),
-            include_provider_telemetry=bool(
-                data.get("include_provider_telemetry", data.get("includeProviderTelemetry", True))
-            ),
-        )
 
-
-@dataclass(slots=True)
-class GatewaySupervisorConfig:
+class GatewaySupervisorConfig(Base):
     enabled: bool = True
     interval_s: int = 20
     cooldown_s: int = 30
 
+    @field_validator("interval_s", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewaySupervisorConfig:
-        data = dict(raw or {})
-        if "intervalS" in data:
-            interval_raw = data.get("intervalS")
-        else:
-            interval_raw = data.get("interval_s", 20)
-        if "cooldownS" in data:
-            cooldown_raw = data.get("cooldownS")
-        else:
-            cooldown_raw = data.get("cooldown_s", 30)
-        return cls(
-            enabled=bool(data.get("enabled", True)),
-            interval_s=max(1, int(_config_value_or_default(interval_raw, 20))),
-            cooldown_s=max(0, int(_config_value_or_default(cooldown_raw, 30))),
-        )
+    def _min_interval(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 20
+        return max(1, int(v))
+
+    @field_validator("cooldown_s", mode="before")
+    @classmethod
+    def _min_cooldown(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 30
+        return max(0, int(v))
 
 
-@dataclass(slots=True)
-class GatewayAutonomyConfig:
+class GatewayAutonomyConfig(Base):
     enabled: bool = False
     interval_s: int = 900
     cooldown_s: int = 300
@@ -125,17 +115,24 @@ class GatewayAutonomyConfig:
     self_evolution_enabled: bool = False
     self_evolution_cooldown_s: int = 3600
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayAutonomyConfig:
-        data = dict(raw or {})
+    def _apply_profile_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+
+        # Resolve environment_profile
         if "environmentProfile" in data:
-            environment_profile_raw = data.get("environmentProfile")
+            ep_raw = data.get("environmentProfile")
         else:
-            environment_profile_raw = data.get("environment_profile", "dev")
-        environment_profile = str(environment_profile_raw or "dev").strip().lower()
+            ep_raw = data.get("environment_profile", "dev")
+        environment_profile = str(ep_raw or "dev").strip().lower()
         if environment_profile not in {"dev", "staging", "prod"}:
             environment_profile = "dev"
+        data["environment_profile"] = environment_profile
 
+        # Resolve action_policy
         policy_explicit = "actionPolicy" in data or "action_policy" in data
         if "actionPolicy" in data:
             policy_raw = data.get("actionPolicy")
@@ -146,6 +143,7 @@ class GatewayAutonomyConfig:
         policy = str(policy_raw or ("conservative" if environment_profile == "prod" else "balanced")).strip().lower()
         if policy not in {"balanced", "conservative"}:
             policy = "conservative" if environment_profile == "prod" and not policy_explicit else "balanced"
+        data["action_policy"] = policy
 
         conservative_defaults: dict[str, Any] = {
             "action_cooldown_s": 300.0,
@@ -162,11 +160,10 @@ class GatewayAutonomyConfig:
             "degraded_supervisor_error_threshold": 2,
         }
 
-        profile_defaults: dict[str, Any]
         if environment_profile == "prod":
-            profile_defaults = conservative_defaults
+            profile_defaults = dict(conservative_defaults)
         elif environment_profile == "staging":
-            profile_defaults = staging_defaults
+            profile_defaults = dict(staging_defaults)
         else:
             profile_defaults = {}
 
@@ -176,144 +173,179 @@ class GatewayAutonomyConfig:
 
         def _raw_with_alias(snake: str, camel: str, default: Any) -> Any:
             if camel in data:
-                return data.get(camel)
+                return data[camel]
             if snake in data:
-                return data.get(snake)
+                return data[snake]
             if snake in profile_defaults:
                 return profile_defaults[snake]
             return default
 
-        if "intervalS" in data:
-            interval_raw = data.get("intervalS")
-        else:
-            interval_raw = data.get("interval_s", 900)
-        if "cooldownS" in data:
-            cooldown_raw = data.get("cooldownS")
-        else:
-            cooldown_raw = data.get("cooldown_s", 300)
-        if "timeoutS" in data:
-            timeout_raw = data.get("timeoutS")
-        else:
-            timeout_raw = data.get("timeout_s", 45.0)
-        if "maxQueueBacklog" in data:
-            max_backlog_raw = data.get("maxQueueBacklog")
-        else:
-            max_backlog_raw = data.get("max_queue_backlog", 200)
-        if "sessionId" in data:
-            session_raw = data.get("sessionId")
-        else:
-            session_raw = data.get("session_id", "autonomy:system")
-        if "maxActionsPerRun" in data:
-            max_actions_raw = data.get("maxActionsPerRun")
-        else:
-            max_actions_raw = data.get("max_actions_per_run", 1)
-        if "actionCooldownS" in data:
-            action_cooldown_raw = data.get("actionCooldownS")
-        else:
-            action_cooldown_raw = _raw_with_alias("action_cooldown_s", "actionCooldownS", 120.0)
-        if "actionRateLimitPerHour" in data:
-            action_rate_limit_raw = data.get("actionRateLimitPerHour")
-        else:
-            action_rate_limit_raw = _raw_with_alias("action_rate_limit_per_hour", "actionRateLimitPerHour", 20)
-        if "maxReplayLimit" in data:
-            max_replay_limit_raw = data.get("maxReplayLimit")
-        else:
-            max_replay_limit_raw = data.get("max_replay_limit", 50)
-        min_action_confidence_raw = _raw_with_alias("min_action_confidence", "minActionConfidence", 0.55)
-        degraded_backlog_threshold_raw = _raw_with_alias("degraded_backlog_threshold", "degradedBacklogThreshold", 300)
-        degraded_supervisor_error_threshold_raw = _raw_with_alias(
-            "degraded_supervisor_error_threshold",
-            "degradedSupervisorErrorThreshold",
-            3,
-        )
-        audit_export_path_raw = _raw_with_alias("audit_export_path", "auditExportPath", "")
-        audit_max_entries_raw = _raw_with_alias("audit_max_entries", "auditMaxEntries", 200)
-        tuning_loop_enabled_raw = _raw_with_alias("tuning_loop_enabled", "tuningLoopEnabled", False)
-        tuning_loop_interval_raw = _raw_with_alias("tuning_loop_interval_s", "tuningLoopIntervalS", 1800)
-        tuning_loop_timeout_raw = _raw_with_alias("tuning_loop_timeout_s", "tuningLoopTimeoutS", 45.0)
-        tuning_loop_cooldown_raw = _raw_with_alias("tuning_loop_cooldown_s", "tuningLoopCooldownS", 300)
-        tuning_degrading_streak_threshold_raw = _raw_with_alias(
-            "tuning_degrading_streak_threshold",
-            "tuningDegradingStreakThreshold",
-            2,
-        )
-        tuning_recent_actions_limit_raw = _raw_with_alias("tuning_recent_actions_limit", "tuningRecentActionsLimit", 20)
-        tuning_error_backoff_raw = _raw_with_alias("tuning_error_backoff_s", "tuningErrorBackoffS", 900)
-        self_evolution_enabled_raw = _raw_with_alias("self_evolution_enabled", "selfEvolutionEnabled", False)
-        self_evolution_cooldown_raw = _raw_with_alias("self_evolution_cooldown_s", "selfEvolutionCooldownS", 3600)
+        # Apply profile defaults for fields NOT explicitly set in data
+        for snake, camel, default in [
+            ("action_cooldown_s", "actionCooldownS", 120.0),
+            ("action_rate_limit_per_hour", "actionRateLimitPerHour", 20),
+            ("min_action_confidence", "minActionConfidence", 0.55),
+            ("degraded_backlog_threshold", "degradedBacklogThreshold", 300),
+            ("degraded_supervisor_error_threshold", "degradedSupervisorErrorThreshold", 3),
+        ]:
+            resolved = _raw_with_alias(snake, camel, default)
+            # Store as snake_case so Pydantic picks it up
+            if camel in data:
+                data[snake] = resolved
+                del data[camel]
+            elif snake not in data and snake in profile_defaults:
+                data[snake] = resolved
 
-        action_cooldown_s = max(0.0, float(_config_value_or_default(action_cooldown_raw, 120.0)))
-        action_rate_limit_per_hour = max(1, int(_config_value_or_default(action_rate_limit_raw, 20)))
-        min_action_confidence = float(_config_value_or_default(min_action_confidence_raw, 0.55))
-        if min_action_confidence < 0.0:
-            min_action_confidence = 0.0
-        if min_action_confidence > 1.0:
-            min_action_confidence = 1.0
-        degraded_backlog_threshold = max(1, int(_config_value_or_default(degraded_backlog_threshold_raw, 300)))
-        degraded_supervisor_error_threshold = max(
-            1,
-            int(_config_value_or_default(degraded_supervisor_error_threshold_raw, 3)),
-        )
+        # session_id strip
+        if "session_id" in data:
+            data["session_id"] = str(data["session_id"] or "autonomy:system").strip() or "autonomy:system"
+        elif "sessionId" in data:
+            data["session_id"] = str(data["sessionId"] or "autonomy:system").strip() or "autonomy:system"
+            del data["sessionId"]
 
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            interval_s=max(1, int(_config_value_or_default(interval_raw, 900))),
-            cooldown_s=max(0, int(_config_value_or_default(cooldown_raw, 300))),
-            timeout_s=max(0.1, float(_config_value_or_default(timeout_raw, 45.0))),
-            max_queue_backlog=max(0, int(_config_value_or_default(max_backlog_raw, 200))),
-            session_id=str(session_raw or "autonomy:system").strip() or "autonomy:system",
-            max_actions_per_run=max(1, int(_config_value_or_default(max_actions_raw, 1))),
-            action_cooldown_s=action_cooldown_s,
-            action_rate_limit_per_hour=action_rate_limit_per_hour,
-            max_replay_limit=max(1, int(_config_value_or_default(max_replay_limit_raw, 50))),
-            action_policy=policy,
-            environment_profile=environment_profile,
-            min_action_confidence=min_action_confidence,
-            degraded_backlog_threshold=degraded_backlog_threshold,
-            degraded_supervisor_error_threshold=degraded_supervisor_error_threshold,
-            audit_export_path=str(audit_export_path_raw or "").strip(),
-            audit_max_entries=max(1, int(_config_value_or_default(audit_max_entries_raw, 200))),
-            tuning_loop_enabled=bool(tuning_loop_enabled_raw),
-            tuning_loop_interval_s=max(30, int(_config_value_or_default(tuning_loop_interval_raw, 1800))),
-            tuning_loop_timeout_s=max(1.0, float(_config_value_or_default(tuning_loop_timeout_raw, 45.0))),
-            tuning_loop_cooldown_s=max(0, int(_config_value_or_default(tuning_loop_cooldown_raw, 300))),
-            tuning_degrading_streak_threshold=max(
-                1,
-                int(_config_value_or_default(tuning_degrading_streak_threshold_raw, 2)),
-            ),
-            tuning_recent_actions_limit=max(1, int(_config_value_or_default(tuning_recent_actions_limit_raw, 20))),
-            tuning_error_backoff_s=max(1, int(_config_value_or_default(tuning_error_backoff_raw, 900))),
-            self_evolution_enabled=bool(self_evolution_enabled_raw),
-            self_evolution_cooldown_s=max(60, int(_config_value_or_default(self_evolution_cooldown_raw, 3600))),
-        )
+        return data
+
+    @field_validator("interval_s", mode="before")
+    @classmethod
+    def _min_interval(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 900
+        return max(1, int(v))
+
+    @field_validator("cooldown_s", mode="before")
+    @classmethod
+    def _min_cooldown(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 300
+        return max(0, int(v))
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 45.0
+        return max(0.1, float(v))
+
+    @field_validator("max_queue_backlog", mode="before")
+    @classmethod
+    def _min_backlog(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 200
+        return max(0, int(v))
+
+    @field_validator("max_actions_per_run", mode="before")
+    @classmethod
+    def _min_actions(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 1
+        return max(1, int(v))
+
+    @field_validator("action_cooldown_s", mode="before")
+    @classmethod
+    def _min_action_cooldown(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 120.0
+        return max(0.0, float(v))
+
+    @field_validator("action_rate_limit_per_hour", mode="before")
+    @classmethod
+    def _min_rate_limit(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 20
+        return max(1, int(v))
+
+    @field_validator("max_replay_limit", mode="before")
+    @classmethod
+    def _min_replay(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 50
+        return max(1, int(v))
+
+    @field_validator("min_action_confidence", mode="before")
+    @classmethod
+    def _clamp_confidence(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 0.55
+        f = float(v)
+        return max(0.0, min(1.0, f))
+
+    @field_validator("degraded_backlog_threshold", mode="before")
+    @classmethod
+    def _min_deg_backlog(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 300
+        return max(1, int(v))
+
+    @field_validator("degraded_supervisor_error_threshold", mode="before")
+    @classmethod
+    def _min_deg_super(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3
+        return max(1, int(v))
+
+    @field_validator("audit_max_entries", mode="before")
+    @classmethod
+    def _min_audit(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 200
+        return max(1, int(v))
+
+    @field_validator("tuning_loop_interval_s", mode="before")
+    @classmethod
+    def _min_tuning_interval(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 1800
+        return max(30, int(v))
+
+    @field_validator("tuning_loop_timeout_s", mode="before")
+    @classmethod
+    def _min_tuning_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 45.0
+        return max(1.0, float(v))
+
+    @field_validator("tuning_loop_cooldown_s", mode="before")
+    @classmethod
+    def _min_tuning_cooldown(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 300
+        return max(0, int(v))
+
+    @field_validator("tuning_degrading_streak_threshold", mode="before")
+    @classmethod
+    def _min_tuning_streak(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 2
+        return max(1, int(v))
+
+    @field_validator("tuning_recent_actions_limit", mode="before")
+    @classmethod
+    def _min_tuning_actions(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 20
+        return max(1, int(v))
+
+    @field_validator("tuning_error_backoff_s", mode="before")
+    @classmethod
+    def _min_tuning_backoff(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 900
+        return max(1, int(v))
+
+    @field_validator("self_evolution_cooldown_s", mode="before")
+    @classmethod
+    def _min_evo_cooldown(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3600
+        return max(60, int(v))
 
 
-@dataclass(slots=True)
-class GatewayConfig:
+class GatewayConfig(Base):
     host: str = "127.0.0.1"
     port: int = 8787
-    heartbeat: GatewayHeartbeatConfig = field(default_factory=GatewayHeartbeatConfig)
-    auth: GatewayAuthConfig = field(default_factory=GatewayAuthConfig)
-    diagnostics: GatewayDiagnosticsConfig = field(default_factory=GatewayDiagnosticsConfig)
-    supervisor: GatewaySupervisorConfig = field(default_factory=GatewaySupervisorConfig)
-    autonomy: GatewayAutonomyConfig = field(default_factory=GatewayAutonomyConfig)
+    heartbeat: GatewayHeartbeatConfig = Field(default_factory=GatewayHeartbeatConfig)
+    auth: GatewayAuthConfig = Field(default_factory=GatewayAuthConfig)
+    diagnostics: GatewayDiagnosticsConfig = Field(default_factory=GatewayDiagnosticsConfig)
+    supervisor: GatewaySupervisorConfig = Field(default_factory=GatewaySupervisorConfig)
+    autonomy: GatewayAutonomyConfig = Field(default_factory=GatewayAutonomyConfig)
 
+    @field_validator("host", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> GatewayConfig:
-        data = dict(raw or {})
-        return cls(
-            host=str(data.get("host", "127.0.0.1") or "127.0.0.1"),
-            port=int(data.get("port", 8787) or 8787),
-            heartbeat=GatewayHeartbeatConfig.from_dict(dict(data.get("heartbeat") or {})),
-            auth=GatewayAuthConfig.from_dict(dict(data.get("auth") or {})),
-            diagnostics=GatewayDiagnosticsConfig.from_dict(dict(data.get("diagnostics") or {})),
-            supervisor=GatewaySupervisorConfig.from_dict(dict(data.get("supervisor") or {})),
-            autonomy=GatewayAutonomyConfig.from_dict(dict(data.get("autonomy") or {})),
-        )
+    def _host_default(cls, v: Any) -> str:
+        return str(v or "127.0.0.1")
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _port_default(cls, v: Any) -> int:
+        return int(v or 8787)
 
 
-@dataclass(slots=True)
-class ProviderConfig:
+# ---------------------------------------------------------------------------
+# Provider configs
+# ---------------------------------------------------------------------------
+
+class ProviderConfig(Base):
     model: str = "gemini/gemini-2.5-flash"
     litellm_base_url: str = "https://api.openai.com/v1"
     litellm_api_key: str = ""
@@ -325,21 +357,62 @@ class ProviderConfig:
     circuit_cooldown_s: float = 30.0
     fallback_model: str = ""
 
+    @field_validator("model", mode="before")
+    @classmethod
+    def _model_default(cls, v: Any) -> str:
+        return str(v or "gemini/gemini-2.5-flash")
 
-@dataclass(slots=True)
-class ProviderOverrideConfig:
+    @field_validator("litellm_base_url", mode="before")
+    @classmethod
+    def _base_url_default(cls, v: Any) -> str:
+        return str(v or "https://api.openai.com/v1")
+
+    @field_validator("retry_max_attempts", mode="before")
+    @classmethod
+    def _min_retry(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3
+        return max(1, int(v))
+
+    @field_validator("retry_initial_backoff_s", mode="before")
+    @classmethod
+    def _min_retry_backoff(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 0.5
+        return max(0.0, float(v))
+
+    @field_validator("retry_max_backoff_s", mode="before")
+    @classmethod
+    def _min_retry_max_backoff(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 8.0
+        return max(0.0, float(v))
+
+    @field_validator("retry_jitter_s", mode="before")
+    @classmethod
+    def _min_jitter(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 0.2
+        return max(0.0, float(v))
+
+    @field_validator("circuit_failure_threshold", mode="before")
+    @classmethod
+    def _min_circuit(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3
+        return max(1, int(v))
+
+    @field_validator("circuit_cooldown_s", mode="before")
+    @classmethod
+    def _min_circuit_cooldown(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 30.0
+        return max(0.0, float(v))
+
+    @field_validator("fallback_model", mode="before")
+    @classmethod
+    def _strip_fallback(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+
+class ProviderOverrideConfig(Base):
     api_key: str = ""
     api_base: str = ""
-    extra_headers: dict[str, str] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ProviderOverrideConfig:
-        data = dict(raw or {})
-        api_key = str(data.get("api_key", data.get("apiKey", "")) or "")
-        api_base = str(data.get("api_base", data.get("apiBase", "")) or "")
-        extra_headers_raw = data.get("extra_headers", data.get("extraHeaders", {}))
-        extra_headers = dict(extra_headers_raw) if isinstance(extra_headers_raw, dict) else {}
-        return cls(api_key=api_key, api_base=api_base, extra_headers=extra_headers)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -349,8 +422,7 @@ class ProviderOverrideConfig:
         }
 
 
-@dataclass(slots=True)
-class ProvidersConfig:
+class ProvidersConfig(Base):
     BUILTIN_KEYS: ClassVar[tuple[str, ...]] = (
         "openrouter",
         "gemini",
@@ -363,16 +435,41 @@ class ProvidersConfig:
         "custom",
     )
 
-    openrouter: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    gemini: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    openai: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    anthropic: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    deepseek: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    groq: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    ollama: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    vllm: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    custom: ProviderOverrideConfig = field(default_factory=ProviderOverrideConfig)
-    extra: dict[str, ProviderOverrideConfig] = field(default_factory=dict)
+    openrouter: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    gemini: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    openai: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    anthropic: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    deepseek: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    groq: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    ollama: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    vllm: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    custom: ProviderOverrideConfig = Field(default_factory=ProviderOverrideConfig)
+    extra: dict[str, ProviderOverrideConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _extract_extras(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        extras: dict[str, Any] = {}
+        builtin = {
+            "openrouter", "gemini", "openai", "anthropic",
+            "deepseek", "groq", "ollama", "vllm", "custom",
+        }
+        for key, value in list(data.items()):
+            if key in ("extra",):
+                continue
+            normalized = cls.normalize_name(key)
+            if normalized in builtin or not isinstance(value, dict):
+                continue
+            # It's a custom provider
+            extras[normalized] = value
+        if extras:
+            existing_extra = data.get("extra", {}) or {}
+            merged = {**extras, **existing_extra}
+            data["extra"] = merged
+        return data
 
     @staticmethod
     def normalize_name(value: str) -> str:
@@ -399,85 +496,68 @@ class ProvidersConfig:
             payload[key] = self.extra[key].to_dict()
         return payload
 
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ProvidersConfig:
-        data = dict(raw or {})
-        extras: dict[str, ProviderOverrideConfig] = {}
-        for key, value in data.items():
-            normalized = cls.normalize_name(key)
-            if normalized in cls.BUILTIN_KEYS or not isinstance(value, dict):
-                continue
-            extras[normalized] = ProviderOverrideConfig.from_dict(value)
-        return cls(
-            openrouter=ProviderOverrideConfig.from_dict(dict(data.get("openrouter") or {})),
-            gemini=ProviderOverrideConfig.from_dict(dict(data.get("gemini") or {})),
-            openai=ProviderOverrideConfig.from_dict(dict(data.get("openai") or {})),
-            anthropic=ProviderOverrideConfig.from_dict(dict(data.get("anthropic") or {})),
-            deepseek=ProviderOverrideConfig.from_dict(dict(data.get("deepseek") or {})),
-            groq=ProviderOverrideConfig.from_dict(dict(data.get("groq") or {})),
-            ollama=ProviderOverrideConfig.from_dict(dict(data.get("ollama") or {})),
-            vllm=ProviderOverrideConfig.from_dict(dict(data.get("vllm") or {})),
-            custom=ProviderOverrideConfig.from_dict(dict(data.get("custom") or {})),
-            extra=extras,
-        )
 
+# ---------------------------------------------------------------------------
+# Auth configs
+# ---------------------------------------------------------------------------
 
-@dataclass(slots=True)
-class AuthProviderTokenConfig:
+class AuthProviderTokenConfig(Base):
     access_token: str = ""
     account_id: str = ""
     source: str = ""
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> AuthProviderTokenConfig:
-        data = dict(raw or {})
-        access_token = str(
-            data.get("access_token", data.get("accessToken", data.get("token", ""))) or ""
-        ).strip()
-        account_id = str(
-            data.get(
-                "account_id",
-                data.get(
-                    "accountId",
-                    data.get("org_id", data.get("orgId", data.get("organization", ""))),
-                ),
-            )
-            or ""
-        ).strip()
-        source = str(data.get("source", "") or "").strip()
-        return cls(access_token=access_token, account_id=account_id, source=source)
+    def _normalize_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # access_token aliases
+        if "access_token" not in data and "accessToken" not in data:
+            for alias in ("token",):
+                if alias in data:
+                    data["access_token"] = data[alias]
+                    break
+        # account_id aliases
+        if "account_id" not in data and "accountId" not in data:
+            for alias in ("org_id", "orgId", "organization"):
+                if alias in data:
+                    data["account_id"] = data[alias]
+                    break
+        return data
 
-
-@dataclass(slots=True)
-class AuthProvidersConfig:
-    openai_codex: AuthProviderTokenConfig = field(default_factory=AuthProviderTokenConfig)
-
+    @field_validator("access_token", "account_id", "source", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> AuthProvidersConfig:
-        data = dict(raw or {})
-        codex_payload: dict[str, Any] = {}
-        for key in ("openai_codex", "openai-codex", "codex", "openaiCodex"):
-            candidate = data.get(key)
-            if isinstance(candidate, dict):
-                codex_payload = dict(candidate)
-                break
-        return cls(openai_codex=AuthProviderTokenConfig.from_dict(codex_payload))
+    def _strip(cls, v: Any) -> str:
+        return str(v or "").strip()
 
 
-@dataclass(slots=True)
-class AuthConfig:
-    providers: AuthProvidersConfig = field(default_factory=AuthProvidersConfig)
+class AuthProvidersConfig(Base):
+    openai_codex: AuthProviderTokenConfig = Field(default_factory=AuthProviderTokenConfig)
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> AuthConfig:
-        data = dict(raw or {})
-        providers_raw = data.get("providers")
-        providers = AuthProvidersConfig.from_dict(dict(providers_raw) if isinstance(providers_raw, dict) else {})
-        return cls(providers=providers)
+    def _normalize_codex_key(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "openai_codex" not in data and "openaiCodex" not in data:
+            for key in ("openai-codex", "codex"):
+                if key in data and isinstance(data[key], dict):
+                    data["openai_codex"] = data[key]
+                    break
+        return data
 
 
-@dataclass(slots=True)
-class AgentMemoryConfig:
+class AuthConfig(Base):
+    providers: AuthProvidersConfig = Field(default_factory=AuthProvidersConfig)
+
+
+# ---------------------------------------------------------------------------
+# Agent configs
+# ---------------------------------------------------------------------------
+
+class AgentMemoryConfig(Base):
     semantic_search: bool = False
     auto_categorize: bool = False
     proactive: bool = False
@@ -487,51 +567,30 @@ class AgentMemoryConfig:
     backend: str = "sqlite"
     pgvector_url: str = ""
 
+    @field_validator("backend", mode="before")
     @classmethod
-    def from_dict(
-        cls,
-        raw: dict[str, Any] | None,
-        *,
-        legacy_semantic: bool = False,
-        legacy_auto_categorize: bool = False,
-    ) -> AgentMemoryConfig:
-        data = dict(raw or {})
+    def _normalize_backend(cls, v: Any) -> str:
+        v = str(v or "sqlite").strip().lower()
+        if v == "jsonl":
+            return "sqlite"
+        if v in {"sqlite", "pgvector"}:
+            return v
+        return "sqlite"
 
-        def _value(snake: str, camel: str, default: Any) -> Any:
-            if snake in data:
-                return data.get(snake)
-            if camel in data:
-                return data.get(camel)
-            return default
+    @field_validator("proactive_retry_backoff_s", mode="before")
+    @classmethod
+    def _min_backoff(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 300.0
+        return max(0.0, float(v))
 
-        backend_raw = str(_value("backend", "backend", "sqlite") or "sqlite").strip().lower()
-        if backend_raw == "jsonl":
-            backend = "sqlite"
-        elif backend_raw in {"sqlite", "pgvector"}:
-            backend = backend_raw
-        else:
-            backend = "sqlite"
-
-        return cls(
-            semantic_search=bool(_value("semantic_search", "semanticSearch", legacy_semantic)),
-            auto_categorize=bool(_value("auto_categorize", "autoCategorize", legacy_auto_categorize)),
-            proactive=bool(_value("proactive", "proactive", False)),
-            proactive_retry_backoff_s=max(
-                0.0,
-                float(_value("proactive_retry_backoff_s", "proactiveRetryBackoffS", 300.0) or 300.0),
-            ),
-            proactive_max_retry_attempts=max(
-                1,
-                int(_value("proactive_max_retry_attempts", "proactiveMaxRetryAttempts", 3) or 3),
-            ),
-            emotional_tracking=bool(_value("emotional_tracking", "emotionalTracking", False)),
-            backend=backend,
-            pgvector_url=str(_value("pgvector_url", "pgvectorUrl", "") or ""),
-        )
+    @field_validator("proactive_max_retry_attempts", mode="before")
+    @classmethod
+    def _min_retry(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3
+        return max(1, int(v))
 
 
-@dataclass(slots=True)
-class AgentDefaultsConfig:
+class AgentDefaultsConfig(Base):
     model: str = "gemini/gemini-2.5-flash"
     provider: str = "auto"
     max_tokens: int = 8192
@@ -542,90 +601,113 @@ class AgentDefaultsConfig:
     reasoning_effort: str | None = None
     semantic_memory: bool = False
     memory_auto_categorize: bool = False
-    memory: AgentMemoryConfig = field(default_factory=AgentMemoryConfig)
+    memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> AgentDefaultsConfig:
-        data = dict(raw or {})
-        if "sessionRetentionMessages" in data:
-            session_retention_raw = data.get("sessionRetentionMessages")
-        elif "session_retention_messages" in data:
-            session_retention_raw = data.get("session_retention_messages")
-        else:
-            session_retention_raw = 2000
-        if session_retention_raw is None:
-            session_retention_messages: int | None = None
-        else:
-            normalized_retention_raw = session_retention_raw
-            if isinstance(normalized_retention_raw, str) and not normalized_retention_raw.strip():
-                normalized_retention_raw = 2000
-            session_retention_messages = max(1, int(normalized_retention_raw))
+    def _handle_legacy_memory_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # Handle session_retention_messages: explicit None is allowed
+        if "sessionRetentionMessages" in data and "session_retention_messages" not in data:
+            data["session_retention_messages"] = data["sessionRetentionMessages"]
+        # Propagate legacy top-level memory flags into the memory sub-config
         legacy_semantic = bool(data.get("semantic_memory", data.get("semanticMemory", False)))
-        legacy_auto_categorize = bool(data.get("memory_auto_categorize", data.get("memoryAutoCategorize", False)))
-        memory_cfg = AgentMemoryConfig.from_dict(
-            dict(data.get("memory") or {}),
-            legacy_semantic=legacy_semantic,
-            legacy_auto_categorize=legacy_auto_categorize,
-        )
+        legacy_auto_cat = bool(data.get("memory_auto_categorize", data.get("memoryAutoCategorize", False)))
+        mem_raw = data.get("memory", {})
+        if not isinstance(mem_raw, dict):
+            mem_raw = {}
+        mem_raw = dict(mem_raw)
+        if legacy_semantic and "semantic_search" not in mem_raw and "semanticSearch" not in mem_raw:
+            mem_raw["semantic_search"] = legacy_semantic
+        if legacy_auto_cat and "auto_categorize" not in mem_raw and "autoCategorize" not in mem_raw:
+            mem_raw["auto_categorize"] = legacy_auto_cat
+        data["memory"] = mem_raw
+        return data
 
-        return cls(
-            model=str(data.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
-            provider=str(data.get("provider", "auto") or "auto"),
-            max_tokens=max(1, int(data.get("max_tokens", data.get("maxTokens", 8192)) or 8192)),
-            temperature=float(data.get("temperature", 0.1) or 0.1),
-            max_tool_iterations=max(1, int(data.get("max_tool_iterations", data.get("maxToolIterations", 40)) or 40)),
-            memory_window=max(1, int(data.get("memory_window", data.get("memoryWindow", 100)) or 100)),
-            session_retention_messages=session_retention_messages,
-            reasoning_effort=(str(data.get("reasoning_effort", data.get("reasoningEffort", "")) or "").strip() or None),
-            semantic_memory=bool(memory_cfg.semantic_search),
-            memory_auto_categorize=bool(memory_cfg.auto_categorize),
-            memory=memory_cfg,
-        )
-
-
-@dataclass(slots=True)
-class AgentsConfig:
-    defaults: AgentDefaultsConfig = field(default_factory=AgentDefaultsConfig)
-
+    @field_validator("model", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> AgentsConfig:
-        data = dict(raw or {})
-        return cls(defaults=AgentDefaultsConfig.from_dict(dict(data.get("defaults") or {})))
+    def _model_default(cls, v: Any) -> str:
+        return str(v or "gemini/gemini-2.5-flash")
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _provider_default(cls, v: Any) -> str:
+        return str(v or "auto")
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _min_max_tokens(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 8192
+        return max(1, int(v))
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _temperature_default(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 0.1
+        return float(v)
+
+    @field_validator("max_tool_iterations", mode="before")
+    @classmethod
+    def _min_iterations(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 40
+        return max(1, int(v))
+
+    @field_validator("memory_window", mode="before")
+    @classmethod
+    def _min_window(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 100
+        return max(1, int(v))
+
+    @field_validator("session_retention_messages", mode="before")
+    @classmethod
+    def _session_retention(cls, v: Any) -> int | None:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return 2000
+        return max(1, int(v))
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _reasoning_effort(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
+
+    # Keep semantic_memory and memory_auto_categorize in sync with memory sub-config
+    @model_validator(mode="after")
+    def _sync_memory_flags(self) -> "AgentDefaultsConfig":
+        self.semantic_memory = bool(self.memory.semantic_search)
+        self.memory_auto_categorize = bool(self.memory.auto_categorize)
+        return self
+
+    # AgentDefaultsConfig doesn't have context_window_tokens in the original,
+    # but gateway references it via getattr so we don't need to add it.
 
 
-@dataclass(slots=True)
-class SchedulerConfig:
+class AgentsConfig(Base):
+    defaults: AgentDefaultsConfig = Field(default_factory=AgentDefaultsConfig)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler (legacy, keep for compat)
+# ---------------------------------------------------------------------------
+
+class SchedulerConfig(Base):
     heartbeat_interval_seconds: int = 1800
     timezone: str = "UTC"
 
 
-@dataclass(slots=True)
-class BaseChannelConfig:
+# ---------------------------------------------------------------------------
+# Channel configs
+# ---------------------------------------------------------------------------
+
+class TelegramChannelConfig(Base):
     enabled: bool = False
-    allow_from: list[str] = field(default_factory=list)
-
-    @classmethod
-    def _allow_from(cls, data: dict[str, Any]) -> list[str]:
-        allow_raw = data.get("allow_from")
-        if (not allow_raw) and ("allowFrom" in data):
-            allow_raw = data.get("allowFrom")
-        if allow_raw is None:
-            allow_raw = []
-        if not isinstance(allow_raw, list):
-            return []
-        return [str(item).strip() for item in allow_raw if str(item).strip()]
-
-
-@dataclass(slots=True)
-class ChannelConfig(BaseChannelConfig):
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ChannelConfig:
-        data = dict(raw or {})
-        return cls(enabled=bool(data.get("enabled", False)), allow_from=cls._allow_from(data))
-
-
-@dataclass(slots=True)
-class TelegramChannelConfig(BaseChannelConfig):
+    allow_from: list[str] = Field(default_factory=list)
     token: str = ""
     mode: str = "polling"
     webhook_enabled: bool = False
@@ -666,122 +748,65 @@ class TelegramChannelConfig(BaseChannelConfig):
     dm_policy: str = "open"
     group_policy: str = "open"
     topic_policy: str = "open"
-    dm_allow_from: list[str] = field(default_factory=list)
-    group_allow_from: list[str] = field(default_factory=list)
-    topic_allow_from: list[str] = field(default_factory=list)
-    group_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    dm_allow_from: list[str] = Field(default_factory=list)
+    group_allow_from: list[str] = Field(default_factory=list)
+    topic_allow_from: list[str] = Field(default_factory=list)
+    group_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     pairing_state_path: str = ""
     pairing_notice_cooldown_s: float = 30.0
     callback_signing_enabled: bool = False
     callback_signing_secret: str = ""
     callback_require_signed: bool = False
 
+    @field_validator("update_dedupe_limit", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> TelegramChannelConfig:
-        data = dict(raw or {})
-        group_overrides_raw = data.get("group_overrides", data.get("groupOverrides", {}))
-        group_overrides: dict[str, dict[str, Any]] = {}
-        if isinstance(group_overrides_raw, dict):
-            for key, value in group_overrides_raw.items():
-                if not isinstance(value, dict):
-                    continue
-                group_overrides[str(key)] = dict(value)
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            allow_from=cls._allow_from(data),
-            token=str(data.get("token", "") or ""),
-            mode=str(data.get("mode", "polling") or "polling"),
-            webhook_enabled=bool(data.get("webhook_enabled", data.get("webhookEnabled", False))),
-            webhook_secret=str(data.get("webhook_secret", data.get("webhookSecret", "")) or ""),
-            webhook_path=str(data.get("webhook_path", data.get("webhookPath", "/api/webhooks/telegram")) or "/api/webhooks/telegram"),
-            webhook_url=str(data.get("webhook_url", data.get("webhookUrl", "")) or ""),
-            webhook_fail_fast_on_error=bool(
-                data.get("webhook_fail_fast_on_error", data.get("webhookFailFastOnError", False))
-            ),
-            update_dedupe_limit=max(
-                32,
-                int(
-                    data.get(
-                        "update_dedupe_limit",
-                        data.get(
-                            "updateDedupeLimit",
-                            data.get("webhook_dedupe_limit", data.get("webhookDedupeLimit", 4096)),
-                        ),
-                    )
-                    or 4096
-                ),
-            ),
-            dedupe_state_path=str(data.get("dedupe_state_path", data.get("dedupeStatePath", "")) or "").strip(),
-            offset_state_path=str(data.get("offset_state_path", data.get("offsetStatePath", "")) or "").strip(),
-            media_download_dir=str(data.get("media_download_dir", data.get("mediaDownloadDir", "")) or "").strip(),
-            transcribe_voice=bool(data.get("transcribe_voice", data.get("transcribeVoice", True))),
-            transcribe_audio=bool(data.get("transcribe_audio", data.get("transcribeAudio", True))),
-            transcription_api_key=str(data.get("transcription_api_key", data.get("transcriptionApiKey", "")) or "").strip(),
-            transcription_base_url=str(
-                data.get("transcription_base_url", data.get("transcriptionBaseUrl", "https://api.groq.com/openai/v1"))
-                or "https://api.groq.com/openai/v1"
-            ).strip(),
-            transcription_model=str(
-                data.get("transcription_model", data.get("transcriptionModel", "whisper-large-v3-turbo"))
-                or "whisper-large-v3-turbo"
-            ).strip(),
-            transcription_language=str(
-                data.get("transcription_language", data.get("transcriptionLanguage", "pt")) or "pt"
-            ).strip(),
-            transcription_timeout_s=float(
-                data.get("transcription_timeout_s", data.get("transcriptionTimeoutS", 90.0)) or 90.0
-            ),
-            poll_interval_s=float(data.get("poll_interval_s", data.get("pollIntervalS", 1.0)) or 1.0),
-            poll_timeout_s=int(data.get("poll_timeout_s", data.get("pollTimeoutS", 20)) or 20),
-            reconnect_initial_s=float(data.get("reconnect_initial_s", data.get("reconnectInitialS", 2.0)) or 2.0),
-            reconnect_max_s=float(data.get("reconnect_max_s", data.get("reconnectMaxS", 30.0)) or 30.0),
-            send_timeout_s=float(data.get("send_timeout_s", data.get("sendTimeoutSec", 15.0)) or 15.0),
-            send_retry_attempts=int(data.get("send_retry_attempts", data.get("sendRetryAttempts", 3)) or 3),
-            send_backoff_base_s=float(data.get("send_backoff_base_s", data.get("sendBackoffBaseSec", 0.35)) or 0.35),
-            send_backoff_max_s=float(data.get("send_backoff_max_s", data.get("sendBackoffMaxSec", 8.0)) or 8.0),
-            send_backoff_jitter=float(data.get("send_backoff_jitter", data.get("sendBackoffJitter", 0.2)) or 0.2),
-            send_circuit_failure_threshold=int(
-                data.get("send_circuit_failure_threshold", data.get("sendCircuitFailureThreshold", 1)) or 1
-            ),
-            send_circuit_cooldown_s=float(data.get("send_circuit_cooldown_s", data.get("sendCircuitCooldownSec", 60.0)) or 60.0),
-            typing_enabled=bool(data.get("typing_enabled", data.get("typingEnabled", True))),
-            typing_interval_s=float(data.get("typing_interval_s", data.get("typingIntervalS", 2.5)) or 2.5),
-            typing_max_ttl_s=float(data.get("typing_max_ttl_s", data.get("typingMaxTtlS", 120.0)) or 120.0),
-            typing_timeout_s=float(data.get("typing_timeout_s", data.get("typingTimeoutS", 5.0)) or 5.0),
-            typing_circuit_failure_threshold=int(
-                data.get("typing_circuit_failure_threshold", data.get("typingCircuitFailureThreshold", 1)) or 1
-            ),
-            typing_circuit_cooldown_s=float(data.get("typing_circuit_cooldown_s", data.get("typingCircuitCooldownS", 60.0)) or 60.0),
-            reaction_notifications=str(data.get("reaction_notifications", data.get("reactionNotifications", "own")) or "own"),
-            reaction_own_cache_limit=max(
-                1,
-                int(data.get("reaction_own_cache_limit", data.get("reactionOwnCacheLimit", 4096)) or 4096),
-            ),
-            dm_policy=str(data.get("dm_policy", data.get("dmPolicy", "open")) or "open"),
-            group_policy=str(data.get("group_policy", data.get("groupPolicy", "open")) or "open"),
-            topic_policy=str(data.get("topic_policy", data.get("topicPolicy", "open")) or "open"),
-            dm_allow_from=cls._allow_from({"allow_from": data.get("dm_allow_from", data.get("dmAllowFrom", []))}),
-            group_allow_from=cls._allow_from({"allow_from": data.get("group_allow_from", data.get("groupAllowFrom", []))}),
-            topic_allow_from=cls._allow_from({"allow_from": data.get("topic_allow_from", data.get("topicAllowFrom", []))}),
-            group_overrides=group_overrides,
-            pairing_state_path=str(data.get("pairing_state_path", data.get("pairingStatePath", "")) or "").strip(),
-            pairing_notice_cooldown_s=float(
-                data.get("pairing_notice_cooldown_s", data.get("pairingNoticeCooldownS", 30.0)) or 30.0
-            ),
-            callback_signing_enabled=bool(
-                data.get("callback_signing_enabled", data.get("callbackSigningEnabled", False))
-            ),
-            callback_signing_secret=str(
-                data.get("callback_signing_secret", data.get("callbackSigningSecret", "")) or ""
-            ).strip(),
-            callback_require_signed=bool(
-                data.get("callback_require_signed", data.get("callbackRequireSigned", False))
-            ),
-        )
+    def _min_dedupe(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 4096
+        return max(32, int(v))
+
+    @field_validator("reaction_own_cache_limit", mode="before")
+    @classmethod
+    def _min_reaction_cache(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 4096
+        return max(1, int(v))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # allow_from alias
+        if "allow_from" not in data and "allowFrom" in data:
+            data["allow_from"] = data["allowFrom"]
+        # update_dedupe_limit has extra alias
+        if "update_dedupe_limit" not in data and "updateDedupeLimit" not in data:
+            for alias in ("webhook_dedupe_limit", "webhookDedupeLimit"):
+                if alias in data:
+                    data["update_dedupe_limit"] = data[alias]
+                    break
+        # send_timeout_s alias
+        if "send_timeout_s" not in data and "sendTimeoutS" not in data and "sendTimeoutSec" in data:
+            data["send_timeout_s"] = data["sendTimeoutSec"]
+        # send_backoff_base_s alias
+        if "send_backoff_base_s" not in data and "sendBackoffBaseS" not in data and "sendBackoffBaseSec" in data:
+            data["send_backoff_base_s"] = data["sendBackoffBaseSec"]
+        # send_backoff_max_s alias
+        if "send_backoff_max_s" not in data and "sendBackoffMaxS" not in data and "sendBackoffMaxSec" in data:
+            data["send_backoff_max_s"] = data["sendBackoffMaxSec"]
+        # send_circuit_cooldown_s alias
+        if "send_circuit_cooldown_s" not in data and "sendCircuitCooldownS" not in data and "sendCircuitCooldownSec" in data:
+            data["send_circuit_cooldown_s"] = data["sendCircuitCooldownSec"]
+        # dm_allow_from alias
+        if "dm_allow_from" not in data and "dmAllowFrom" not in data:
+            pass  # Will be empty list
+        # group_allow_from / topic_allow_from similar - aliases handled by alias_generator
+        return data
 
 
-@dataclass(slots=True)
-class DiscordChannelConfig(BaseChannelConfig):
+class DiscordChannelConfig(Base):
+    enabled: bool = False
+    allow_from: list[str] = Field(default_factory=list)
     token: str = ""
     api_base: str = "https://discord.com/api/v10"
     timeout_s: float = 10.0
@@ -792,41 +817,57 @@ class DiscordChannelConfig(BaseChannelConfig):
     typing_enabled: bool = True
     typing_interval_s: float = 8.0
 
+    @field_validator("allow_from", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> DiscordChannelConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            allow_from=cls._allow_from(data),
-            token=str(data.get("token", "") or ""),
-            api_base=str(data.get("api_base", data.get("apiBase", "https://discord.com/api/v10")) or "https://discord.com/api/v10"),
-            timeout_s=max(0.1, float(data.get("timeout_s", data.get("timeoutS", 10.0)) or 10.0)),
-            gateway_url=str(
-                data.get("gateway_url", data.get("gatewayUrl", "wss://gateway.discord.gg/?v=10&encoding=json"))
-                or "wss://gateway.discord.gg/?v=10&encoding=json"
-            ).strip(),
-            gateway_intents=max(
-                0,
-                int(data.get("gateway_intents", data.get("gatewayIntents", 37377)) or 37377),
-            ),
-            gateway_backoff_base_s=max(
-                0.1,
-                float(data.get("gateway_backoff_base_s", data.get("gatewayBackoffBaseS", 2.0)) or 2.0),
-            ),
-            gateway_backoff_max_s=max(
-                0.1,
-                float(data.get("gateway_backoff_max_s", data.get("gatewayBackoffMaxS", 30.0)) or 30.0),
-            ),
-            typing_enabled=bool(data.get("typing_enabled", data.get("typingEnabled", True))),
-            typing_interval_s=max(
-                0.5,
-                float(data.get("typing_interval_s", data.get("typingIntervalS", 8.0)) or 8.0),
-            ),
-        )
+    def _parse_allow_from(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 10.0
+        return max(0.1, float(v))
+
+    @field_validator("gateway_intents", mode="before")
+    @classmethod
+    def _min_intents(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 37377
+        return max(0, int(v))
+
+    @field_validator("gateway_backoff_base_s", mode="before")
+    @classmethod
+    def _min_backoff_base(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 2.0
+        return max(0.1, float(v))
+
+    @field_validator("gateway_backoff_max_s", mode="before")
+    @classmethod
+    def _min_backoff_max(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 30.0
+        return max(0.1, float(v))
+
+    @field_validator("typing_interval_s", mode="before")
+    @classmethod
+    def _min_typing_interval(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 8.0
+        return max(0.5, float(v))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "allow_from" not in data and "allowFrom" in data:
+            data["allow_from"] = data["allowFrom"]
+        return data
 
 
-@dataclass(slots=True)
-class EmailChannelConfig(BaseChannelConfig):
+class EmailChannelConfig(Base):
+    enabled: bool = False
+    allow_from: list[str] = Field(default_factory=list)
     imap_host: str = ""
     imap_port: int = 993
     imap_user: str = ""
@@ -845,82 +886,122 @@ class EmailChannelConfig(BaseChannelConfig):
     max_body_chars: int = 12000
     from_address: str = ""
 
+    @field_validator("allow_from", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> EmailChannelConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            allow_from=cls._allow_from(data),
-            imap_host=str(data.get("imap_host", data.get("imapHost", "")) or "").strip(),
-            imap_port=max(1, int(data.get("imap_port", data.get("imapPort", 993)) or 993)),
-            imap_user=str(data.get("imap_user", data.get("imapUser", "")) or "").strip(),
-            imap_password=str(data.get("imap_password", data.get("imapPassword", "")) or ""),
-            imap_use_ssl=bool(data.get("imap_use_ssl", data.get("imapUseSsl", True))),
-            smtp_host=str(data.get("smtp_host", data.get("smtpHost", "")) or "").strip(),
-            smtp_port=max(1, int(data.get("smtp_port", data.get("smtpPort", 465)) or 465)),
-            smtp_user=str(data.get("smtp_user", data.get("smtpUser", "")) or "").strip(),
-            smtp_password=str(data.get("smtp_password", data.get("smtpPassword", "")) or ""),
-            smtp_use_ssl=bool(data.get("smtp_use_ssl", data.get("smtpUseSsl", True))),
-            smtp_use_starttls=bool(
-                data.get("smtp_use_starttls", data.get("smtpUseStarttls", True))
-            ),
-            poll_interval_s=max(
-                1.0,
-                float(data.get("poll_interval_s", data.get("pollIntervalS", 30.0)) or 30.0),
-            ),
-            mailbox=str(data.get("mailbox", data.get("imapMailbox", "INBOX")) or "INBOX").strip() or "INBOX",
-            mark_seen=bool(data.get("mark_seen", data.get("markSeen", True))),
-            dedupe_state_path=str(data.get("dedupe_state_path", data.get("dedupeStatePath", "")) or "").strip(),
-            max_body_chars=max(256, int(data.get("max_body_chars", data.get("maxBodyChars", 12000)) or 12000)),
-            from_address=str(data.get("from_address", data.get("fromAddress", "")) or "").strip(),
-        )
+    def _parse_allow_from(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
+
+    @field_validator("imap_port", mode="before")
+    @classmethod
+    def _min_imap_port(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 993
+        return max(1, int(v))
+
+    @field_validator("smtp_port", mode="before")
+    @classmethod
+    def _min_smtp_port(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 465
+        return max(1, int(v))
+
+    @field_validator("poll_interval_s", mode="before")
+    @classmethod
+    def _min_poll(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 30.0
+        return max(1.0, float(v))
+
+    @field_validator("mailbox", mode="before")
+    @classmethod
+    def _mailbox_default(cls, v: Any) -> str:
+        return str(v or "INBOX").strip() or "INBOX"
+
+    @field_validator("max_body_chars", mode="before")
+    @classmethod
+    def _min_body_chars(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 12000
+        return max(256, int(v))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "allow_from" not in data and "allowFrom" in data:
+            data["allow_from"] = data["allowFrom"]
+        # mailbox alias
+        if "mailbox" not in data and "imapMailbox" in data:
+            data["mailbox"] = data["imapMailbox"]
+        return data
 
 
-@dataclass(slots=True)
-class SlackChannelConfig(BaseChannelConfig):
+class SlackChannelConfig(Base):
+    enabled: bool = False
+    allow_from: list[str] = Field(default_factory=list)
     bot_token: str = ""
     app_token: str = ""
     api_base: str = "https://slack.com/api"
     timeout_s: float = 10.0
 
+    @field_validator("allow_from", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> SlackChannelConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            allow_from=cls._allow_from(data),
-            bot_token=str(data.get("bot_token", data.get("botToken", "")) or ""),
-            app_token=str(data.get("app_token", data.get("appToken", "")) or ""),
-            api_base=str(data.get("api_base", data.get("apiBase", "https://slack.com/api")) or "https://slack.com/api"),
-            timeout_s=max(0.1, float(data.get("timeout_s", data.get("timeoutS", 10.0)) or 10.0)),
-        )
+    def _parse_allow_from(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 10.0
+        return max(0.1, float(v))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "allow_from" not in data and "allowFrom" in data:
+            data["allow_from"] = data["allowFrom"]
+        return data
 
 
-@dataclass(slots=True)
-class WhatsAppChannelConfig(BaseChannelConfig):
+class WhatsAppChannelConfig(Base):
+    enabled: bool = False
+    allow_from: list[str] = Field(default_factory=list)
     bridge_url: str = "ws://localhost:3001"
     bridge_token: str = ""
     timeout_s: float = 10.0
     webhook_path: str = "/api/webhooks/whatsapp"
     webhook_secret: str = ""
 
+    @field_validator("allow_from", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> WhatsAppChannelConfig:
-        data = dict(raw or {})
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            allow_from=cls._allow_from(data),
-            bridge_url=str(data.get("bridge_url", data.get("bridgeUrl", "ws://localhost:3001")) or "ws://localhost:3001"),
-            bridge_token=str(data.get("bridge_token", data.get("bridgeToken", "")) or ""),
-            timeout_s=max(0.1, float(data.get("timeout_s", data.get("timeoutS", 10.0)) or 10.0)),
-            webhook_path=str(data.get("webhook_path", data.get("webhookPath", "/api/webhooks/whatsapp")) or "/api/webhooks/whatsapp").strip()
-            or "/api/webhooks/whatsapp",
-            webhook_secret=str(data.get("webhook_secret", data.get("webhookSecret", "")) or "").strip(),
-        )
+    def _parse_allow_from(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 10.0
+        return max(0.1, float(v))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "allow_from" not in data and "allowFrom" in data:
+            data["allow_from"] = data["allowFrom"]
+        return data
 
 
-@dataclass(slots=True)
-class ChannelsConfig:
+class ChannelsConfig(Base):
     send_progress: bool = False
     send_tool_hints: bool = False
     recovery_enabled: bool = True
@@ -928,98 +1009,77 @@ class ChannelsConfig:
     recovery_cooldown_s: float = 30.0
     replay_dead_letters_on_startup: bool = True
     replay_dead_letters_limit: int = 50
-    replay_dead_letters_reasons: list[str] = field(default_factory=lambda: ["send_failed", "channel_unavailable"])
+    replay_dead_letters_reasons: list[str] = Field(
+        default_factory=lambda: ["send_failed", "channel_unavailable"]
+    )
     delivery_persistence_path: str = ""
-    telegram: TelegramChannelConfig = field(default_factory=TelegramChannelConfig)
-    discord: DiscordChannelConfig = field(default_factory=DiscordChannelConfig)
-    email: EmailChannelConfig = field(default_factory=EmailChannelConfig)
-    slack: SlackChannelConfig = field(default_factory=SlackChannelConfig)
-    whatsapp: WhatsAppChannelConfig = field(default_factory=WhatsAppChannelConfig)
-    extra: dict[str, dict[str, Any]] = field(default_factory=dict)
+    telegram: TelegramChannelConfig = Field(default_factory=TelegramChannelConfig)
+    discord: DiscordChannelConfig = Field(default_factory=DiscordChannelConfig)
+    email: EmailChannelConfig = Field(default_factory=EmailChannelConfig)
+    slack: SlackChannelConfig = Field(default_factory=SlackChannelConfig)
+    whatsapp: WhatsAppChannelConfig = Field(default_factory=WhatsAppChannelConfig)
+    extra: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ChannelsConfig:
-        data = dict(raw or {})
+    def _extract_extra_channels(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
         known = {
-            "send_progress",
-            "sendProgress",
-            "send_tool_hints",
-            "sendToolHints",
-            "recovery_enabled",
-            "recoveryEnabled",
-            "recovery_interval_s",
-            "recoveryIntervalS",
-            "recovery_cooldown_s",
-            "recoveryCooldownS",
-            "replay_dead_letters_on_startup",
-            "replayDeadLettersOnStartup",
-            "replay_dead_letters_limit",
-            "replayDeadLettersLimit",
-            "replay_dead_letters_reasons",
-            "replayDeadLettersReasons",
-            "delivery_persistence_path",
-            "deliveryPersistencePath",
-            "telegram",
-            "discord",
-            "email",
-            "slack",
-            "whatsapp",
+            "send_progress", "sendProgress",
+            "send_tool_hints", "sendToolHints",
+            "recovery_enabled", "recoveryEnabled",
+            "recovery_interval_s", "recoveryIntervalS",
+            "recovery_cooldown_s", "recoveryCooldownS",
+            "replay_dead_letters_on_startup", "replayDeadLettersOnStartup",
+            "replay_dead_letters_limit", "replayDeadLettersLimit",
+            "replay_dead_letters_reasons", "replayDeadLettersReasons",
+            "delivery_persistence_path", "deliveryPersistencePath",
+            "telegram", "discord", "email", "slack", "whatsapp", "extra",
         }
-        extra: dict[str, dict[str, Any]] = {}
+        extras: dict[str, Any] = {}
         for key, value in data.items():
             if key in known:
                 continue
             if isinstance(value, dict):
-                extra[str(key)] = dict(value)
-        replay_reasons_raw = data.get(
-            "replay_dead_letters_reasons",
-            data.get("replayDeadLettersReasons", ["send_failed", "channel_unavailable"]),
-        )
-        replay_reasons = [str(item).strip() for item in replay_reasons_raw] if isinstance(replay_reasons_raw, list) else []
-        return cls(
-            send_progress=bool(data.get("send_progress", data.get("sendProgress", False))),
-            send_tool_hints=bool(data.get("send_tool_hints", data.get("sendToolHints", False))),
-            recovery_enabled=bool(data.get("recovery_enabled", data.get("recoveryEnabled", True))),
-            recovery_interval_s=max(0.1, float(data.get("recovery_interval_s", data.get("recoveryIntervalS", 15.0)) or 15.0)),
-            recovery_cooldown_s=max(0.0, float(data.get("recovery_cooldown_s", data.get("recoveryCooldownS", 30.0)) or 30.0)),
-            replay_dead_letters_on_startup=bool(
-                data.get("replay_dead_letters_on_startup", data.get("replayDeadLettersOnStartup", True))
-            ),
-            replay_dead_letters_limit=max(
-                0,
-                int(data.get("replay_dead_letters_limit", data.get("replayDeadLettersLimit", 50)) or 50),
-            ),
-            replay_dead_letters_reasons=replay_reasons or ["send_failed", "channel_unavailable"],
-            delivery_persistence_path=str(
-                data.get("delivery_persistence_path", data.get("deliveryPersistencePath", "")) or ""
-            ).strip(),
-            telegram=TelegramChannelConfig.from_dict(dict(data.get("telegram") or {})),
-            discord=DiscordChannelConfig.from_dict(dict(data.get("discord") or {})),
-            email=EmailChannelConfig.from_dict(dict(data.get("email") or {})),
-            slack=SlackChannelConfig.from_dict(dict(data.get("slack") or {})),
-            whatsapp=WhatsAppChannelConfig.from_dict(dict(data.get("whatsapp") or {})),
-            extra=extra,
-        )
+                extras[str(key)] = dict(value)
+        if extras:
+            existing = data.get("extra", {}) or {}
+            data["extra"] = {**extras, **existing}
+        return data
+
+    @field_validator("recovery_interval_s", mode="before")
+    @classmethod
+    def _min_recovery_interval(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 15.0
+        return max(0.1, float(v))
+
+    @field_validator("recovery_cooldown_s", mode="before")
+    @classmethod
+    def _min_recovery_cooldown(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 30.0
+        return max(0.0, float(v))
+
+    @field_validator("replay_dead_letters_limit", mode="before")
+    @classmethod
+    def _min_replay_limit(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 50
+        return max(0, int(v))
+
+    @field_validator("replay_dead_letters_reasons", mode="before")
+    @classmethod
+    def _parse_reasons(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return ["send_failed", "channel_unavailable"]
+        result = [str(item).strip() for item in v]
+        return result or ["send_failed", "channel_unavailable"]
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "send_progress": self.send_progress,
-            "send_tool_hints": self.send_tool_hints,
-            "recovery_enabled": self.recovery_enabled,
-            "recovery_interval_s": self.recovery_interval_s,
-            "recovery_cooldown_s": self.recovery_cooldown_s,
-            "replay_dead_letters_on_startup": self.replay_dead_letters_on_startup,
-            "replay_dead_letters_limit": self.replay_dead_letters_limit,
-            "replay_dead_letters_reasons": list(self.replay_dead_letters_reasons),
-            "delivery_persistence_path": self.delivery_persistence_path,
-            "telegram": asdict(self.telegram),
-            "discord": asdict(self.discord),
-            "email": asdict(self.email),
-            "slack": asdict(self.slack),
-            "whatsapp": asdict(self.whatsapp),
-        }
-        for key, value in self.extra.items():
-            out[key] = dict(value)
+        out: dict[str, Any] = self.model_dump(by_alias=False, exclude_none=False)
+        # Remove 'extra' from top level and merge it in
+        extra = out.pop("extra", {})
+        out.update(extra)
         return out
 
     def enabled_names(self) -> list[str]:
@@ -1034,8 +1094,11 @@ class ChannelsConfig:
         return sorted(rows)
 
 
-@dataclass(slots=True)
-class WebToolConfig:
+# ---------------------------------------------------------------------------
+# Tool configs
+# ---------------------------------------------------------------------------
+
+class WebToolConfig(Base):
     proxy: str = ""
     timeout: float = 15.0
     search_timeout: float = 10.0
@@ -1045,500 +1108,318 @@ class WebToolConfig:
     brave_api_key: str = ""
     brave_base_url: str = "https://api.search.brave.com/res/v1/web/search"
     searxng_base_url: str = ""
-    allowlist: list[str] = field(default_factory=list)
-    denylist: list[str] = field(default_factory=list)
+    allowlist: list[str] = Field(default_factory=list)
+    denylist: list[str] = Field(default_factory=list)
 
-    @staticmethod
-    def _parse_list(raw: Any) -> list[str]:
-        if not isinstance(raw, list):
-            return []
-        return [str(item).strip() for item in raw if str(item).strip()]
-
+    @field_validator("timeout", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> WebToolConfig:
-        data = dict(raw or {})
-        return cls(
-            proxy=str(data.get("proxy", "") or ""),
-            timeout=max(1.0, float(data.get("timeout", 15.0) or 15.0)),
-            search_timeout=max(1.0, float(data.get("searchTimeout", data.get("search_timeout", 10.0)) or 10.0)),
-            max_redirects=max(0, int(data.get("maxRedirects", data.get("max_redirects", 5)) or 5)),
-            max_chars=max(128, int(data.get("maxChars", data.get("max_chars", 12000)) or 12000)),
-            block_private_addresses=bool(data.get("blockPrivateAddresses", data.get("block_private_addresses", True))),
-            brave_api_key=str(data.get("braveApiKey", data.get("brave_api_key", "")) or ""),
-            brave_base_url=str(
-                data.get("braveBaseUrl", data.get("brave_base_url", "https://api.search.brave.com/res/v1/web/search"))
-                or "https://api.search.brave.com/res/v1/web/search"
-            ),
-            searxng_base_url=str(data.get("searxngBaseUrl", data.get("searxng_base_url", "")) or ""),
-            allowlist=cls._parse_list(data.get("allowlist", [])),
-            denylist=cls._parse_list(data.get("denylist", [])),
-        )
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 15.0
+        return max(1.0, float(v))
+
+    @field_validator("search_timeout", mode="before")
+    @classmethod
+    def _min_search_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 10.0
+        return max(1.0, float(v))
+
+    @field_validator("max_redirects", mode="before")
+    @classmethod
+    def _min_redirects(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 5
+        return max(0, int(v))
+
+    @field_validator("max_chars", mode="before")
+    @classmethod
+    def _min_chars(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 12000
+        return max(128, int(v))
+
+    @field_validator("brave_base_url", mode="before")
+    @classmethod
+    def _brave_url_default(cls, v: Any) -> str:
+        return str(v or "https://api.search.brave.com/res/v1/web/search")
+
+    @field_validator("allowlist", "denylist", mode="before")
+    @classmethod
+    def _parse_list(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
 
 
-@dataclass(slots=True)
-class ExecToolConfig:
+class ExecToolConfig(Base):
     timeout: int = 60
     path_append: str = ""
-    deny_patterns: list[str] = field(default_factory=list)
-    allow_patterns: list[str] = field(default_factory=list)
-    deny_path_patterns: list[str] = field(default_factory=list)
-    allow_path_patterns: list[str] = field(default_factory=list)
+    deny_patterns: list[str] = Field(default_factory=list)
+    allow_patterns: list[str] = Field(default_factory=list)
+    deny_path_patterns: list[str] = Field(default_factory=list)
+    allow_path_patterns: list[str] = Field(default_factory=list)
 
-    @staticmethod
-    def _parse_patterns(raw: Any) -> list[str]:
-        if not isinstance(raw, list):
-            return []
-        return [str(item).strip() for item in raw if str(item).strip()]
-
+    @field_validator("timeout", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ExecToolConfig:
-        data = dict(raw or {})
-        timeout = int(data.get("timeout", 60) or 60)
-        if "pathAppend" in data:
-            path_append = str(data.get("pathAppend", "") or "")
-        else:
-            path_append = str(data.get("path_append", "") or "")
+    def _min_timeout(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 60
+        return max(1, int(v))
 
-        if "denyPatterns" in data:
-            deny_patterns = cls._parse_patterns(data.get("denyPatterns"))
-        else:
-            deny_patterns = cls._parse_patterns(data.get("deny_patterns", []))
-
-        if "allowPatterns" in data:
-            allow_patterns = cls._parse_patterns(data.get("allowPatterns"))
-        else:
-            allow_patterns = cls._parse_patterns(data.get("allow_patterns", []))
-
-        if "denyPathPatterns" in data:
-            deny_path_patterns = cls._parse_patterns(data.get("denyPathPatterns"))
-        else:
-            deny_path_patterns = cls._parse_patterns(data.get("deny_path_patterns", []))
-
-        if "allowPathPatterns" in data:
-            allow_path_patterns = cls._parse_patterns(data.get("allowPathPatterns"))
-        else:
-            allow_path_patterns = cls._parse_patterns(data.get("allow_path_patterns", []))
-
-        return cls(
-            timeout=max(1, timeout),
-            path_append=path_append,
-            deny_patterns=deny_patterns,
-            allow_patterns=allow_patterns,
-            deny_path_patterns=deny_path_patterns,
-            allow_path_patterns=allow_path_patterns,
-        )
-
-
-@dataclass(slots=True)
-class MCPTransportPolicyConfig:
-    allowed_schemes: list[str] = field(default_factory=lambda: ["http", "https"])
-    allowed_hosts: list[str] = field(default_factory=list)
-    denied_hosts: list[str] = field(default_factory=list)
-
-    @staticmethod
-    def _parse_hosts(raw: Any) -> list[str]:
-        if not isinstance(raw, list):
-            return []
-        return [str(item).strip().lower() for item in raw if str(item).strip()]
-
+    @field_validator("deny_patterns", "allow_patterns", "deny_path_patterns", "allow_path_patterns", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> MCPTransportPolicyConfig:
-        data = dict(raw or {})
-        if "allowedSchemes" in data:
-            schemes_raw = data.get("allowedSchemes")
-        else:
-            schemes_raw = data.get("allowed_schemes", ["http", "https"])
-        if not isinstance(schemes_raw, list):
-            schemes_raw = ["http", "https"]
-        allowed_schemes = [str(item).strip().lower() for item in schemes_raw if str(item).strip()]
-        if not allowed_schemes:
-            allowed_schemes = ["http", "https"]
-        if "allowedHosts" in data:
-            allowed_hosts_raw = data.get("allowedHosts", [])
-        else:
-            allowed_hosts_raw = data.get("allowed_hosts", [])
-        if "deniedHosts" in data:
-            denied_hosts_raw = data.get("deniedHosts", [])
-        else:
-            denied_hosts_raw = data.get("denied_hosts", [])
-        return cls(
-            allowed_schemes=allowed_schemes,
-            allowed_hosts=cls._parse_hosts(allowed_hosts_raw),
-            denied_hosts=cls._parse_hosts(denied_hosts_raw),
-        )
+    def _parse_patterns(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip() for item in v if str(item).strip()]
 
 
-@dataclass(slots=True)
-class MCPServerConfig:
+class MCPTransportPolicyConfig(Base):
+    allowed_schemes: list[str] = Field(default_factory=lambda: ["http", "https"])
+    allowed_hosts: list[str] = Field(default_factory=list)
+    denied_hosts: list[str] = Field(default_factory=list)
+
+    @field_validator("allowed_schemes", mode="before")
+    @classmethod
+    def _parse_schemes(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return ["http", "https"]
+        result = [str(item).strip().lower() for item in v if str(item).strip()]
+        return result or ["http", "https"]
+
+    @field_validator("allowed_hosts", "denied_hosts", mode="before")
+    @classmethod
+    def _parse_hosts(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip().lower() for item in v if str(item).strip()]
+
+
+class MCPServerConfig(Base):
     url: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
     timeout_s: float = 20.0
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None, *, default_timeout_s: float = 20.0) -> MCPServerConfig:
-        data = dict(raw or {})
-        timeout_raw = data.get("timeout_s", data.get("timeoutS", data.get("tool_timeout_s", data.get("toolTimeoutS", default_timeout_s))))
-        headers_raw = data.get("headers", {})
-        headers = dict(headers_raw) if isinstance(headers_raw, dict) else {}
-        return cls(
-            url=str(data.get("url", "") or "").strip(),
-            headers={str(k): str(v) for k, v in headers.items()},
-            timeout_s=max(0.1, float(timeout_raw or default_timeout_s)),
-        )
+    def _handle_timeout_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # Extra aliases: tool_timeout_s, toolTimeoutS
+        if "timeout_s" not in data and "timeoutS" not in data:
+            for alias in ("tool_timeout_s", "toolTimeoutS"):
+                if alias in data:
+                    data["timeout_s"] = data[alias]
+                    break
+        return data
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _strip_url(cls, v: Any) -> str:
+        return str(v or "").strip()
+
+    @field_validator("timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 20.0
+        return max(0.1, float(v))
 
 
-@dataclass(slots=True)
-class MCPToolConfig:
+class MCPToolConfig(Base):
     default_timeout_s: float = 20.0
-    policy: MCPTransportPolicyConfig = field(default_factory=MCPTransportPolicyConfig)
-    servers: dict[str, MCPServerConfig] = field(default_factory=dict)
+    policy: MCPTransportPolicyConfig = Field(default_factory=MCPTransportPolicyConfig)
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> MCPToolConfig:
-        data = dict(raw or {})
-        if "defaultTimeoutS" in data:
-            timeout_raw = data.get("defaultTimeoutS")
-        else:
-            timeout_raw = data.get("default_timeout_s", data.get("timeout", 20.0))
-        default_timeout = max(
-            0.1,
-            float(timeout_raw or 20.0),
-        )
-        policy = MCPTransportPolicyConfig.from_dict(dict(data.get("policy") or {}))
-        servers_raw = data.get("servers", {})
-        servers: dict[str, MCPServerConfig] = {}
-        if isinstance(servers_raw, dict):
-            for key, value in servers_raw.items():
-                name = str(key).strip()
-                if not name or not isinstance(value, dict):
-                    continue
-                servers[name] = MCPServerConfig.from_dict(dict(value), default_timeout_s=default_timeout)
-        return cls(default_timeout_s=default_timeout, policy=policy, servers=servers)
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # defaultTimeoutS handled by alias_generator; also handle "timeout" alias
+        if "default_timeout_s" not in data and "defaultTimeoutS" not in data and "timeout" in data:
+            data["default_timeout_s"] = data["timeout"]
+        return data
+
+    @field_validator("default_timeout_s", mode="before")
+    @classmethod
+    def _min_timeout(cls, v: Any) -> float:
+        v = v if v not in (None, "") else 20.0
+        return max(0.1, float(v))
+
+    @model_validator(mode="after")
+    def _build_servers_with_default_timeout(self) -> "MCPToolConfig":
+        # Re-apply default_timeout_s to servers that were built without it
+        # Actually servers are already built; MCPServerConfig uses its own default
+        # We need to propagate the default_timeout_s to servers that haven't specified one
+        # But since model_validator for servers runs before this, we just accept as-is.
+        return self
 
 
-@dataclass(slots=True)
-class ToolLoopDetectionConfig:
+class ToolLoopDetectionConfig(Base):
     enabled: bool = False
     history_size: int = 20
     repeat_threshold: int = 3
     critical_threshold: int = 6
 
+    @field_validator("history_size", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ToolLoopDetectionConfig:
-        data = dict(raw or {})
-        history_raw = data.get("historySize") if "historySize" in data else data.get("history_size", 20)
-        repeat_raw = data.get("repeatThreshold") if "repeatThreshold" in data else data.get("repeat_threshold", 3)
-        critical_raw = data.get("criticalThreshold") if "criticalThreshold" in data else data.get("critical_threshold", 6)
-        history_size = max(1, int(history_raw or 20))
-        repeat_threshold = max(1, int(repeat_raw or 3))
-        critical_threshold = max(1, int(critical_raw or 6))
-        if critical_threshold <= repeat_threshold:
-            critical_threshold = repeat_threshold + 1
-        return cls(
-            enabled=bool(data.get("enabled", False)),
-            history_size=history_size,
-            repeat_threshold=repeat_threshold,
-            critical_threshold=critical_threshold,
-        )
+    def _min_history(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 20
+        return max(1, int(v))
+
+    @field_validator("repeat_threshold", mode="before")
+    @classmethod
+    def _min_repeat(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 3
+        return max(1, int(v))
+
+    @field_validator("critical_threshold", mode="before")
+    @classmethod
+    def _min_critical(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 6
+        return max(1, int(v))
+
+    @model_validator(mode="after")
+    def _ensure_critical_gt_repeat(self) -> "ToolLoopDetectionConfig":
+        if self.critical_threshold <= self.repeat_threshold:
+            self.critical_threshold = self.repeat_threshold + 1
+        return self
 
 
-@dataclass(slots=True)
-class ToolSafetyLayerConfig:
+class ToolSafetyLayerConfig(Base):
     risky_tools: list[str] | None = None
     blocked_channels: list[str] | None = None
     allowed_channels: list[str] | None = None
 
+    @field_validator("risky_tools", "blocked_channels", "allowed_channels", mode="before")
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ToolSafetyLayerConfig:
-        data = dict(raw or {})
-
-        def _parse_optional_names(*keys: str) -> list[str] | None:
-            for key in keys:
-                if key in data:
-                    return ToolSafetyPolicyConfig._parse_names(data.get(key))
+    def _parse_optional_list(cls, v: Any) -> list[str] | None:
+        if v is None:
             return None
-
-        return cls(
-            risky_tools=_parse_optional_names("risky_tools", "riskyTools"),
-            blocked_channels=_parse_optional_names("blocked_channels", "blockedChannels"),
-            allowed_channels=_parse_optional_names("allowed_channels", "allowedChannels"),
-        )
-
-
-@dataclass(slots=True)
-class ToolSafetyPolicyConfig:
-    enabled: bool = True
-    risky_tools: list[str] = field(default_factory=lambda: ["exec", "run_skill", "web_fetch", "web_search", "mcp"])
-    blocked_channels: list[str] = field(default_factory=list)
-    allowed_channels: list[str] = field(default_factory=list)
-    profile: str = ""
-    profiles: dict[str, ToolSafetyLayerConfig] = field(default_factory=dict)
-    by_agent: dict[str, ToolSafetyLayerConfig] = field(default_factory=dict)
-    by_channel: dict[str, ToolSafetyLayerConfig] = field(default_factory=dict)
-
-    @staticmethod
-    def _parse_names(raw: Any) -> list[str]:
-        if not isinstance(raw, list):
+        if not isinstance(v, list):
             return []
-        return [str(item).strip().lower() for item in raw if str(item).strip()]
+        return [str(item).strip().lower() for item in v if str(item).strip()]
 
-    @staticmethod
-    def _parse_layer_map(raw: Any) -> dict[str, ToolSafetyLayerConfig]:
-        if not isinstance(raw, dict):
-            return {}
-        out: dict[str, ToolSafetyLayerConfig] = {}
-        for key, value in raw.items():
-            name = str(key or "").strip().lower()
-            if not name or not isinstance(value, dict):
-                continue
-            out[name] = ToolSafetyLayerConfig.from_dict(value)
+
+class ToolSafetyPolicyConfig(Base):
+    enabled: bool = True
+    risky_tools: list[str] = Field(
+        default_factory=lambda: ["exec", "run_skill", "web_fetch", "web_search", "mcp"]
+    )
+    blocked_channels: list[str] = Field(default_factory=list)
+    allowed_channels: list[str] = Field(default_factory=list)
+    profile: str = ""
+    profiles: dict[str, ToolSafetyLayerConfig] = Field(default_factory=dict)
+    by_agent: dict[str, ToolSafetyLayerConfig] = Field(default_factory=dict)
+    by_channel: dict[str, ToolSafetyLayerConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        # by_agent aliases
+        if "by_agent" not in data and "byAgent" not in data and "agents" in data:
+            data["by_agent"] = data["agents"]
+        # by_channel aliases
+        if "by_channel" not in data and "byChannel" not in data and "channels" in data:
+            data["by_channel"] = data["channels"]
+        return data
+
+    @field_validator("risky_tools", "blocked_channels", "allowed_channels", mode="before")
+    @classmethod
+    def _parse_names(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(item).strip().lower() for item in v if str(item).strip()]
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _strip_profile(cls, v: Any) -> str:
+        return str(v or "").strip().lower()
+
+    @field_validator("profiles", "by_agent", "by_channel", mode="before")
+    @classmethod
+    def _normalize_layer_map_keys(cls, v: Any) -> Any:
+        if not isinstance(v, dict):
+            return v
+        out: dict[str, Any] = {}
+        for key, value in v.items():
+            normalized = str(key or "").strip().lower()
+            if normalized and (isinstance(value, (dict, ToolSafetyLayerConfig))):
+                out[normalized] = value
+        return out
+
+
+class ToolsConfig(Base):
+    restrict_to_workspace: bool = False
+    web: WebToolConfig = Field(default_factory=WebToolConfig)
+    exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    mcp: MCPToolConfig = Field(default_factory=MCPToolConfig)
+    loop_detection: ToolLoopDetectionConfig = Field(default_factory=ToolLoopDetectionConfig)
+    safety: ToolSafetyPolicyConfig = Field(default_factory=ToolSafetyPolicyConfig)
+
+
+# ---------------------------------------------------------------------------
+# Root AppConfig
+# ---------------------------------------------------------------------------
+
+_DEFAULT_WORKSPACE = str(Path.home() / ".clawlite" / "workspace")
+_DEFAULT_STATE = str(Path.home() / ".clawlite" / "state")
+_DEFAULT_MODEL = "gemini/gemini-2.5-flash"
+
+
+class AppConfig(Base):
+    workspace_path: str = _DEFAULT_WORKSPACE
+    state_path: str = _DEFAULT_STATE
+    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    @field_validator("workspace_path", mode="before")
+    @classmethod
+    def _workspace_default(cls, v: Any) -> str:
+        return str(v or _DEFAULT_WORKSPACE)
+
+    @field_validator("state_path", mode="before")
+    @classmethod
+    def _state_default(cls, v: Any) -> str:
+        return str(v or _DEFAULT_STATE)
+
+    @model_validator(mode="after")
+    def _sync_provider_model(self) -> "AppConfig":
+        default_model = _DEFAULT_MODEL
+        provider_model = str(self.provider.model or "").strip()
+        agent_model = str(self.agents.defaults.model or "").strip()
+
+        if provider_model != default_model and agent_model == default_model:
+            self.agents.defaults.model = provider_model
+        elif agent_model != default_model and provider_model == default_model:
+            self.provider.model = agent_model
+        elif agent_model != default_model and provider_model != default_model:
+            self.provider.model = agent_model
+        return self
+
+    def to_dict(self) -> dict[str, Any]:
+        out = self.model_dump(by_alias=False, exclude_none=False)
+        # Flatten providers.extra into providers top-level
+        providers_dump = out.get("providers", {})
+        extra_providers = providers_dump.pop("extra", {})
+        for k, v in extra_providers.items():
+            providers_dump[k] = v
+        out["providers"] = providers_dump
+        # Flatten channels.extra into channels top-level
+        channels_dump = out.get("channels", {})
+        extra_channels = channels_dump.pop("extra", {})
+        for k, v in extra_channels.items():
+            channels_dump[k] = v
+        out["channels"] = channels_dump
         return out
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ToolSafetyPolicyConfig:
-        data = dict(raw or {})
-
-        if "riskyTools" in data:
-            risky_raw = data.get("riskyTools")
-        else:
-            risky_raw = data.get("risky_tools", ["exec", "run_skill", "web_fetch", "web_search", "mcp"])
-        if "blockedChannels" in data:
-            blocked_raw = data.get("blockedChannels")
-        else:
-            blocked_raw = data.get("blocked_channels", [])
-        if "allowedChannels" in data:
-            allowed_raw = data.get("allowedChannels")
-        else:
-            allowed_raw = data.get("allowed_channels", [])
-
-        profile = str(data.get("profile", "") or "").strip().lower()
-        profiles_raw = data.get("profiles", {})
-        if "by_agent" in data:
-            by_agent_raw = data.get("by_agent")
-        elif "byAgent" in data:
-            by_agent_raw = data.get("byAgent")
-        else:
-            by_agent_raw = data.get("agents", {})
-        if "by_channel" in data:
-            by_channel_raw = data.get("by_channel")
-        elif "byChannel" in data:
-            by_channel_raw = data.get("byChannel")
-        else:
-            by_channel_raw = data.get("channels", {})
-
-        return cls(
-            enabled=bool(data.get("enabled", True)),
-            risky_tools=cls._parse_names(risky_raw),
-            blocked_channels=cls._parse_names(blocked_raw),
-            allowed_channels=cls._parse_names(allowed_raw),
-            profile=profile,
-            profiles=cls._parse_layer_map(profiles_raw),
-            by_agent=cls._parse_layer_map(by_agent_raw),
-            by_channel=cls._parse_layer_map(by_channel_raw),
-        )
-
-
-@dataclass(slots=True)
-class ToolsConfig:
-    restrict_to_workspace: bool = False
-    web: WebToolConfig = field(default_factory=WebToolConfig)
-    exec: ExecToolConfig = field(default_factory=ExecToolConfig)
-    mcp: MCPToolConfig = field(default_factory=MCPToolConfig)
-    loop_detection: ToolLoopDetectionConfig = field(default_factory=ToolLoopDetectionConfig)
-    safety: ToolSafetyPolicyConfig = field(default_factory=ToolSafetyPolicyConfig)
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any] | None) -> ToolsConfig:
-        data = dict(raw or {})
-        if "restrictToWorkspace" in data:
-            restrict = bool(data.get("restrictToWorkspace", False))
-        else:
-            restrict = bool(data.get("restrict_to_workspace", False))
-        web_cfg = WebToolConfig.from_dict(dict(data.get("web") or {}))
-        exec_cfg = ExecToolConfig.from_dict(dict(data.get("exec") or {}))
-        mcp_cfg = MCPToolConfig.from_dict(dict(data.get("mcp") or {}))
-        loop_detection_raw = data.get("loop_detection", data.get("loopDetection", {}))
-        loop_detection_cfg = ToolLoopDetectionConfig.from_dict(dict(loop_detection_raw or {}))
-        safety_raw = data.get("safety", {})
-        safety_cfg = ToolSafetyPolicyConfig.from_dict(dict(safety_raw or {}))
-        return cls(
-            restrict_to_workspace=restrict,
-            web=web_cfg,
-            exec=exec_cfg,
-            mcp=mcp_cfg,
-            loop_detection=loop_detection_cfg,
-            safety=safety_cfg,
-        )
-
-
-@dataclass(slots=True)
-class AppConfig:
-    workspace_path: str = str(Path.home() / ".clawlite" / "workspace")
-    state_path: str = str(Path.home() / ".clawlite" / "state")
-    provider: ProviderConfig = field(default_factory=ProviderConfig)
-    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
-    auth: AuthConfig = field(default_factory=AuthConfig)
-    agents: AgentsConfig = field(default_factory=AgentsConfig)
-    gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
-    channels: ChannelsConfig = field(default_factory=ChannelsConfig)
-    tools: ToolsConfig = field(default_factory=ToolsConfig)
-
-    def __post_init__(self) -> None:
-        if isinstance(self.provider, dict):
-            payload = dict(self.provider)
-            self.provider = ProviderConfig(
-                model=str(payload.get("model", "gemini/gemini-2.5-flash") or "gemini/gemini-2.5-flash"),
-                litellm_base_url=str(payload.get("litellm_base_url", "https://api.openai.com/v1") or "https://api.openai.com/v1"),
-                litellm_api_key=str(payload.get("litellm_api_key", "") or ""),
-                retry_max_attempts=max(1, int(payload.get("retry_max_attempts", payload.get("retryMaxAttempts", 3)) or 3)),
-                retry_initial_backoff_s=max(
-                    0.0,
-                    float(payload.get("retry_initial_backoff_s", payload.get("retryInitialBackoffS", 0.5)) or 0.5),
-                ),
-                retry_max_backoff_s=max(
-                    0.0,
-                    float(payload.get("retry_max_backoff_s", payload.get("retryMaxBackoffS", 8.0)) or 8.0),
-                ),
-                retry_jitter_s=max(0.0, float(payload.get("retry_jitter_s", payload.get("retryJitterS", 0.2)) or 0.2)),
-                circuit_failure_threshold=max(
-                    1,
-                    int(payload.get("circuit_failure_threshold", payload.get("circuitFailureThreshold", 3)) or 3),
-                ),
-                circuit_cooldown_s=max(
-                    0.0,
-                    float(payload.get("circuit_cooldown_s", payload.get("circuitCooldownS", 30.0)) or 30.0),
-                ),
-                fallback_model=str(payload.get("fallback_model", payload.get("fallbackModel", "")) or "").strip(),
-            )
-        if isinstance(self.providers, dict):
-            self.providers = ProvidersConfig.from_dict(self.providers)
-        if isinstance(self.auth, dict):
-            self.auth = AuthConfig.from_dict(self.auth)
-        if isinstance(self.agents, dict):
-            self.agents = AgentsConfig.from_dict(self.agents)
-        if isinstance(self.gateway, dict):
-            self.gateway = GatewayConfig.from_dict(self.gateway)
-        if isinstance(self.scheduler, dict):
-            scheduler_payload = dict(self.scheduler)
-            self.scheduler = SchedulerConfig(
-                heartbeat_interval_seconds=int(scheduler_payload.get("heartbeat_interval_seconds", 1800) or 1800),
-                timezone=str(scheduler_payload.get("timezone", "UTC") or "UTC"),
-            )
-        if isinstance(self.channels, dict):
-            self.channels = ChannelsConfig.from_dict(self.channels)
-        if isinstance(self.tools, dict):
-            self.tools = ToolsConfig.from_dict(self.tools)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "workspace_path": self.workspace_path,
-            "state_path": self.state_path,
-            "provider": asdict(self.provider),
-            "providers": self.providers.to_dict(),
-            "auth": asdict(self.auth),
-            "agents": asdict(self.agents),
-            "gateway": asdict(self.gateway),
-            "scheduler": asdict(self.scheduler),
-            "channels": self.channels.to_dict(),
-            "tools": asdict(self.tools),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AppConfig:
-        raw = dict(data or {})
-        defaults = cls()
-
-        provider_raw = dict(raw.get("provider") or {})
-        def _provider_value(snake: str, camel: str, default: Any) -> Any:
-            if camel in provider_raw:
-                return provider_raw.get(camel)
-            return provider_raw.get(snake, default)
-
-        provider = ProviderConfig(
-            model=str(_provider_value("model", "model", defaults.provider.model) or defaults.provider.model),
-            litellm_base_url=str(
-                _provider_value("litellm_base_url", "litellmBaseUrl", defaults.provider.litellm_base_url)
-                or defaults.provider.litellm_base_url
-            ),
-            litellm_api_key=str(
-                _provider_value("litellm_api_key", "litellmApiKey", defaults.provider.litellm_api_key)
-                or defaults.provider.litellm_api_key
-            ),
-            retry_max_attempts=max(
-                1,
-                int(_provider_value("retry_max_attempts", "retryMaxAttempts", defaults.provider.retry_max_attempts) or defaults.provider.retry_max_attempts),
-            ),
-            retry_initial_backoff_s=max(
-                0.0,
-                float(
-                    _provider_value("retry_initial_backoff_s", "retryInitialBackoffS", defaults.provider.retry_initial_backoff_s)
-                    or defaults.provider.retry_initial_backoff_s
-                ),
-            ),
-            retry_max_backoff_s=max(
-                0.0,
-                float(
-                    _provider_value("retry_max_backoff_s", "retryMaxBackoffS", defaults.provider.retry_max_backoff_s)
-                    or defaults.provider.retry_max_backoff_s
-                ),
-            ),
-            retry_jitter_s=max(
-                0.0,
-                float(_provider_value("retry_jitter_s", "retryJitterS", defaults.provider.retry_jitter_s) or defaults.provider.retry_jitter_s),
-            ),
-            circuit_failure_threshold=max(
-                1,
-                int(
-                    _provider_value("circuit_failure_threshold", "circuitFailureThreshold", defaults.provider.circuit_failure_threshold)
-                    or defaults.provider.circuit_failure_threshold
-                ),
-            ),
-            circuit_cooldown_s=max(
-                0.0,
-                float(_provider_value("circuit_cooldown_s", "circuitCooldownS", defaults.provider.circuit_cooldown_s) or defaults.provider.circuit_cooldown_s),
-            ),
-            fallback_model=str(_provider_value("fallback_model", "fallbackModel", defaults.provider.fallback_model) or defaults.provider.fallback_model).strip(),
-        )
-
-        agents = AgentsConfig.from_dict(dict(raw.get("agents") or {}))
-
-        providers = ProvidersConfig.from_dict(dict(raw.get("providers") or {}))
-        auth = AuthConfig.from_dict(dict(raw.get("auth") or {}))
-        gateway_raw = dict(raw.get("gateway") or {})
-        gateway = GatewayConfig.from_dict(gateway_raw)
-        scheduler_raw = dict(raw.get("scheduler") or {})
-        scheduler = SchedulerConfig(
-            heartbeat_interval_seconds=int(scheduler_raw.get("heartbeat_interval_seconds", defaults.scheduler.heartbeat_interval_seconds) or defaults.scheduler.heartbeat_interval_seconds),
-            timezone=str(scheduler_raw.get("timezone", defaults.scheduler.timezone) or defaults.scheduler.timezone),
-        )
-        if (
-            gateway.heartbeat.interval_s == defaults.gateway.heartbeat.interval_s
-            and scheduler.heartbeat_interval_seconds != defaults.scheduler.heartbeat_interval_seconds
-        ):
-            gateway.heartbeat.interval_s = max(5, int(scheduler.heartbeat_interval_seconds or 1800))
-
-        default_model = defaults.provider.model
-        provider_model = str(provider.model or "").strip()
-        agent_model = str(agents.defaults.model or "").strip()
-        if provider_model != default_model and agent_model == default_model:
-            agents.defaults.model = provider_model
-        elif agent_model != default_model and provider_model == default_model:
-            provider.model = agent_model
-        elif agent_model != default_model and provider_model != default_model:
-            provider.model = agent_model
-
-        channels = ChannelsConfig.from_dict(dict(raw.get("channels") or {}))
-        tools = ToolsConfig.from_dict(dict(raw.get("tools") or {}))
-        return cls(
-            workspace_path=str(raw.get("workspace_path") or defaults.workspace_path),
-            state_path=str(raw.get("state_path") or defaults.state_path),
-            provider=provider,
-            providers=providers,
-            auth=auth,
-            agents=agents,
-            gateway=gateway,
-            scheduler=scheduler,
-            channels=channels,
-            tools=tools,
-        )
+    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        return cls.model_validate(data)

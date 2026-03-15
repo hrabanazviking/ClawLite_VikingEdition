@@ -1,0 +1,345 @@
+"""Pydantic v2 schema tests for ClawLite config."""
+from __future__ import annotations
+
+import json
+import pathlib
+import tempfile
+
+import pytest
+
+from clawlite.config.schema import (
+    AppConfig,
+    GatewayAutonomyConfig,
+    ProvidersConfig,
+    ProviderOverrideConfig,
+)
+from clawlite.config.loader import load_config, save_config
+
+
+# ---------------------------------------------------------------------------
+# 1. Empty config loads with correct defaults
+# ---------------------------------------------------------------------------
+
+def test_empty_config_defaults():
+    cfg = AppConfig()
+    assert cfg.gateway.port == 8787
+    assert cfg.gateway.host == "127.0.0.1"
+    assert cfg.agents.defaults.model == "gemini/gemini-2.5-flash"
+    assert cfg.agents.defaults.max_tokens == 8192
+    assert cfg.agents.defaults.temperature == 0.1
+    assert cfg.agents.defaults.max_tool_iterations == 40
+    assert cfg.channels.telegram.enabled is False
+    assert cfg.tools.exec.timeout == 60
+    assert cfg.tools.web.timeout == 15.0
+    assert cfg.tools.web.max_chars == 12000
+    assert cfg.tools.web.block_private_addresses is True
+    assert cfg.gateway.auth.mode == "off"
+    assert cfg.gateway.auth.allow_loopback_without_auth is True
+    assert cfg.gateway.heartbeat.interval_s == 1800
+    assert cfg.gateway.supervisor.enabled is True
+    assert cfg.gateway.autonomy.enabled is False
+    assert cfg.gateway.autonomy.action_policy == "balanced"
+    assert cfg.gateway.autonomy.environment_profile == "dev"
+
+
+# ---------------------------------------------------------------------------
+# 2. snake_case input works
+# ---------------------------------------------------------------------------
+
+def test_snake_case_input():
+    cfg = AppConfig.model_validate({
+        "workspace_path": "/tmp/ws",
+        "agents": {"defaults": {"model": "openai/gpt-4o", "max_tokens": 4096}},
+        "gateway": {"port": 9000, "auth": {"mode": "required", "token": "abc"}},
+        "tools": {"web": {"max_chars": 5000, "search_timeout": 8.0}},
+    })
+    assert cfg.workspace_path == "/tmp/ws"
+    assert cfg.agents.defaults.model == "openai/gpt-4o"
+    assert cfg.agents.defaults.max_tokens == 4096
+    assert cfg.gateway.port == 9000
+    assert cfg.gateway.auth.mode == "required"
+    assert cfg.gateway.auth.token == "abc"
+    assert cfg.tools.web.max_chars == 5000
+    assert cfg.tools.web.search_timeout == 8.0
+
+
+# ---------------------------------------------------------------------------
+# 3. camelCase input works
+# ---------------------------------------------------------------------------
+
+def test_camel_case_input():
+    cfg = AppConfig.model_validate({
+        "agents": {"defaults": {"maxTokens": 2048, "maxToolIterations": 20}},
+        "gateway": {
+            "heartbeat": {"intervalS": 600},
+            "auth": {"allowLoopbackWithoutAuth": False},
+        },
+        "tools": {
+            "web": {"searchTimeout": 5.0, "maxChars": 3000, "blockPrivateAddresses": False},
+            "exec": {"denyPatterns": ["rm -rf"]},
+        },
+    })
+    assert cfg.agents.defaults.max_tokens == 2048
+    assert cfg.agents.defaults.max_tool_iterations == 20
+    assert cfg.gateway.heartbeat.interval_s == 600
+    assert cfg.gateway.auth.allow_loopback_without_auth is False
+    assert cfg.tools.web.search_timeout == 5.0
+    assert cfg.tools.web.max_chars == 3000
+    assert cfg.tools.web.block_private_addresses is False
+    assert cfg.tools.exec.deny_patterns == ["rm -rf"]
+
+
+# ---------------------------------------------------------------------------
+# 4. Unknown keys are silently ignored
+# ---------------------------------------------------------------------------
+
+def test_unknown_keys_ignored():
+    cfg = AppConfig.model_validate({
+        "totally_unknown_key": "value",
+        "gateway": {"unknown_gateway_field": 123, "port": 7777},
+    })
+    assert cfg.gateway.port == 7777
+
+
+# ---------------------------------------------------------------------------
+# 5. Legacy scheduler.heartbeat_interval_seconds migrates to gateway.heartbeat.interval_s
+# ---------------------------------------------------------------------------
+
+def test_legacy_scheduler_migration():
+    from clawlite.config.loader import _migrate_config
+    raw = {"scheduler": {"heartbeat_interval_seconds": 600}}
+    migrated = _migrate_config(raw)
+    assert migrated["gateway"]["heartbeat"]["interval_s"] == 600
+
+
+# ---------------------------------------------------------------------------
+# 6. Legacy gateway.token migrates to gateway.auth.token
+# ---------------------------------------------------------------------------
+
+def test_legacy_gateway_token_migration():
+    from clawlite.config.loader import _migrate_config
+    raw = {"gateway": {"token": "mysecret"}}
+    migrated = _migrate_config(raw)
+    assert migrated["gateway"]["auth"]["token"] == "mysecret"
+    assert migrated["gateway"]["auth"]["mode"] == "required"
+    assert "token" not in migrated["gateway"]
+
+
+# ---------------------------------------------------------------------------
+# 7. provider.model syncs to agents.defaults.model
+# ---------------------------------------------------------------------------
+
+def test_provider_model_syncs_to_agents():
+    cfg = AppConfig.model_validate({
+        "provider": {"model": "anthropic/claude-3-opus"},
+    })
+    assert cfg.agents.defaults.model == "anthropic/claude-3-opus"
+    assert cfg.provider.model == "anthropic/claude-3-opus"
+
+
+def test_agents_model_syncs_to_provider():
+    cfg = AppConfig.model_validate({
+        "agents": {"defaults": {"model": "openai/gpt-4o"}},
+    })
+    assert cfg.provider.model == "openai/gpt-4o"
+    assert cfg.agents.defaults.model == "openai/gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# 8. Autonomy prod profile sets conservative defaults
+# ---------------------------------------------------------------------------
+
+def test_autonomy_prod_profile_conservative_defaults():
+    cfg = AppConfig.model_validate({
+        "gateway": {"autonomy": {"environment_profile": "prod"}},
+    })
+    aut = cfg.gateway.autonomy
+    assert aut.environment_profile == "prod"
+    assert aut.action_policy == "conservative"
+    assert aut.action_cooldown_s == 300.0
+    assert aut.action_rate_limit_per_hour == 8
+    assert aut.min_action_confidence == 0.75
+    assert aut.degraded_backlog_threshold == 150
+    assert aut.degraded_supervisor_error_threshold == 1
+
+
+def test_autonomy_dev_profile_balanced_defaults():
+    cfg = AppConfig.model_validate({
+        "gateway": {"autonomy": {"environment_profile": "dev"}},
+    })
+    aut = cfg.gateway.autonomy
+    assert aut.action_policy == "balanced"
+    assert aut.action_cooldown_s == 120.0
+    assert aut.action_rate_limit_per_hour == 20
+    assert aut.min_action_confidence == 0.55
+
+
+# ---------------------------------------------------------------------------
+# 9. ProvidersConfig.get() returns custom provider
+# ---------------------------------------------------------------------------
+
+def test_providers_get_custom():
+    cfg = AppConfig.model_validate({
+        "providers": {
+            "gemini": {"api_key": "gkey"},
+            "mycompany": {"api_key": "custom_key", "api_base": "https://custom.example.com"},
+        }
+    })
+    assert cfg.providers.gemini.api_key == "gkey"
+    custom = cfg.providers.get("mycompany")
+    assert custom is not None
+    assert custom.api_key == "custom_key"
+    assert custom.api_base == "https://custom.example.com"
+
+
+def test_providers_get_builtin():
+    cfg = AppConfig.model_validate({
+        "providers": {"openai": {"api_key": "sk-abc"}}
+    })
+    p = cfg.providers.get("openai")
+    assert p is not None
+    assert p.api_key == "sk-abc"
+
+
+def test_providers_to_dict_contains_all_builtins():
+    cfg = AppConfig()
+    d = cfg.providers.to_dict()
+    for key in ProvidersConfig.BUILTIN_KEYS:
+        assert key in d
+    assert "api_key" in d["openai"]
+
+
+# ---------------------------------------------------------------------------
+# 10. save_config + load_config round-trip
+# ---------------------------------------------------------------------------
+
+def test_save_load_round_trip(tmp_path):
+    cfg = AppConfig.model_validate({
+        "workspace_path": "/tmp/roundtrip",
+        "agents": {"defaults": {"model": "openai/gpt-4o", "max_tokens": 1024}},
+        "gateway": {"port": 9999, "auth": {"mode": "required", "token": "tok"}},
+        "channels": {"telegram": {"enabled": True, "token": "tgtoken"}},
+        "providers": {"gemini": {"api_key": "gk"}},
+    })
+    p = tmp_path / "config.json"
+    save_config(cfg, p)
+    cfg2 = load_config(p)
+    assert cfg2.workspace_path == "/tmp/roundtrip"
+    assert cfg2.agents.defaults.model == "openai/gpt-4o"
+    assert cfg2.agents.defaults.max_tokens == 1024
+    assert cfg2.gateway.port == 9999
+    assert cfg2.gateway.auth.mode == "required"
+    assert cfg2.gateway.auth.token == "tok"
+    assert cfg2.channels.telegram.enabled is True
+    assert cfg2.channels.telegram.token == "tgtoken"
+    assert cfg2.providers.gemini.api_key == "gk"
+
+
+# ---------------------------------------------------------------------------
+# 11. Required field attribute access (gateway server uses these)
+# ---------------------------------------------------------------------------
+
+def test_gateway_server_attributes():
+    cfg = AppConfig.model_validate({
+        "tools": {
+            "exec": {
+                "deny_patterns": ["rm"],
+                "allow_patterns": [],
+                "deny_path_patterns": ["/etc"],
+                "allow_path_patterns": [],
+            },
+            "web": {
+                "proxy": "http://proxy:3128",
+                "timeout": 20.0,
+                "search_timeout": 12.0,
+                "max_redirects": 3,
+                "max_chars": 8000,
+                "allowlist": ["example.com"],
+                "denylist": ["evil.com"],
+                "block_private_addresses": False,
+            }
+        }
+    })
+    assert cfg.tools.exec.deny_patterns == ["rm"]
+    assert cfg.tools.exec.deny_path_patterns == ["/etc"]
+    assert cfg.tools.web.proxy == "http://proxy:3128"
+    assert cfg.tools.web.timeout == 20.0
+    assert cfg.tools.web.search_timeout == 12.0
+    assert cfg.tools.web.max_redirects == 3
+    assert cfg.tools.web.max_chars == 8000
+    assert cfg.tools.web.allowlist == ["example.com"]
+    assert cfg.tools.web.denylist == ["evil.com"]
+    assert cfg.tools.web.block_private_addresses is False
+    assert hasattr(cfg.tools.web, "brave_api_key")
+    assert hasattr(cfg.tools.web, "brave_base_url")
+    assert hasattr(cfg.tools.web, "searxng_base_url")
+
+
+# ---------------------------------------------------------------------------
+# 12. Onboarding-style direct mutation
+# ---------------------------------------------------------------------------
+
+def test_direct_mutation():
+    cfg = AppConfig()
+    cfg.gateway.auth.token = "newtoken"
+    cfg.gateway.auth.mode = "required"
+    cfg.channels.telegram.enabled = True
+    assert cfg.gateway.auth.token == "newtoken"
+    assert cfg.channels.telegram.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# 13. ToolLoopDetectionConfig critical > repeat enforced
+# ---------------------------------------------------------------------------
+
+def test_loop_detection_critical_gt_repeat():
+    from clawlite.config.schema import ToolLoopDetectionConfig
+    cfg = ToolLoopDetectionConfig.model_validate({"repeat_threshold": 5, "critical_threshold": 5})
+    assert cfg.critical_threshold == 6  # repeat + 1
+
+
+# ---------------------------------------------------------------------------
+# 14. MCP servers parsed correctly
+# ---------------------------------------------------------------------------
+
+def test_mcp_servers():
+    cfg = AppConfig.model_validate({
+        "tools": {
+            "mcp": {
+                "default_timeout_s": 30.0,
+                "servers": {
+                    "my_server": {"url": "https://mcp.example.com", "timeout_s": 60.0}
+                }
+            }
+        }
+    })
+    assert cfg.tools.mcp.default_timeout_s == 30.0
+    assert "my_server" in cfg.tools.mcp.servers
+    assert cfg.tools.mcp.servers["my_server"].url == "https://mcp.example.com"
+    assert cfg.tools.mcp.servers["my_server"].timeout_s == 60.0
+
+
+# ---------------------------------------------------------------------------
+# 15. AgentMemoryConfig fields
+# ---------------------------------------------------------------------------
+
+def test_agent_memory_config():
+    cfg = AppConfig.model_validate({
+        "agents": {
+            "defaults": {
+                "memory": {
+                    "semantic_search": True,
+                    "auto_categorize": True,
+                    "proactive": False,
+                    "backend": "sqlite",
+                }
+            }
+        }
+    })
+    mem = cfg.agents.defaults.memory
+    assert mem.semantic_search is True
+    assert mem.auto_categorize is True
+    assert mem.backend == "sqlite"
+    # Legacy flags synced
+    assert cfg.agents.defaults.semantic_memory is True
+    assert cfg.agents.defaults.memory_auto_categorize is True

@@ -98,35 +98,6 @@ def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def _validate_config_keys(config: dict[str, Any]) -> None:
-    template = AppConfig().to_dict()
-    errors: list[str] = []
-
-    def _walk(node: Any, ref: Any, path: str) -> None:
-        if not isinstance(node, dict) or not isinstance(ref, dict):
-            return
-
-        for key, value in node.items():
-            location = f"{path}.{key}" if path else key
-            if key in ref:
-                _walk(value, ref[key], location)
-                continue
-
-            if path == "providers" and isinstance(value, dict):
-                continue
-            if path == "channels" and isinstance(value, dict):
-                continue
-            if path == "tools.mcp.servers" and isinstance(value, dict):
-                continue
-            if path.endswith("extra_headers"):
-                continue
-            errors.append(location)
-
-    _walk(config, template, "")
-    if errors:
-        formatted = ", ".join(sorted(errors))
-        raise RuntimeError(f"invalid config keys: {formatted}")
-
 
 def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
     bool_tokens = {"1", "true", "yes", "on", "0", "false", "no", "off"}
@@ -198,6 +169,34 @@ def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
     return out
 
 
+def _validate_config_keys(config: dict[str, Any]) -> None:
+    template = AppConfig().to_dict()
+    errors: list[str] = []
+
+    def _walk(node: Any, ref: Any, path: str) -> None:
+        if not isinstance(node, dict) or not isinstance(ref, dict):
+            return
+        for key, value in node.items():
+            location = f"{path}.{key}" if path else key
+            if key in ref:
+                _walk(value, ref[key], location)
+                continue
+            if path == "providers" and isinstance(value, dict):
+                continue
+            if path == "channels" and isinstance(value, dict):
+                continue
+            if path == "tools.mcp.servers" and isinstance(value, dict):
+                continue
+            if path.endswith("extra_headers"):
+                continue
+            errors.append(location)
+
+    _walk(config, template, "")
+    if errors:
+        formatted = ", ".join(sorted(errors))
+        raise RuntimeError(f"invalid config keys: {formatted}")
+
+
 def load_config(path: str | Path | None = None, *, strict: bool | None = None) -> AppConfig:
     target = Path(path) if path else DEFAULT_CONFIG_PATH
     file_cfg = _migrate_config(_read_file(target))
@@ -205,7 +204,7 @@ def load_config(path: str | Path | None = None, *, strict: bool | None = None) -
     strict_mode = strict if strict is not None else _strict_mode_enabled()
     if strict_mode:
         _validate_config_keys(merged)
-    return AppConfig.from_dict(merged)
+    return AppConfig.model_validate(merged)
 
 
 def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
