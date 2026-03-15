@@ -28,6 +28,8 @@ def test_build_frames_spec_has_final_pause():
 
 @pytest.mark.slow
 def test_make_demo_gif_generates_file(tmp_path):
+    pytest.importorskip("playwright", reason="playwright not installed")
+    pytest.importorskip("PIL", reason="Pillow not installed")
     from scripts.make_demo_gif import make_demo_gif
     output = tmp_path / "demo.gif"
     make_demo_gif(output_path=str(output))

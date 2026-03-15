@@ -3,7 +3,6 @@
 from __future__ import annotations
 import io
 from pathlib import Path
-from PIL import Image
 
 
 def assemble_gif(
@@ -12,6 +11,7 @@ def assemble_gif(
     output_path: str,
     optimize: bool = True,
 ) -> None:
+    from PIL import Image  # lazy import — Pillow is optional at import time
     if not frames:
         raise ValueError("frames list is empty")
     pil_frames: list[Image.Image] = []
