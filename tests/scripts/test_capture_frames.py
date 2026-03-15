@@ -1,4 +1,6 @@
 from __future__ import annotations
+import pytest
+pytest.importorskip("playwright", reason="playwright not installed — skip capture_frames tests")
 from scripts.terminal_template import TermLine
 
 
