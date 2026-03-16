@@ -1186,6 +1186,49 @@ def _run_advanced_flow(
     }
 
 
+def _configure_memory(console: Console, config: AppConfig) -> None:
+    """Interactive memory configuration."""
+    console.print("\n  [bold cyan]Memory Settings[/]\n")
+    mem = config.agents.defaults.memory
+
+    backend = Prompt.ask(
+        "  Memory backend",
+        choices=["sqlite", "pgvector"],
+        default=mem.backend,
+    )
+    mem.backend = backend
+
+    proactive = Confirm.ask(
+        "  Enable proactive context loader",
+        default=mem.proactive,
+    )
+    mem.proactive = proactive
+
+    auto_cat = Confirm.ask(
+        "  Enable auto-categorize",
+        default=mem.auto_categorize,
+    )
+    mem.auto_categorize = auto_cat
+
+    semantic = Confirm.ask(
+        "  Enable semantic search",
+        default=mem.semantic_search,
+    )
+    mem.semantic_search = semantic
+
+    if proactive:
+        backoff = Prompt.ask(
+            "  Proactive retry backoff (seconds)",
+            default=str(int(mem.proactive_retry_backoff_s)),
+        )
+        try:
+            mem.proactive_retry_backoff_s = float(backoff)
+        except ValueError:
+            pass
+
+    console.print("  [green]✓[/] Memory settings updated.\n")
+
+
 def run_onboarding_wizard(
     config: AppConfig,
     *,
