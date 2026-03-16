@@ -43,7 +43,7 @@ source .venv/bin/activate
 pip install -e .
 
 # 2. Configure (interactive wizard — sets provider, gateway, optional Telegram)
-clawlite configure --flow quickstart
+clawlite configure
 
 # 3. Start the gateway
 clawlite gateway
