@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory snapshots can now also be rolled back directly from the control plane/dashboard with explicit confirmation.
 - Discord gateway transport can now be inspected in the dashboard and refreshed from the control plane via `POST /v1/control/channels/discord/refresh`.
 - Discord transport status/refresh are now also accessible from the CLI via `clawlite discord status|refresh`.
+- `clawlite configure --flow quickstart|advanced` works again as a compatibility shortcut to the onboarding wizard.
 - Heartbeat prompts now inject a cron-style current-time line from the workspace user timezone and skip model calls when `HEARTBEAT.md` exists but is effectively empty.
 - Gateway root entrypoint now serves a richer operator dashboard backed by packaged HTML/CSS/JS assets instead of a single inline landing page, with a more operational UI/UX direction for control-plane work.
 - Added dashboard state endpoints (`/v1/dashboard/state`, `/api/dashboard/state`) so the packaged UI can render recent sessions, cron state, channels, provider recovery, and self-evolution summaries without scraping raw diagnostics.

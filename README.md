@@ -60,7 +60,7 @@ clawlite run "hello — what can you do?"
 
 ## ⚙️ Configuration
 
-Config lives at `~/.clawlite/config.json`. Run `clawlite configure --flow quickstart` to generate it interactively, or start from one of the starters below.
+Config lives at `~/.clawlite/config.json`. Run `clawlite configure --flow quickstart` to generate it interactively, or use plain `clawlite configure` for the two-level Basic/Advanced configuration menu.
 
 <details>
 <summary><strong>Minimal — any provider</strong></summary>

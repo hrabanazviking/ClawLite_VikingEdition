@@ -1,8 +1,8 @@
 # tests/cli/test_configure_wizard.py
 from __future__ import annotations
+
 import json
-from pathlib import Path
-import pytest
+
 from clawlite.config.schema import AppConfig
 from clawlite.cli.commands import main as cli_main
 from clawlite.cli.onboarding import (

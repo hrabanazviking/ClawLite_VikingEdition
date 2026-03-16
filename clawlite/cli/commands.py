@@ -296,8 +296,30 @@ def cmd_hatch(args: argparse.Namespace) -> int:
 
 def cmd_configure(args: argparse.Namespace) -> int:
     """Two-level interactive configuration wizard (Basic / Advanced)."""
-    from rich.console import Console
     cfg = _ensure_config_materialized(args.config)
+    flow = str(getattr(args, "flow", "") or "").strip()
+    if flow:
+        payload = run_onboarding_wizard(
+            cfg,
+            config_path=args.config,
+            overwrite=False,
+            flow=flow,
+            variables={
+                "assistant_name": "ClawLite",
+                "assistant_emoji": "🦊",
+                "assistant_creature": "fox",
+                "assistant_vibe": "direct, pragmatic, autonomous",
+                "assistant_backstory": "An autonomous personal assistant focused on execution.",
+                "user_name": "Owner",
+                "user_timezone": "UTC",
+                "user_context": "Personal operations and software projects",
+                "user_preferences": "Clear answers, direct actions, concise updates",
+            },
+        )
+        _print_json(payload)
+        return 0 if bool(payload.get("ok", False)) else 2
+
+    from rich.console import Console
     section = str(getattr(args, "section", None) or "").strip() or None
     payload = run_configure_flow(
         Console(),
@@ -1287,6 +1309,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_dashboard.set_defaults(handler=cmd_dashboard)
 
     p_configure = sub.add_parser("configure", help="Interactive configuration wizard (Basic / Advanced settings)")
+    p_configure.add_argument(
+        "--flow",
+        choices=["quickstart", "advanced"],
+        help="Compatibility shortcut: route to onboarding wizard flow",
+    )
     p_configure.add_argument(
         "--section", default=None,
         help="Jump to a specific section: provider, gateway, channels, workspace, memory, context_budget, jobs, bus, tool_safety, autonomy"

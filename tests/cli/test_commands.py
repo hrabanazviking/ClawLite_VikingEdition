@@ -155,6 +155,50 @@ def test_cli_configure_routes_flow_override_to_wizard(
     assert payload["ok"] is True
 
 
+def test_cli_configure_flow_compatibility_routes_to_onboarding_wizard(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai/gpt-4o-mini"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    called: dict[str, object] = {}
+
+    def _fake_wizard(config, *, config_path, overwrite=False, flow="quickstart", variables=None):
+        called["config_path"] = str(config_path)
+        called["overwrite"] = overwrite
+        called["flow"] = flow
+        called["variables"] = dict(variables or {})
+        return {"ok": True, "mode": "wizard", "flow": flow}
+
+    monkeypatch.setattr("clawlite.cli.commands.run_onboarding_wizard", _fake_wizard)
+
+    rc = main([
+        "--config",
+        str(config_path),
+        "configure",
+        "--flow",
+        "quickstart",
+    ])
+
+    assert rc == 0
+    assert called["config_path"] == str(config_path)
+    assert called["overwrite"] is False
+    assert called["flow"] == "quickstart"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["mode"] == "wizard"
+    assert payload["flow"] == "quickstart"
+
+
 def test_cli_skills_list_and_show(capsys) -> None:
     rc_list = main(["skills", "list"])
     assert rc_list == 0

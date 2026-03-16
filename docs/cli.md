@@ -45,8 +45,8 @@ Notes:
 
 | Command | What it does | Example |
 | --- | --- | --- |
-| `configure --flow quickstart` | Guided setup wizard for provider, gateway, Telegram, and workspace | `clawlite configure --flow quickstart` |
-| `configure --flow advanced` | Section-by-section guided setup | `clawlite configure --flow advanced` |
+| `configure --flow quickstart` | Compatibility shortcut to the guided onboarding wizard | `clawlite configure --flow quickstart` |
+| `configure --flow advanced` | Compatibility shortcut to the advanced onboarding wizard | `clawlite configure --flow advanced` |
 | `onboard` | Generates workspace template files without running the wizard | `clawlite onboard --assistant-name ClawLite --user-name Renan` |
 | `onboard --wizard` | Runs the onboarding wizard from `onboard` | `clawlite onboard --wizard --flow advanced --overwrite` |
 
@@ -63,7 +63,7 @@ Identity and user flags accepted by `onboard`:
 - `--user-preferences`
 - `--overwrite`
 
-`configure` is the friendly alias of `onboard --wizard`.
+`configure --flow ...` is a compatibility shortcut to `onboard --wizard --flow ...`. Plain `configure` opens the newer two-level Basic / Advanced configuration menu.
 
 ## Validation Commands
 
