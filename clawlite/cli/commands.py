@@ -1153,6 +1153,8 @@ def cmd_skills_show(args: argparse.Namespace) -> int:
             "enabled": row.enabled,
             "pinned": row.pinned,
             "version": row.version,
+            "version_pin": row.version_pin,
+            "fallback_hint": row.fallback_hint,
             "missing": row.missing,
             "command": row.command,
             "script": row.script,
@@ -1178,6 +1180,7 @@ def _skills_lifecycle_payload(action: str, row: Any) -> dict[str, Any]:
         "name": row.name,
         "enabled": row.enabled,
         "pinned": row.pinned,
+        "version_pin": row.version_pin,
         "available": row.available,
         "version": row.version,
         "source": row.source,
@@ -1222,6 +1225,26 @@ def cmd_skills_unpin(args: argparse.Namespace) -> int:
         _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
         return 1
     _print_json(_skills_lifecycle_payload("unpin", row))
+    return 0
+
+
+def cmd_skills_pin_version(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.set_version_pin(args.name, args.version)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("pin_version", row))
+    return 0
+
+
+def cmd_skills_clear_version(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.clear_version_pin(args.name)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+    _print_json(_skills_lifecycle_payload("clear_version", row))
     return 0
 
 
@@ -1634,6 +1657,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills_unpin = skills_sub.add_parser("unpin", help="Unpin one skill in the local state")
     p_skills_unpin.add_argument("name")
     p_skills_unpin.set_defaults(handler=cmd_skills_unpin)
+
+    p_skills_pin_version = skills_sub.add_parser("pin-version", help="Pin a skill to a specific version string")
+    p_skills_pin_version.add_argument("name")
+    p_skills_pin_version.add_argument("version")
+    p_skills_pin_version.set_defaults(handler=cmd_skills_pin_version)
+
+    p_skills_clear_version = skills_sub.add_parser("clear-version", help="Remove version pin for a skill")
+    p_skills_clear_version.add_argument("name")
+    p_skills_clear_version.set_defaults(handler=cmd_skills_clear_version)
 
     return parser
 

@@ -1,18 +1,18 @@
 # ClawLite Status
 
-Last updated: 2026-03-15
+Last updated: 2026-03-16
 
 ## Summary
 
-ClawLite is a **local-first autonomous agent runtime** in active hardening. The Robustness Milestone is in progress (phases 1–5 of 7 complete). Core runtime, memory, channels, providers, and runtime recovery are production-grade. Phases 6–7 are hardening skills/subagents and advanced memory.
+ClawLite is a **local-first autonomous agent runtime** in active hardening. The Robustness Milestone is in progress (phases 1–6 of 7 complete). Core runtime, memory, channels, providers, runtime recovery, and skills/subagent orchestration are production-grade. Phase 7 is advanced memory + self-improvement.
 
 > **🤖 AI-built · Solo dev** — Every commit is written by Claude (AI), with the author supervising direction. No team.
 
 ## Current Baseline
 
 - Latest tag: `v0.5.0-beta.2`
-- `main` is ahead of that tag — Robustness phases 1–5 landed since the tag
-- Suite: `python -m pytest tests/core tests/tools tests/jobs` → **518 passed, 0 failed**
+- `main` is ahead of that tag — Robustness phases 1–6 landed since the tag
+- Suite: `python -m pytest tests/core tests/tools tests/jobs` → **526 passed, 0 failed**
 - Full suite (all tests): ~1200+ passed (run `python -m pytest tests/ -q --tb=short`)
 - CI: pytest on Python 3.10 and 3.12, Ruff lint, smoke imports, autonomy contracts
 
@@ -25,7 +25,8 @@ ClawLite is a **local-first autonomous agent runtime** in active hardening. The 
 | 3 — Providers + Tools | `8455a59` | `TelemetryRegistry`, streaming recovery, tool timeout middleware, `ToolResultCache`, health checks |
 | 4 — Core + Jobs | `d91a585` | `ContextWindowManager`, `JobQueue` + `JobJournal`, `JobsTool`, `JobsConfig`, loop-detection bus events, subagent `parent_session_id` |
 | 5 — Runtime Recovery | `e8ddaf1` | `JobQueue.worker_status()`, job workers startup + supervisor, `job_workers` lifecycle component, `autonomy_stuck` detection (consecutive errors / no-progress streak) |
-| 6–7 | pending | Skills/subagent hardening, advanced memory + self-improvement |
+| 6 — Skills + Subagents | `2e0009c` | Skill `fallback_hint` + `version_pin` lifecycle controls; `SubagentManager` orchestration depth guard (`max_orchestration_depth`); `SpawnTool` parent session propagation; CLI `skills pin-version` / `clear-version` |
+| 7 | pending | Advanced memory + self-improvement loop |
 
 ## What Is Complete
 
