@@ -36,7 +36,10 @@
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/eobarretooo/ClawLite.git && cd ClawLite
+git clone https://github.com/eobarretooo/ClawLite.git
+cd ClawLite
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
 # 2. Configure (interactive wizard — sets provider, gateway, optional Telegram)
