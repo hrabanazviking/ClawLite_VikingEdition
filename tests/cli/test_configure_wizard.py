@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 from clawlite.config.schema import AppConfig
-from clawlite.cli.onboarding import _configure_memory
+from clawlite.cli.onboarding import _configure_memory, _configure_context_budget
 from rich.console import Console
 
 
@@ -33,3 +33,22 @@ def test_configure_memory_preserves_existing_values(monkeypatch) -> None:
     _configure_memory(_console(), config)
     assert config.agents.defaults.memory.backend == "pgvector"
     assert config.agents.defaults.memory.proactive is True
+
+
+def test_configure_context_budget_sets_values(monkeypatch) -> None:
+    config = AppConfig.from_dict({})
+    answers = iter(["16384", "0.1", "60", "200"])  # max_tokens, temperature, max_tool_iterations, memory_window
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", lambda *a, **kw: next(answers))
+    _configure_context_budget(_console(), config)
+    assert config.agents.defaults.max_tokens == 16384
+    assert config.agents.defaults.max_tool_iterations == 60
+
+
+def test_configure_context_budget_keeps_defaults_on_empty(monkeypatch) -> None:
+    config = AppConfig.from_dict({})
+    original_tokens = config.agents.defaults.max_tokens
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", lambda *a, **kw: kw.get("default", ""))
+    _configure_context_budget(_console(), config)
+    assert config.agents.defaults.max_tokens == original_tokens
+
+

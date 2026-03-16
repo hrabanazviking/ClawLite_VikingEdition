@@ -1229,6 +1229,27 @@ def _configure_memory(console: Console, config: AppConfig) -> None:
     console.print("  [green]✓[/] Memory settings updated.\n")
 
 
+def _configure_context_budget(console: Console, config: AppConfig) -> None:
+    """Interactive context budget configuration."""
+    console.print("\n  [bold cyan]Context Budget[/]\n")
+    d = config.agents.defaults
+
+    for field, label, cast in [
+        ("max_tokens",          "Max tokens per turn",       int),
+        ("temperature",         "Temperature (0.0-2.0)",     float),
+        ("max_tool_iterations", "Max tool iterations",       int),
+        ("memory_window",       "Memory window (messages)",  int),
+    ]:
+        current = getattr(d, field)
+        raw = Prompt.ask(f"  {label}", default=str(current))
+        try:
+            setattr(d, field, cast(raw))
+        except (ValueError, TypeError):
+            pass
+
+    console.print("  [green]✓[/] Context budget updated.\n")
+
+
 def run_onboarding_wizard(
     config: AppConfig,
     *,
