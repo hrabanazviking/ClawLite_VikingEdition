@@ -1771,7 +1771,7 @@ def test_memory_async_memorize_ingests_url_html_extracts_text_without_network(tm
         del request, timeout
         return _Response()
 
-    monkeypatch.setattr("clawlite.core.memory.urllib.request.urlopen", _fake_urlopen)
+    monkeypatch.setattr("clawlite.core.memory_ingest.urllib.request.urlopen", _fake_urlopen)
 
     async def _scenario() -> None:
         store = MemoryStore(tmp_path / "memory.jsonl")
