@@ -60,6 +60,22 @@ Open **http://127.0.0.1:8787** → live dashboard with chat, automation, memory,
 
 If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, and `.[media]` for TTS/PDF helpers.
 
+**Android / Termux path:** use `proot-distro` with Ubuntu instead of trying to run the full stack directly on native Termux. The one-shot wrapper is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+```
+
+After that:
+
+```bash
+proot-distro login ubuntu --shared-tmp
+clawlite configure --flow quickstart
+clawlite gateway
+```
+
+Full walkthrough: [`docs/TERMUX_PROOT_UBUNTU.md`](docs/TERMUX_PROOT_UBUNTU.md)
+
 ```bash
 # Or talk to the agent straight from the terminal
 clawlite run "hello — what can you do?"
@@ -345,6 +361,7 @@ clawlite supervisor recover --component heartbeat
 | Doc | Contents |
 |-----|----------|
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Detailed setup walkthrough |
+| [`docs/TERMUX_PROOT_UBUNTU.md`](docs/TERMUX_PROOT_UBUNTU.md) | Android setup with Termux + `proot-distro` Ubuntu |
 | [`docs/API.md`](docs/API.md) | Gateway HTTP + WebSocket API reference |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operational commands and diagnostics |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operator validation and incident flow |

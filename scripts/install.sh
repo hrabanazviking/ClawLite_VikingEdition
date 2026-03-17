@@ -11,6 +11,64 @@ VENV_DIR="${HOME}/.clawlite/venv"
 BIN_DIR="${HOME}/.local/bin"
 REPO_URL="https://github.com/eobarretooo/ClawLite.git"
 
+IS_UBUNTU=0
+if [[ -r /etc/os-release ]] && grep -qi '^ID=ubuntu' /etc/os-release; then
+  IS_UBUNTU=1
+fi
+
+IS_TERMUX_HOST=0
+if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == *"/data/data/com.termux/"* || -d "/data/data/com.termux/files/usr" ]]; then
+  IS_TERMUX_HOST=1
+fi
+
+if [[ "${IS_TERMUX_HOST}" == "1" && "${IS_UBUNTU}" != "1" ]]; then
+  cat <<'EOF'
+✗ Detected Termux host environment.
+
+For Android/Termux, run the proot-distro Ubuntu bootstrap instead:
+
+  curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+
+That wrapper installs Ubuntu with proot-distro, prepares apt packages there, and then runs this installer inside Ubuntu.
+EOF
+  exit 1
+fi
+
+ensure_ubuntu_prereqs() {
+  [[ "${IS_UBUNTU}" == "1" ]] || return 0
+  command -v apt-get >/dev/null 2>&1 || return 0
+  [[ "$(id -u)" == "0" ]] || return 0
+
+  local need_python=0
+  local need_venv=0
+  local probe_dir=""
+  if ! command -v python3 >/dev/null 2>&1; then
+    need_python=1
+    need_venv=1
+  else
+    probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawlite-venv-check.XXXXXX")"
+    if ! python3 -m venv "${probe_dir}" >/dev/null 2>&1; then
+      need_venv=1
+    fi
+    rm -rf "${probe_dir}"
+  fi
+
+  if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || [[ "${need_python}" == "1" || "${need_venv}" == "1" ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y \
+      ca-certificates \
+      build-essential \
+      curl \
+      git \
+      python3 \
+      python3-pip \
+      python3-venv
+  fi
+}
+
+ensure_ubuntu_prereqs
+
 PYTHON_BIN="$(command -v python3 || true)"
 if [[ -z "${PYTHON_BIN}" ]]; then
   PYTHON_BIN="$(command -v python || true)"
@@ -20,7 +78,29 @@ fi
 command -v git >/dev/null 2>&1 || { echo "✗ git not found"; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "✗ curl not found"; exit 1; }
 
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
+if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}" 2>/tmp/clawlite-install-venv.err; then
+  VENV_ERR="$(cat /tmp/clawlite-install-venv.err 2>/dev/null || true)"
+  rm -f /tmp/clawlite-install-venv.err
+  if [[ "${IS_UBUNTU}" == "1" && $(command -v apt-get >/dev/null 2>&1; echo $?) -eq 0 ]]; then
+    cat <<EOF
+✗ Failed to create Python virtualenv.
+
+Install the Ubuntu prerequisites and retry:
+
+  apt-get update
+  apt-get install -y python3 python3-venv python3-pip git curl build-essential ca-certificates
+
+Technical details:
+${VENV_ERR}
+EOF
+  else
+    echo "✗ Failed to create Python virtualenv"
+    if [[ -n "${VENV_ERR}" ]]; then
+      echo "${VENV_ERR}"
+    fi
+  fi
+  exit 1
+fi
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip setuptools wheel >/dev/null
 "${VENV_DIR}/bin/python" -m pip install --upgrade rich >/dev/null 2>&1 || true
 

@@ -23,6 +23,7 @@ Start here if you are setting up ClawLite from GitHub and want the current opera
 ## Additional Reference
 
 - [Quickstart](./QUICKSTART.md)
+- [Termux + proot-distro Ubuntu](./TERMUX_PROOT_UBUNTU.md)
 - [Architecture](./ARCHITECTURE.md)
 - [Configuration](./CONFIGURATION.md)
 - [API](./API.md)

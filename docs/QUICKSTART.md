@@ -6,6 +6,14 @@
 curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install.sh | bash
 ```
 
+If you are on Android/Termux, do not use the plain installer directly from the Termux host shell. Use the Ubuntu `proot-distro` wrapper instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+```
+
+Detailed Android walkthrough: `docs/TERMUX_PROOT_UBUNTU.md`
+
 Or locally:
 
 ```bash
