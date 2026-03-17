@@ -227,6 +227,7 @@ Acceptance:
 - memory versioning helpers now live in `clawlite/core/memory_versions.py`
 - memory quality-state helpers now live in `clawlite/core/memory_quality.py`
 - memory integration policy helpers now live in `clawlite/core/memory_policy.py`
+- memory consolidation and curation helpers now live in `clawlite/core/memory_curation.py`
 - memory ingest and multimodal extraction helpers now live in `clawlite/core/memory_ingest.py`
 - memory progressive retrieval helpers now live in `clawlite/core/memory_retrieval.py`
 - memory maintenance loops and purge/consolidation helpers now live in `clawlite/core/memory_maintenance.py`

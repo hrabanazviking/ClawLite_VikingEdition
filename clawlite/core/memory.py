@@ -19,9 +19,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from clawlite.core.memory_backend import MemoryBackend, resolve_memory_backend
+from clawlite.core.memory_curation import (
+    candidate_importance as _candidate_importance_helper,
+    consolidate_messages as _consolidate_messages_helper,
+    curate_candidates as _curate_candidates_helper,
+    extract_consolidation_lines as _extract_consolidation_lines_helper,
+)
 from clawlite.core.memory_ingest import (
     compact_whitespace as _compact_whitespace,
     memory_text_from_file as _memory_text_from_file,
@@ -3669,30 +3675,15 @@ class MemoryStore:
         memory_type: str = "knowledge",
         happened_at: str = "",
     ) -> float:
-        score = 1.0
-        if role == "user":
-            score += 0.5
-        if CURATION_HINT_RE.search(text):
-            score += 1.0
-        score += min(0.8, len(text) / 320.0)
-        score += min(2.0, max(0, repeated_count - 1) * 0.35)
-        normalized_type = cls._normalize_memory_type(memory_type)
-        if normalized_type == "profile":
-            score += 0.8
-        elif normalized_type == "behavior":
-            score += 0.45
-        elif normalized_type in {"skill", "tool"}:
-            score += 0.25
-        elif normalized_type == "event":
-            score += 0.15
-            stamp = cls._parse_iso_timestamp(str(happened_at or ""))
-            if stamp.year > 1:
-                if stamp.tzinfo is None:
-                    stamp = stamp.replace(tzinfo=timezone.utc)
-                delta_days = float((stamp - datetime.now(timezone.utc)).total_seconds()) / 86400.0
-                if -1.0 <= delta_days <= 45.0:
-                    score += 0.45
-        return score
+        return _candidate_importance_helper(
+            role=role,
+            text=text,
+            repeated_count=repeated_count,
+            memory_type=memory_type,
+            happened_at=happened_at,
+            normalize_memory_type=cls._normalize_memory_type,
+            parse_iso_timestamp=cls._parse_iso_timestamp,
+        )
 
     def _curate_candidates(
         self,
@@ -3706,125 +3697,45 @@ class MemoryStore:
         memory_type: str | None = None,
         happened_at: str | None = None,
         decay_rate: float | None = None,
+        read_curated_facts: Callable[[], list[dict[str, object]]] | None = None,
+        write_curated_facts: Callable[[list[dict[str, object]]], None] | None = None,
     ) -> None:
-        if self.curated_path is None or not candidates:
+        if self.curated_path is None and read_curated_facts is None:
             return
-        current = self._read_curated_facts()
-        by_norm = {self._normalize_memory_text(str(item["text"])): item for item in current}
-        now_iso = datetime.now(timezone.utc).isoformat()
-        source_session = self._source_session_key(source)
-        resolved_reasoning_layer = self._normalize_reasoning_layer(reasoning_layer)
-        resolved_confidence = self._normalize_confidence(confidence, default=1.0)
-        changed = False
-        for role, candidate in candidates:
-            norm = self._normalize_memory_text(candidate)
-            if not norm:
-                continue
-            inferred_memory_type = self._normalize_memory_type(memory_type or self._infer_memory_type(candidate, source))
-            inferred_happened_at = str(happened_at or self._infer_happened_at(candidate) or "")
-            inferred_decay_rate = self._normalize_decay_rate(
-                decay_rate,
-                default=self._default_decay_rate(
-                    memory_type=inferred_memory_type,
-                    category=self._categorize_memory(candidate, source),
-                    happened_at=inferred_happened_at,
-                ),
-            )
-            inferred_metadata = self._prepare_memory_metadata(
-                text=candidate,
-                source=source,
-                metadata=metadata,
-                memory_type=inferred_memory_type,
-                happened_at=inferred_happened_at,
-            )
-            existing = by_norm.get(norm)
-            if existing is None:
-                row: dict[str, object] = {
-                    "id": uuid.uuid4().hex,
-                    "text": candidate,
-                    "source": f"curated:{source}",
-                    "created_at": now_iso,
-                    "last_seen_at": now_iso,
-                    "mentions": 1,
-                    "session_count": 1,
-                    "sessions": [source_session],
-                    "importance": self._candidate_importance(
-                        role=role,
-                        text=candidate,
-                        repeated_count=repeated_count,
-                        memory_type=inferred_memory_type,
-                        happened_at=inferred_happened_at,
-                    ),
-                    "reasoning_layer": resolved_reasoning_layer,
-                    "confidence": resolved_confidence,
-                    "decay_rate": inferred_decay_rate,
-                    "memory_type": inferred_memory_type,
-                    "happened_at": inferred_happened_at,
-                    "metadata": inferred_metadata,
-                }
-                current.append(row)
-                by_norm[norm] = row
-                changed = True
-                continue
-
-            existing_sessions = existing.get("sessions", [])
-            if not isinstance(existing_sessions, list):
-                existing_sessions = []
-            clean_sessions = []
-            for raw_session in existing_sessions:
-                clean = str(raw_session or "").strip().lower()
-                if clean and clean not in clean_sessions:
-                    clean_sessions.append(clean)
-            if source_session not in clean_sessions:
-                clean_sessions.append(source_session)
-
-            old_mentions = int(existing.get("mentions", 1))
-            old_session_count = int(existing.get("session_count", max(1, len(clean_sessions))))
-            old_importance = float(existing.get("importance", 1.0))
-            existing["mentions"] = old_mentions + 1
-            existing["session_count"] = max(old_session_count, len(clean_sessions))
-            existing["last_seen_at"] = now_iso
-            existing["sessions"] = clean_sessions[-self._MAX_CURATED_SESSIONS_PER_FACT :]
-            existing["importance"] = old_importance + self._candidate_importance(
-                role=role,
-                text=candidate,
-                repeated_count=repeated_count,
-                memory_type=inferred_memory_type,
-                happened_at=inferred_happened_at,
-            ) * 0.35
-            existing["reasoning_layer"] = resolved_reasoning_layer
-            existing["confidence"] = resolved_confidence
-            existing["decay_rate"] = self._normalize_decay_rate(
-                min(
-                    self._normalize_decay_rate(existing.get("decay_rate", existing.get("decayRate", inferred_decay_rate)), default=inferred_decay_rate),
-                    inferred_decay_rate,
-                )
-                * 0.9,
-                default=inferred_decay_rate,
-            )
-            existing["memory_type"] = inferred_memory_type
-            existing["happened_at"] = inferred_happened_at
-            existing["metadata"] = self._normalize_memory_metadata(
-                {
-                    **self._normalize_memory_metadata(existing.get("metadata", {})),
-                    **inferred_metadata,
-                }
-            )
-            changed = True
-        if changed:
-            self._write_curated_facts(current)
+        _curate_candidates_helper(
+            candidates,
+            source=source,
+            repeated_count=repeated_count,
+            metadata=metadata,
+            reasoning_layer=reasoning_layer,
+            confidence=confidence,
+            memory_type=memory_type,
+            happened_at=happened_at,
+            decay_rate=decay_rate,
+            read_curated_facts=read_curated_facts or self._read_curated_facts,
+            write_curated_facts=write_curated_facts or self._write_curated_facts,
+            normalize_memory_text=self._normalize_memory_text,
+            source_session_key=self._source_session_key,
+            normalize_reasoning_layer=self._normalize_reasoning_layer,
+            normalize_confidence=lambda value: self._normalize_confidence(value, default=1.0),
+            normalize_memory_type=self._normalize_memory_type,
+            infer_memory_type=self._infer_memory_type,
+            infer_happened_at=self._infer_happened_at,
+            normalize_decay_rate=self._normalize_decay_rate,
+            default_decay_rate=self._default_decay_rate,
+            categorize_memory=self._categorize_memory,
+            prepare_memory_metadata=self._prepare_memory_metadata,
+            candidate_importance_fn=self._candidate_importance,
+            normalize_memory_metadata=self._normalize_memory_metadata,
+            max_curated_sessions_per_fact=self._MAX_CURATED_SESSIONS_PER_FACT,
+            utcnow_iso=self._utcnow_iso,
+        )
 
     def _extract_consolidation_lines(self, messages: Iterable[dict[str, str]]) -> list[str]:
-        lines: list[str] = []
-        for msg in messages:
-            role = str(msg.get("role", "")).strip().lower()
-            content = " ".join(str(msg.get("content", "")).split())
-            if role not in {"user", "assistant"}:
-                continue
-            if not self._is_curation_candidate(role, content):
-                continue
-            lines.append(f"{role}: {content}")
-        return lines
+        return _extract_consolidation_lines_helper(
+            messages,
+            is_curation_candidate=self._is_curation_candidate,
+        )
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
@@ -5847,48 +5758,20 @@ class MemoryStore:
         decay_rate: float | None = None,
     ) -> MemoryRecord | None:
         self._ensure_scope_paths(scope)
-        lines = self._extract_consolidation_lines(messages)
-        if not lines:
-            return None
-
-        source_lines: list[str] = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = str(msg.get("role", "")).strip().lower()
-            content = " ".join(str(msg.get("content", "") or "").split())
-            if role not in {"user", "assistant"} or not content:
-                continue
-            source_lines.append(f"{role}: {content}")
-        resource_text = "\n".join(source_lines).strip()
-
-        summary_lines = lines[-6:]
-        signature = self._chunk_signature(summary_lines)
-        repeated_count = 1
-
-        with self._locked_file(scope["checkpoints"], "r+", exclusive=True) as checkpoints_fh:
-            checkpoints = self._parse_checkpoints(checkpoints_fh.read())
-            source_signatures = checkpoints.get("source_signatures", {})
-            if not isinstance(source_signatures, dict):
-                source_signatures = {}
-
-            source_activity = checkpoints.get("source_activity", {})
-            if not isinstance(source_activity, dict):
-                source_activity = {}
-
-            global_signatures = checkpoints.get("global_signatures", {})
-            if not isinstance(global_signatures, dict):
-                global_signatures = {}
-
-            if source_signatures.get(source) == signature:
-                self._diagnostics["consolidate_dedup_hits"] = int(self._diagnostics["consolidate_dedup_hits"]) + 1
-                return None
-
-            summary = "\n".join(summary_lines)
-            row = self.add(
+        return self._consolidate_messages(
+            messages,
+            source=source,
+            metadata=metadata,
+            reasoning_layer=reasoning_layer,
+            confidence=confidence,
+            memory_type=memory_type,
+            happened_at=happened_at,
+            decay_rate=decay_rate,
+            checkpoints_path=scope["checkpoints"],
+            add_record=lambda summary, resource_text: self.add(
                 summary,
                 source=source,
-                raw_resource_text=(resource_text or summary),
+                raw_resource_text=resource_text,
                 user_id=user_id,
                 shared=shared,
                 metadata=metadata,
@@ -5897,149 +5780,58 @@ class MemoryStore:
                 memory_type=memory_type,
                 happened_at=happened_at,
                 decay_rate=decay_rate,
-            )
-            self._diagnostics["consolidate_writes"] = int(self._diagnostics["consolidate_writes"]) + 1
+            ),
+            read_curated_facts=lambda: self._read_curated_facts_from(scope["curated"]),
+            write_curated_facts=lambda facts: self._write_curated_facts_to(scope["curated"], facts),
+        )
 
-            now_iso = datetime.now(timezone.utc).isoformat()
-            source_signatures[source] = signature
-            source_activity[source] = now_iso
-
-            global_signature_row = global_signatures.get(signature)
-            current_count = 0
-            if isinstance(global_signature_row, dict):
-                try:
-                    current_count = int(global_signature_row.get("count", 0))
-                except Exception:
-                    current_count = 0
-            repeated_count = max(1, current_count + 1)
-            global_signatures[signature] = {
-                "count": repeated_count,
-                "last_seen_at": now_iso,
-                "last_source": source,
-            }
-
-            checkpoints = {
-                "source_signatures": source_signatures,
-                "source_activity": source_activity,
-                "global_signatures": global_signatures,
-            }
-            checkpoints_fh.seek(0)
-            checkpoints_fh.truncate()
-            checkpoints_fh.write(self._format_checkpoints(checkpoints))
-            self._flush_and_fsync(checkpoints_fh)
-
-        curated_candidates: list[tuple[str, str]] = []
-        for line in summary_lines:
-            if ":" not in line:
-                continue
-            role, value = line.split(":", 1)
-            curated_candidates.append((role.strip().lower(), value.strip()))
-
-        facts = self._read_curated_facts_from(scope["curated"])
-        by_norm = {self._normalize_memory_text(str(item["text"])): item for item in facts}
-        now_iso = datetime.now(timezone.utc).isoformat()
-        source_session = self._source_session_key(source)
-        resolved_reasoning_layer = self._normalize_reasoning_layer(reasoning_layer)
-        resolved_confidence = self._normalize_confidence(confidence, default=1.0)
-        changed = False
-        for role, candidate in curated_candidates:
-            norm = self._normalize_memory_text(candidate)
-            if not norm:
-                continue
-            inferred_memory_type = self._normalize_memory_type(memory_type or self._infer_memory_type(candidate, source))
-            inferred_happened_at = str(happened_at or self._infer_happened_at(candidate) or "")
-            inferred_decay_rate = self._normalize_decay_rate(
-                decay_rate,
-                default=self._default_decay_rate(
-                    memory_type=inferred_memory_type,
-                    category=self._categorize_memory(candidate, source),
-                    happened_at=inferred_happened_at,
-                ),
-            )
-            inferred_metadata = self._prepare_memory_metadata(
-                text=candidate,
+    def _consolidate_messages(
+        self,
+        messages: Iterable[dict[str, str]],
+        *,
+        source: str,
+        metadata: dict[str, Any] | None,
+        reasoning_layer: str | None,
+        confidence: float | None,
+        memory_type: str | None,
+        happened_at: str | None,
+        decay_rate: float | None,
+        checkpoints_path: Path,
+        add_record: Callable[[str, str], MemoryRecord],
+        read_curated_facts: Callable[[], list[dict[str, object]]],
+        write_curated_facts: Callable[[list[dict[str, object]]], None],
+        max_checkpoint_sources: int | None = None,
+        max_checkpoint_signatures: int | None = None,
+    ) -> MemoryRecord | None:
+        return _consolidate_messages_helper(
+            messages,
+            source=source,
+            checkpoints_path=checkpoints_path,
+            extract_consolidation_lines=self._extract_consolidation_lines,
+            chunk_signature=self._chunk_signature,
+            parse_checkpoints=self._parse_checkpoints,
+            format_checkpoints=self._format_checkpoints,
+            locked_file=self._locked_file,
+            flush_and_fsync=self._flush_and_fsync,
+            utcnow_iso=self._utcnow_iso,
+            add_record=add_record,
+            diagnostics=self._diagnostics,
+            curate_candidates_fn=lambda candidates, repeated_count: self._curate_candidates(
+                candidates,
                 source=source,
-                metadata=metadata,
-                memory_type=inferred_memory_type,
-                happened_at=inferred_happened_at,
-            )
-            existing = by_norm.get(norm)
-            if existing is None:
-                facts.append(
-                    {
-                        "id": uuid.uuid4().hex,
-                        "text": candidate,
-                        "source": f"curated:{source}",
-                        "created_at": now_iso,
-                        "last_seen_at": now_iso,
-                        "mentions": 1,
-                        "session_count": 1,
-                        "sessions": [source_session],
-                        "importance": self._candidate_importance(
-                            role=role,
-                            text=candidate,
-                            repeated_count=repeated_count,
-                            memory_type=inferred_memory_type,
-                            happened_at=inferred_happened_at,
-                        ),
-                        "reasoning_layer": resolved_reasoning_layer,
-                        "confidence": resolved_confidence,
-                        "decay_rate": inferred_decay_rate,
-                        "memory_type": inferred_memory_type,
-                        "happened_at": inferred_happened_at,
-                        "metadata": inferred_metadata,
-                    }
-                )
-                changed = True
-                continue
-
-            existing_sessions = existing.get("sessions", [])
-            if not isinstance(existing_sessions, list):
-                existing_sessions = []
-            clean_sessions = []
-            for raw_session in existing_sessions:
-                clean = str(raw_session or "").strip().lower()
-                if clean and clean not in clean_sessions:
-                    clean_sessions.append(clean)
-            if source_session not in clean_sessions:
-                clean_sessions.append(source_session)
-
-            old_mentions = int(existing.get("mentions", 1))
-            old_session_count = int(existing.get("session_count", max(1, len(clean_sessions))))
-            old_importance = float(existing.get("importance", 1.0))
-            existing["mentions"] = old_mentions + 1
-            existing["session_count"] = max(old_session_count, len(clean_sessions))
-            existing["last_seen_at"] = now_iso
-            existing["sessions"] = clean_sessions[-self._MAX_CURATED_SESSIONS_PER_FACT :]
-            existing["importance"] = old_importance + self._candidate_importance(
-                role=role,
-                text=candidate,
                 repeated_count=repeated_count,
-                memory_type=inferred_memory_type,
-                happened_at=inferred_happened_at,
-            ) * 0.35
-            existing["reasoning_layer"] = resolved_reasoning_layer
-            existing["confidence"] = resolved_confidence
-            existing["decay_rate"] = self._normalize_decay_rate(
-                min(
-                    self._normalize_decay_rate(existing.get("decay_rate", existing.get("decayRate", inferred_decay_rate)), default=inferred_decay_rate),
-                    inferred_decay_rate,
-                )
-                * 0.9,
-                default=inferred_decay_rate,
-            )
-            existing["memory_type"] = inferred_memory_type
-            existing["happened_at"] = inferred_happened_at
-            existing["metadata"] = self._normalize_memory_metadata(
-                {
-                    **self._normalize_memory_metadata(existing.get("metadata", {})),
-                    **inferred_metadata,
-                }
-            )
-            changed = True
-        if changed:
-            self._write_curated_facts_to(scope["curated"], facts)
-        return row
+                metadata=metadata,
+                reasoning_layer=reasoning_layer,
+                confidence=confidence,
+                memory_type=memory_type,
+                happened_at=happened_at,
+                decay_rate=decay_rate,
+                read_curated_facts=read_curated_facts,
+                write_curated_facts=write_curated_facts,
+            ),
+            max_checkpoint_sources=max_checkpoint_sources,
+            max_checkpoint_signatures=max_checkpoint_signatures,
+        )
 
     def consolidate(
         self,
@@ -6071,122 +5863,32 @@ class MemoryStore:
                 happened_at=happened_at,
                 decay_rate=decay_rate,
             )
-
-        lines = self._extract_consolidation_lines(messages)
-        if not lines:
-            return None
-
-        source_lines: list[str] = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = str(msg.get("role", "")).strip().lower()
-            content = " ".join(str(msg.get("content", "") or "").split())
-            if role not in {"user", "assistant"} or not content:
-                continue
-            source_lines.append(f"{role}: {content}")
-        resource_text = "\n".join(source_lines).strip()
-
-        summary_lines = lines[-6:]
-        signature = self._chunk_signature(summary_lines)
-
-        with self._locked_file(self.checkpoints_path, "r+", exclusive=True) as checkpoints_fh:
-            checkpoints = self._parse_checkpoints(checkpoints_fh.read())
-            source_signatures = checkpoints.get("source_signatures", {})
-            if not isinstance(source_signatures, dict):
-                source_signatures = {}
-
-            source_activity = checkpoints.get("source_activity", {})
-            if not isinstance(source_activity, dict):
-                source_activity = {}
-
-            global_signatures = checkpoints.get("global_signatures", {})
-            if not isinstance(global_signatures, dict):
-                global_signatures = {}
-
-            if source_signatures.get(source) == signature:
-                self._diagnostics["consolidate_dedup_hits"] = int(self._diagnostics["consolidate_dedup_hits"]) + 1
-                return None
-
-            summary = "\n".join(summary_lines)
-            row = self.add(
-                summary,
-                source=source,
-                raw_resource_text=(resource_text or summary),
-                metadata=metadata,
-                reasoning_layer=reasoning_layer,
-                confidence=confidence,
-                memory_type=memory_type,
-                happened_at=happened_at,
-                decay_rate=decay_rate,
-            )
-            self._diagnostics["consolidate_writes"] = int(self._diagnostics["consolidate_writes"]) + 1
-
-            now_iso = datetime.now(timezone.utc).isoformat()
-            source_signatures[source] = signature
-            source_activity[source] = now_iso
-
-            global_signature_row = global_signatures.get(signature)
-            current_count = 0
-            if isinstance(global_signature_row, dict):
-                try:
-                    current_count = int(global_signature_row.get("count", 0))
-                except Exception:
-                    current_count = 0
-            repeated_count = max(1, current_count + 1)
-            global_signatures[signature] = {
-                "count": repeated_count,
-                "last_seen_at": now_iso,
-                "last_source": source,
-            }
-
-            if len(source_signatures) > self._MAX_CHECKPOINT_SOURCES:
-                ordered_sources = sorted(
-                    source_signatures.keys(),
-                    key=lambda key: source_activity.get(key, ""),
-                )
-                drop = len(source_signatures) - self._MAX_CHECKPOINT_SOURCES
-                for key in ordered_sources[:drop]:
-                    source_signatures.pop(key, None)
-                    source_activity.pop(key, None)
-
-            if len(global_signatures) > self._MAX_CHECKPOINT_SIGNATURES:
-                ordered_signatures = sorted(
-                    global_signatures.keys(),
-                    key=lambda key: str(global_signatures.get(key, {}).get("last_seen_at", "")),
-                )
-                drop = len(global_signatures) - self._MAX_CHECKPOINT_SIGNATURES
-                for key in ordered_signatures[:drop]:
-                    global_signatures.pop(key, None)
-
-            checkpoints = {
-                "source_signatures": source_signatures,
-                "source_activity": source_activity,
-                "global_signatures": global_signatures,
-            }
-            checkpoints_fh.seek(0)
-            checkpoints_fh.truncate()
-            checkpoints_fh.write(self._format_checkpoints(checkpoints))
-            self._flush_and_fsync(checkpoints_fh)
-
-        curated_candidates: list[tuple[str, str]] = []
-        for line in summary_lines:
-            if ":" not in line:
-                continue
-            role, value = line.split(":", 1)
-            curated_candidates.append((role.strip().lower(), value.strip()))
-        self._curate_candidates(
-            curated_candidates,
+        return self._consolidate_messages(
+            messages,
             source=source,
-            repeated_count=repeated_count,
             metadata=metadata,
             reasoning_layer=reasoning_layer,
             confidence=confidence,
             memory_type=memory_type,
             happened_at=happened_at,
             decay_rate=decay_rate,
+            checkpoints_path=self.checkpoints_path,
+            add_record=lambda summary, resource_text: self.add(
+                summary,
+                source=source,
+                raw_resource_text=resource_text,
+                metadata=metadata,
+                reasoning_layer=reasoning_layer,
+                confidence=confidence,
+                memory_type=memory_type,
+                happened_at=happened_at,
+                decay_rate=decay_rate,
+            ),
+            read_curated_facts=self._read_curated_facts,
+            write_curated_facts=self._write_curated_facts,
+            max_checkpoint_sources=self._MAX_CHECKPOINT_SOURCES,
+            max_checkpoint_signatures=self._MAX_CHECKPOINT_SIGNATURES,
         )
-        return row
 
     def recover_session_context(self, session_id: str, *, limit: int = 4) -> list[str]:
         self._diagnostics["session_recovery_attempts"] = int(self._diagnostics["session_recovery_attempts"]) + 1
