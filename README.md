@@ -5,7 +5,9 @@
 **A local-first Python autonomous agent — persistent memory, 20+ LLM providers,<br>real chat channels, and a 24/7 self-healing runtime. No cloud required.**
 
 [![CI](https://github.com/eobarretooo/ClawLite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eobarretooo/ClawLite/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/eobarretooo/ClawLite?include_prereleases&label=release&color=ff6b2b)](https://github.com/eobarretooo/ClawLite/releases/tag/v0.7.0-beta.0)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/F4wQvdv9fR)
+[![Stars](https://img.shields.io/github/stars/eobarretooo/ClawLite?style=flat&color=f5b301)](https://github.com/eobarretooo/ClawLite/stargazers)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LiteLLM](https://img.shields.io/badge/LiteLLM-20%2B%20providers-blueviolet)](https://litellm.ai)
 [![FastAPI](https://img.shields.io/badge/FastAPI-gateway-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -59,7 +61,7 @@ clawlite gateway
 
 Open **http://127.0.0.1:8787** → live dashboard with chat, automation, memory, and tools.
 
-If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, and `.[media]` for TTS/PDF helpers.
+If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, `.[media]` for TTS/PDF helpers, and `.[observability]` for OTLP/OpenTelemetry exports.
 Config profiles are also supported: `clawlite --config ./config.yaml --profile prod status` loads `config.yaml`, overlays `config.prod.yaml` if present, and then applies env vars.
 
 **Android / Termux path:** use `proot-distro` with Ubuntu instead of trying to run the full stack directly on native Termux. The one-shot wrapper is:
@@ -87,15 +89,27 @@ clawlite run "hello — what can you do?"
 
 ## 📈 Current Status
 
-- `main` now has robustness phases 1-7 plus the main maintainability plan landed; the next work is release polish and new roadmap items.
+- `v0.7.0-beta.0` is out, and it closes robustness phases 1-7 plus the full `plano.md` milestone on the beta track.
+- `main` is now focused on soak-testing, documentation polish, and the next roadmap items rather than another large hardening pass.
 - Local-provider startup, cron/jobs boundaries, browser lifecycle, skill networking policy, and Telegram runtime internals are hardened on `main`.
 - The biggest runtime monoliths were split by responsibility: `clawlite/gateway/server.py` is down to about `3.3k` lines and `clawlite/core/memory.py` to about `4.4k`.
 - Packaging is now split into extras: base install stays leaner, while `.[browser]`, `.[telegram]`, and `.[media]` enable optional runtimes.
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
 - OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.
+- Runtime scale-out and observability are now in place as opt-in surfaces: Redis bus backend, OTLP telemetry hooks, session TTL, history compaction, `sqlite-vec`, and `memory_compact`.
 - Latest validation on `main`: `python -m pytest tests -q --tb=short` → `1561 passed, 1 skipped`; `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → `190 passed`; `bash scripts/smoke_test.sh` → `7 ok / 0 failure(s)`.
 - Tracking docs: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md).
+
+---
+
+## ⭐ Star History
+
+<div align="center">
+  <a href="https://star-history.com/#eobarretooo/ClawLite&Date">
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=eobarretooo/ClawLite&type=Date" width="100%" />
+  </a>
+</div>
 
 ---
 
@@ -293,7 +307,7 @@ ClawLite has four main layers:
 | Local-first (no cloud) | ✅ | ⚠️ partial | ⚠️ partial | ❌ |
 | 20+ LLM providers | ✅ | ✅ | ⚠️ limited | ❌ (OpenAI only) |
 | Persistent hybrid memory | ✅ | ⚠️ plugin | ⚠️ basic | ✅ (cloud) |
-| Real chat channels | ✅ 5 channels | ❌ | ⚠️ limited | ❌ |
+| Real chat channels | ✅ 6 channels | ❌ | ⚠️ limited | ❌ |
 | 24/7 self-healing runtime | ✅ | ❌ | ⚠️ experimental | ✅ (cloud) |
 | Streaming responses | ✅ | ✅ | ⚠️ | ✅ |
 | Operator dashboard | ✅ | ❌ | ⚠️ basic | ✅ (cloud) |
