@@ -69,6 +69,11 @@ from clawlite.core.memory_reporting import (
     build_memory_analysis_stats as _build_memory_analysis_stats,
     build_memory_diagnostics as _build_memory_diagnostics,
 )
+from clawlite.core.memory_search import (
+    BM25Okapi,
+    rank_records as _rank_records_helper,
+    search_records as _search_records_helper,
+)
 from clawlite.core.memory_versions import (
     checkout_memory_branch as _checkout_memory_branch,
     create_memory_branch as _create_memory_branch,
@@ -80,11 +85,6 @@ from clawlite.core.memory_versions import (
     rollback_memory_version as _rollback_memory_version,
     write_snapshot_payload as _write_snapshot_payload_helper,
 )
-
-try:
-    from rank_bm25 import BM25Okapi
-except Exception:  # pragma: no cover
-    BM25Okapi = None
 
 WORD_RE = re.compile(r"[a-zA-Z0-9_]+")
 TRIVIAL_RE = re.compile(
@@ -5364,156 +5364,43 @@ class MemoryStore:
         semantic_enabled: bool,
         session_id: str = "",
     ) -> list[MemoryRecord]:
-        if not records:
-            return []
-        q_tokens = self._tokens(query)
-        query_entities = self._extract_entities(query)
-        reasoning_boosts = self._reasoning_intent_boosts(query)
-        query_has_temporal_intent = self._query_has_temporal_intent(query)
-        if not q_tokens:
-            return records[-limit:][::-1]
-
-        corpus_tokens = [self._tokens(item.text) for item in records]
-        corpus_entities = [self._extract_entities(item.text) for item in records]
-        qset = set(q_tokens)
-
-        if BM25Okapi is None:
-            bm25_scores = [0.0 for _ in records]
-        else:
-            bm25 = BM25Okapi(corpus_tokens)
-            scores = bm25.get_scores(q_tokens)
-            bm25_scores = [float(scores[idx]) for idx in range(len(records))]
-
-        semantic_scores = [0.0 for _ in records]
-        semantic_active = False
-        if semantic_enabled:
-            query_embedding = self._generate_embedding(query)
-            if query_embedding is not None:
-                similarity_hits: list[dict[str, Any]] = []
-                try:
-                    similarity_hits = self.backend.query_similar_embeddings(
-                        query_embedding,
-                        record_ids=[row.id for row in records if str(row.id or "").strip()],
-                        limit=max(1, len(records)),
-                    )
-                except Exception:
-                    similarity_hits = []
-
-                if similarity_hits:
-                    score_by_id: dict[str, float] = {}
-                    for hit in similarity_hits:
-                        if not isinstance(hit, dict):
-                            continue
-                        row_id = str(hit.get("record_id", "")).strip()
-                        if not row_id:
-                            continue
-                        try:
-                            score_by_id[row_id] = float(hit.get("score", 0.0) or 0.0)
-                        except Exception:
-                            continue
-                    if score_by_id:
-                        for idx, row in enumerate(records):
-                            semantic_scores[idx] = score_by_id.get(str(row.id or ""), 0.0)
-                        semantic_active = True
-                if not semantic_active:
-                    embeddings = self._read_embeddings_map()
-                    if embeddings:
-                        for idx, row in enumerate(records):
-                            vector = embeddings.get(row.id)
-                            if vector is None:
-                                continue
-                            semantic_scores[idx] = self._cosine_similarity(query_embedding, vector)
-                        semantic_active = True
-
-        scored: list[tuple[float, float, float, int]] = []
-        for idx, toks in enumerate(corpus_tokens):
-            overlap = len(qset.intersection(toks))
-            entity_score = self._entity_match_score(query_entities, corpus_entities[idx])
-            curated_boost = 0.0
-            if records[idx].source.startswith("curated:"):
-                importance = curated_importance.get(records[idx].id, 1.0)
-                mentions = curated_mentions.get(records[idx].id, 1)
-                curated_boost = 0.75 + min(2.0, importance * 0.25) + min(1.0, mentions * 0.1)
-            temporal_score = self._recency_score(self._record_temporal_anchor(records[idx]))
-            if query_has_temporal_intent:
-                if records[idx].happened_at or self._memory_has_temporal_markers(records[idx].text):
-                    temporal_score += self._TEMPORAL_INTENT_MATCH_BOOST
-                else:
-                    temporal_score -= self._TEMPORAL_INTENT_MISS_PENALTY
-
-            confidence_boost = self._bounded_confidence_score(records[idx].confidence) * self._RANKING_CONFIDENCE_BOOST_MAX
-            reasoning_layer = self._normalize_reasoning_layer(getattr(records[idx], "reasoning_layer", "fact"))
-            reasoning_boost = reasoning_boosts.get(reasoning_layer, 0.0)
-            decay_penalty = self._decay_penalty(records[idx])
-            upcoming_boost = self._upcoming_event_boost(records[idx])
-            relevance_signal = bool(
-                overlap > 0
-                or bm25_scores[idx] > 0.0
-                or entity_score > 0.0
-                or (semantic_active and semantic_scores[idx] > 0.05)
-            )
-            salience_boost = self._salience_boost(getattr(records[idx], "metadata", {})) if relevance_signal else 0.0
-            raw_episodic_boost = self._episodic_session_boost(records[idx], session_id=session_id)
-            episodic_boost = raw_episodic_boost if relevance_signal or query_has_temporal_intent else 0.0
-            if not relevance_signal and episodic_boost > 0.0 and query_has_temporal_intent:
-                relevance_signal = True
-
-            ranking_score = bm25_scores[idx]
-            ranking_score += (
-                confidence_boost
-                + reasoning_boost
-                + entity_score
-                + salience_boost
-                + episodic_boost
-                + upcoming_boost
-                - decay_penalty
-            )
-            tie_breaker = (
-                temporal_score
-                + (confidence_boost * 0.5)
-                + reasoning_boost
-                + entity_score
-                + salience_boost
-                + episodic_boost
-                + upcoming_boost
-                - decay_penalty
-            )
-            if semantic_active:
-                ranking_score = (
-                    self._SEMANTIC_BM25_WEIGHT * bm25_scores[idx]
-                    + self._SEMANTIC_VECTOR_WEIGHT * semantic_scores[idx]
-                    + confidence_boost
-                    + reasoning_boost
-                    + entity_score
-                    + salience_boost
-                    + episodic_boost
-                    + upcoming_boost
-                    - decay_penalty
-                )
-                tie_breaker = (
-                    curated_boost
-                    + temporal_score
-                    + (confidence_boost * 0.5)
-                    + reasoning_boost
-                    + entity_score
-                    + salience_boost
-                    + episodic_boost
-                    + upcoming_boost
-                    - decay_penalty
-                )
-                scored.append((float(overlap) + entity_score + episodic_boost, ranking_score, tie_breaker, idx))
-            else:
-                scored.append((float(overlap) + curated_boost + entity_score + episodic_boost, ranking_score, tie_breaker, idx))
-
-        scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
-        picked: list[MemoryRecord] = []
-        for overlap_score, relevance_score, _tie_breaker, idx in scored:
-            if len(picked) >= limit:
-                break
-            if overlap_score <= 0 and relevance_score <= 0.0:
-                continue
-            picked.append(records[idx])
-        return picked if picked else records[-limit:][::-1]
+        return _rank_records_helper(
+            query,
+            records,
+            curated_importance=curated_importance,
+            curated_mentions=curated_mentions,
+            limit=limit,
+            semantic_enabled=semantic_enabled,
+            session_id=session_id,
+            tokens=self._tokens,
+            extract_entities=self._extract_entities,
+            reasoning_intent_boosts=self._reasoning_intent_boosts,
+            query_has_temporal_intent=self._query_has_temporal_intent,
+            generate_embedding=self._generate_embedding,
+            query_similar_embeddings=lambda query_embedding, search_records: self.backend.query_similar_embeddings(
+                query_embedding,
+                record_ids=[row.id for row in search_records if str(row.id or "").strip()],
+                limit=max(1, len(search_records)),
+            ),
+            read_embeddings_map=self._read_embeddings_map,
+            cosine_similarity=self._cosine_similarity,
+            entity_match_score=self._entity_match_score,
+            recency_score=self._recency_score,
+            record_temporal_anchor=self._record_temporal_anchor,
+            memory_has_temporal_markers=self._memory_has_temporal_markers,
+            bounded_confidence_score=self._bounded_confidence_score,
+            normalize_reasoning_layer=self._normalize_reasoning_layer,
+            decay_penalty=self._decay_penalty,
+            upcoming_event_boost=self._upcoming_event_boost,
+            salience_boost=self._salience_boost,
+            episodic_session_boost=lambda row: self._episodic_session_boost(row, session_id=session_id),
+            semantic_bm25_weight=self._SEMANTIC_BM25_WEIGHT,
+            semantic_vector_weight=self._SEMANTIC_VECTOR_WEIGHT,
+            ranking_confidence_boost_max=self._RANKING_CONFIDENCE_BOOST_MAX,
+            temporal_intent_match_boost=self._TEMPORAL_INTENT_MATCH_BOOST,
+            temporal_intent_miss_penalty=self._TEMPORAL_INTENT_MISS_PENALTY,
+            bm25_class=BM25Okapi,
+        )
 
     def search(
         self,
@@ -5527,117 +5414,18 @@ class MemoryStore:
         min_confidence: float | None = None,
         filters: dict[str, Any] | None = None,
     ) -> list[MemoryRecord]:
-        bounded_limit = max(1, int(limit or 1))
-        clean_user = self._normalize_user_id(user_id or "default")
-        reasoning_filter = self._normalize_reasoning_layers_filter(reasoning_layers)
-        min_conf_filter = self._normalize_confidence(min_confidence, default=0.0) if min_confidence is not None else None
-        normalized_filters = self._normalize_retrieval_filters(filters)
-
-        if clean_user == "default" and not include_shared:
-            curated_rows = self._read_curated_facts()
-            curated_records = [
-                MemoryRecord(
-                    id=str(item.get("id", "")),
-                    text=str(item.get("text", "")).strip(),
-                    source=str(item.get("source", "curated")),
-                    created_at=str(item.get("created_at", "")),
-                    category=str(item.get("category", "context") or "context"),
-                    reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
-                    modality=str(item.get("modality", "text") or "text"),
-                    confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
-                    memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
-                    happened_at=str(item.get("happened_at", item.get("happenedAt", "")) or ""),
-                    metadata=self._normalize_memory_metadata(item.get("metadata", {})),
-                )
-                for item in curated_rows
-                if str(item.get("text", "")).strip()
-            ]
-            curated_importance = {str(item.get("id", "")): float(item.get("importance", 1.0)) for item in curated_rows}
-            curated_mentions = {str(item.get("id", "")): int(item.get("mentions", 1)) for item in curated_rows}
-            records = curated_records + self.all()
-            records = self._apply_retrieval_filters(records, normalized_filters)
-            if reasoning_filter:
-                records = [row for row in records if self._normalize_reasoning_layer(row.reasoning_layer) in reasoning_filter]
-            if min_conf_filter is not None:
-                records = [row for row in records if self._normalize_confidence(row.confidence, default=1.0) >= min_conf_filter]
-            return self._rank_records(
-                query,
-                records,
-                curated_importance=curated_importance,
-                curated_mentions=curated_mentions,
-                limit=bounded_limit,
-                semantic_enabled=self.semantic_enabled,
-                session_id=session_id,
-            )
-
-        user_scope = self._scope_paths(user_id=clean_user, shared=False)
-        self._ensure_scope_paths(user_scope)
-        curated_rows = self._read_curated_facts_from(user_scope["curated"])
-        curated_records = [
-                MemoryRecord(
-                    id=str(item.get("id", "")),
-                    text=str(item.get("text", "")).strip(),
-                    source=str(item.get("source", "curated")),
-                    created_at=str(item.get("created_at", "")),
-                    category=str(item.get("category", "context") or "context"),
-                    user_id=clean_user,
-                    reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
-                    modality=str(item.get("modality", "text") or "text"),
-                    confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
-                    decay_rate=self._normalize_decay_rate(item.get("decay_rate", item.get("decayRate", self._default_decay_rate(memory_type=item.get("memory_type", item.get("memoryType", "knowledge")))))),
-                    memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
-                    happened_at=str(item.get("happened_at", item.get("happenedAt", "")) or ""),
-                    metadata=self._normalize_memory_metadata(item.get("metadata", {})),
-                )
-                for item in curated_rows
-                if str(item.get("text", "")).strip()
-            ]
-        history_records = self._read_history_records_from(user_scope["history"])
-        records = curated_records + history_records
-        curated_importance = {str(item.get("id", "")): float(item.get("importance", 1.0)) for item in curated_rows}
-        curated_mentions = {str(item.get("id", "")): int(item.get("mentions", 1)) for item in curated_rows}
-
-        if include_shared and self.shared_opt_in(clean_user):
-            shared_scope = self._scope_paths(shared=True)
-            self._ensure_scope_paths(shared_scope)
-            shared_curated = self._read_curated_facts_from(shared_scope["curated"])
-            records.extend(
-                MemoryRecord(
-                    id=str(item.get("id", "")),
-                    text=str(item.get("text", "")).strip(),
-                    source=str(item.get("source", "curated:shared")),
-                    created_at=str(item.get("created_at", "")),
-                    category=str(item.get("category", "context") or "context"),
-                    user_id="shared",
-                    reasoning_layer=self._normalize_reasoning_layer(item.get("reasoning_layer", item.get("reasoningLayer", "fact"))),
-                    modality=str(item.get("modality", "text") or "text"),
-                    confidence=self._normalize_confidence(item.get("confidence", 1.0), default=1.0),
-                    decay_rate=self._normalize_decay_rate(item.get("decay_rate", item.get("decayRate", self._default_decay_rate(memory_type=item.get("memory_type", item.get("memoryType", "knowledge")))))),
-                    memory_type=self._normalize_memory_type(item.get("memory_type", item.get("memoryType", "knowledge"))),
-                    happened_at=str(item.get("happened_at", item.get("happenedAt", "")) or ""),
-                    metadata=self._normalize_memory_metadata(item.get("metadata", {})),
-                )
-                for item in shared_curated
-                if str(item.get("text", "")).strip()
-            )
-            records.extend(self._read_history_records_from(shared_scope["history"]))
-
-        records = self._apply_retrieval_filters(records, normalized_filters)
-        if reasoning_filter:
-            records = [row for row in records if self._normalize_reasoning_layer(row.reasoning_layer) in reasoning_filter]
-        if min_conf_filter is not None:
-            records = [row for row in records if self._normalize_confidence(row.confidence, default=1.0) >= min_conf_filter]
-        if session_id:
-            records = [row for row in records if self._working_episode_visible_in_session(row, session_id=session_id)]
-
-        return self._rank_records(
+        return _search_records_helper(
             query,
-            records,
-            curated_importance=curated_importance,
-            curated_mentions=curated_mentions,
-            limit=bounded_limit,
-            semantic_enabled=bool(self.semantic_enabled and bool(records)),
+            limit=limit,
+            user_id=user_id,
             session_id=session_id,
+            include_shared=include_shared,
+            reasoning_layers=reasoning_layers,
+            min_confidence=min_confidence,
+            filters=filters,
+            normalize_user_id=self._normalize_user_id,
+            collect_retrieval_records=self._collect_retrieval_records,
+            rank_records_fn=self._rank_records,
         )
 
     def _consolidate_in_scope(
