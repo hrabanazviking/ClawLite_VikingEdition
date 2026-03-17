@@ -23,9 +23,9 @@ class CronAPI(Protocol):
     ) -> str: ...
 
     def list_jobs(self, *, session_id: str) -> list[dict]: ...
-    def remove_job(self, job_id: str) -> bool: ...
-    def enable_job(self, job_id: str, *, enabled: bool) -> bool: ...
-    async def run_job(self, job_id: str, *, force: bool) -> str | None: ...
+    def remove_job(self, job_id: str, *, session_id: str | None = None) -> bool: ...
+    def enable_job(self, job_id: str, *, enabled: bool, session_id: str | None = None) -> bool: ...
+    async def run_job(self, job_id: str, *, force: bool, session_id: str | None = None) -> str | None: ...
 
 
 class CronTool(Tool):
@@ -64,7 +64,7 @@ class CronTool(Tool):
 
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
         action = str(arguments.get("action", "")).strip().lower()
-        session_id = str(arguments.get("session_id", "")).strip() or ctx.session_id
+        session_id = self._resolve_session_id(arguments, ctx)
 
         if action == "add":
             expression = self._resolve_expression(arguments)
@@ -104,9 +104,9 @@ class CronTool(Tool):
                 raise ValueError("job_id is required for action=remove")
             remove_job = self.api.remove_job
             if inspect.iscoroutinefunction(remove_job):
-                ok = await remove_job(job_id)
+                ok = await remove_job(job_id, session_id=session_id)
             else:
-                maybe_ok = await asyncio.to_thread(remove_job, job_id)
+                maybe_ok = await asyncio.to_thread(remove_job, job_id, session_id=session_id)
                 ok = await maybe_ok if inspect.isawaitable(maybe_ok) else maybe_ok
             return json.dumps({"ok": ok, "action": action, "job_id": job_id})
 
@@ -117,9 +117,9 @@ class CronTool(Tool):
             enabled = action == "enable"
             enable_job = self.api.enable_job
             if inspect.iscoroutinefunction(enable_job):
-                ok = await enable_job(job_id, enabled=enabled)
+                ok = await enable_job(job_id, enabled=enabled, session_id=session_id)
             else:
-                maybe_ok = await asyncio.to_thread(enable_job, job_id, enabled=enabled)
+                maybe_ok = await asyncio.to_thread(enable_job, job_id, enabled=enabled, session_id=session_id)
                 ok = await maybe_ok if inspect.isawaitable(maybe_ok) else maybe_ok
             return json.dumps({"ok": ok, "action": action, "job_id": job_id, "enabled": enabled})
 
@@ -129,7 +129,7 @@ class CronTool(Tool):
                 raise ValueError("job_id is required for action=run")
             force = self._coerce_bool(arguments.get("force"), default=True)
             try:
-                output = await self.api.run_job(job_id, force=force)
+                output = await self.api.run_job(job_id, force=force, session_id=session_id)
             except KeyError:
                 return json.dumps({"ok": False, "action": action, "job_id": job_id, "error": "job_not_found"})
             except RuntimeError as exc:
@@ -156,6 +156,13 @@ class CronTool(Tool):
         if at:
             return f"at {at}"
         return ""
+
+    @staticmethod
+    def _resolve_session_id(arguments: dict, ctx: ToolContext) -> str:
+        requested = str(arguments.get("session_id", "")).strip()
+        if requested and requested != ctx.session_id:
+            raise ValueError("session_id override is not allowed")
+        return requested or ctx.session_id
 
     @staticmethod
     def _coerce_bool(value: object, *, default: bool) -> bool:

@@ -10,6 +10,12 @@ Or locally:
 
 ```bash
 pip install -e .
+
+# Or install optional integrations up front
+pip install -e ".[browser,telegram,media]"
+
+# Browser runtime
+python -m playwright install chromium
 ```
 
 ## 2. Guided configure wizard

@@ -64,6 +64,29 @@ def test_cron_service_enable_disable_and_manual_run(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_cron_service_enforces_session_scope_for_mutations(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json")
+
+        async def _on_job(_job):
+            return "ran"
+
+        job_id = await service.add_job(session_id="s1", expression="every 60", prompt="owned")
+
+        assert service.get_job(job_id, session_id="s2") is None
+        assert service.enable_job(job_id, enabled=False, session_id="s2") is False
+        assert service.remove_job(job_id, session_id="s2") is False
+
+        with pytest.raises(KeyError):
+            await service.run_job(job_id, on_job=_on_job, force=True, session_id="s2")
+
+        assert service.get_job(job_id, session_id="s1") is not None
+        assert service.enable_job(job_id, enabled=False, session_id="s1") is True
+        assert service.get_job(job_id, session_id="s1").enabled is False
+
+    asyncio.run(_scenario())
+
+
 def test_cron_service_run_once_is_auto_removed_in_loop(tmp_path: Path) -> None:
     async def _scenario() -> None:
         service = CronService(tmp_path / "cron.json")
@@ -354,10 +377,14 @@ def test_cron_schedule_failure_isolated_per_job(monkeypatch, tmp_path: Path) -> 
             return "ok"
 
         bad_job_id = await service.add_job(session_id="s1", expression="every 9", prompt="bad", name="bad")
-        await service.add_job(session_id="s1", expression="every 1", prompt="ok", name="ok")
+        ok_job_id = await service.add_job(session_id="s1", expression="every 1", prompt="ok", name="ok")
         bad_job = service.get_job(bad_job_id)
+        ok_job = service.get_job(ok_job_id)
         assert bad_job is not None
+        assert ok_job is not None
         bad_job.next_run_iso = ""
+        ok_job.next_run_iso = (service._now() - timedelta(seconds=1)).isoformat()
+        service._save()
 
         original_compute_next = service._compute_next
 
@@ -627,3 +654,169 @@ def test_cron_loop_claim_path_does_not_block_event_loop(monkeypatch, tmp_path: P
         assert ticker_steps > 0
 
     asyncio.run(_scenario())
+
+
+def test_cron_loop_runs_due_jobs_concurrently_up_to_limit(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json", max_concurrent_jobs=2)
+        first_id = await service.add_job(session_id="s1", expression="every 60", prompt="one", name="one")
+        second_id = await service.add_job(session_id="s1", expression="every 60", prompt="two", name="two")
+
+        first = service.get_job(first_id)
+        second = service.get_job(second_id)
+        assert first is not None
+        assert second is not None
+        due_iso = (service._now() - timedelta(seconds=1)).isoformat()
+        first.next_run_iso = due_iso
+        second.next_run_iso = due_iso
+        service._save()
+
+        active = 0
+        max_active = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
+        state_lock = asyncio.Lock()
+
+        async def _on_job(_job):
+            nonlocal active, max_active
+            async with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active >= 2:
+                    started.set()
+            await release.wait()
+            async with state_lock:
+                active -= 1
+            return "ok"
+
+        await service.start(_on_job)
+        await asyncio.wait_for(started.wait(), timeout=4.0)
+        status_running = service.status()
+        assert status_running["active_jobs"] == 2
+        assert status_running["concurrency_limit"] == 2
+        assert status_running["max_active_jobs"] >= 2
+
+        release.set()
+
+        async def _wait_for_runs() -> None:
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while asyncio.get_running_loop().time() < deadline:
+                first_job = service.get_job(first_id)
+                second_job = service.get_job(second_id)
+                if (
+                    first_job is not None
+                    and second_job is not None
+                    and first_job.run_count >= 1
+                    and second_job.run_count >= 1
+                    and first_job.last_status == "success"
+                    and second_job.last_status == "success"
+                ):
+                    return
+                await asyncio.sleep(0.02)
+            raise AssertionError("timed out waiting for concurrent cron runs to commit")
+
+        await _wait_for_runs()
+        await service.stop()
+
+        assert max_active >= 2
+
+    asyncio.run(_scenario())
+
+
+def test_cron_manual_run_rejects_job_with_active_lease(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(tmp_path / "cron.json")
+        job_id = await service.add_job(session_id="s1", expression="every 60", prompt="lease-check", name="lease-check")
+        job = service.get_job(job_id)
+        assert job is not None
+        job.next_run_iso = (service._now() - timedelta(seconds=1)).isoformat()
+        service._save()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocking(_job):
+            entered.set()
+            await release.wait()
+            return "ok"
+
+        await service.start(_blocking)
+        await asyncio.wait_for(entered.wait(), timeout=4.0)
+
+        with pytest.raises(RuntimeError, match="cron_job_already_running"):
+            await service.run_job(job_id, on_job=_blocking, force=True)
+
+        release.set()
+        await asyncio.sleep(0.1)
+        await service.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_cron_cleanup_prunes_old_completed_jobs_and_expired_leases(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        service = CronService(
+            tmp_path / "cron.json",
+            completed_job_retention_seconds=30,
+        )
+        completed_id = await service.add_job(
+            session_id="s1",
+            expression="every 60",
+            prompt="completed",
+            name="completed",
+        )
+        leased_id = await service.add_job(
+            session_id="s1",
+            expression="every 60",
+            prompt="leased",
+            name="leased",
+        )
+
+        completed = service.get_job(completed_id)
+        leased = service.get_job(leased_id)
+        assert completed is not None
+        assert leased is not None
+
+        completed.enabled = False
+        completed.next_run_iso = ""
+        completed.last_status = "success"
+        completed.last_run_iso = (service._now() - timedelta(seconds=120)).isoformat()
+
+        leased.next_run_iso = (service._now() + timedelta(minutes=5)).isoformat()
+        leased.lease_token = "stale"
+        leased.lease_owner = "dead-instance"
+        leased.lease_claimed_iso = (service._now() - timedelta(minutes=2)).isoformat()
+        leased.lease_expires_iso = (service._now() - timedelta(minutes=1)).isoformat()
+        service._save()
+
+        changed = service._run_cleanup_pass()
+        status = service.status()
+        current = service.get_job(leased_id)
+
+        assert changed is True
+        assert service.get_job(completed_id) is None
+        assert current is not None
+        assert current.lease_token == ""
+        assert current.lease_owner == ""
+        assert current.lease_expires_iso == ""
+        assert status["cleanup_pruned_jobs"] >= 1
+        assert status["cleanup_cleared_expired_leases"] >= 1
+        assert status["last_cleanup_iso"]
+
+    asyncio.run(_scenario())
+
+
+def test_cron_load_recovers_corrupt_store(tmp_path: Path) -> None:
+    store = tmp_path / "cron.json"
+    store.write_text("{not-json", encoding="utf-8")
+
+    service = CronService(store)
+    status = service.status()
+    backups = sorted(tmp_path.glob("cron.corrupt-*.json"))
+
+    assert service.list_jobs() == []
+    assert status["load_failures"] >= 1
+    assert status["cleanup_recovered_corrupt_store"] >= 1
+    assert status["last_recovered_store_path"]
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "{not-json"

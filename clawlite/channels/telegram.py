@@ -7,14 +7,11 @@ import html
 import hashlib
 import hmac
 import json
-import math
 import os
-import random
 import re
 import secrets
 import time
 from collections import deque
-from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +20,66 @@ from typing import Any
 from loguru import logger
 
 from clawlite.channels.base import BaseChannel, cancel_task
+from clawlite.channels.telegram_dedupe import TelegramUpdateDedupeState
+from clawlite.channels.telegram_delivery import (
+    TelegramAuthCircuitBreaker,
+    TelegramCircuitOpenError,
+    TelegramRetryPolicy,
+    coerce_thread_id as _coerce_thread_id_value,
+    is_auth_failure as _is_auth_failure,
+    is_formatting_error as _is_formatting_error,
+    is_thread_not_found_error as _is_thread_not_found_error,
+    is_transient_failure as _is_transient_failure,
+    normalize_api_message_thread_id as _normalize_api_message_thread_id_value,
+    parse_target as _parse_target_value,
+    retry_after_delay_s as _retry_after_delay_s,
+    retry_delay_s as _retry_delay_s,
+    sync_auth_breaker_signal_transition as _sync_auth_breaker_signal_transition,
+    threadless_retry_allowed as _threadless_retry_allowed_value,
+    typing_key as _typing_key_value,
+    typing_task_is_active as _typing_task_is_active_value,
+)
+from clawlite.channels.telegram_aux_updates import extract_aux_update_event
+from clawlite.channels.telegram_inbound_dispatch import (
+    build_inbound_dispatch_state as _build_inbound_dispatch_state,
+)
+from clawlite.channels.telegram_inbound_message import (
+    extract_inbound_message_context as _extract_inbound_message_context,
+    select_inbound_message as _select_inbound_message,
+)
+from clawlite.channels.telegram_inbound_runtime import (
+    append_unique_text as _append_unique_text_row,
+    build_inbound_emit_payload as _build_inbound_emit_payload,
+    build_media_group_flush_payload as _build_media_group_flush_payload,
+    emit_payload_with_typing as _emit_payload_with_typing,
+    media_group_key as _media_group_key_value,
+    merge_media_counts as _merge_media_counts_value,
+)
+from clawlite.channels.telegram_interactions import (
+    callback_query_metadata as _callback_query_metadata,
+    extract_callback_query_payload as _extract_callback_query_payload,
+    extract_message_reaction_payload as _extract_message_reaction_payload,
+    message_reaction_metadata as _message_reaction_metadata,
+)
 from clawlite.channels.telegram_offset_store import TelegramOffsetStore
+from clawlite.channels.telegram_offset_runtime import TelegramOffsetRuntime
+from clawlite.channels.telegram_outbound import (
+    TelegramOutboundRuntime,
+    send_media_items as _send_media_items_impl,
+    send_text_chunks as _send_text_chunks_impl,
+)
 from clawlite.channels.telegram_pairing import TelegramPairingStore
+from clawlite.channels.telegram_status import (
+    telegram_operator_status_payload,
+    telegram_signals_payload,
+)
+from clawlite.channels.telegram_transport import (
+    TelegramWebhookActivationResult,
+    activate_webhook as _activate_webhook_transport,
+    delete_webhook as _delete_webhook_transport,
+    operator_refresh_summary as _operator_refresh_summary,
+    webhook_requested as _webhook_requested_transport,
+)
 from clawlite.config.schema import TelegramChannelConfig
 
 MAX_MESSAGE_LEN = 4000
@@ -55,207 +110,6 @@ TELEGRAM_ALLOWED_UPDATES = [
     "channel_post",
     "edited_channel_post",
 ]
-
-
-@dataclass(slots=True)
-class TelegramRetryPolicy:
-    max_attempts: int = 3
-    base_backoff_s: float = 0.35
-    max_backoff_s: float = 8.0
-    jitter_ratio: float = 0.2
-
-    def normalized(self) -> "TelegramRetryPolicy":
-        max_attempts = max(1, int(self.max_attempts))
-        base_backoff_s = max(0.0, float(self.base_backoff_s))
-        max_backoff_s = max(base_backoff_s, float(self.max_backoff_s))
-        jitter_ratio = min(0.9, max(0.0, float(self.jitter_ratio)))
-        return TelegramRetryPolicy(
-            max_attempts=max_attempts,
-            base_backoff_s=base_backoff_s,
-            max_backoff_s=max_backoff_s,
-            jitter_ratio=jitter_ratio,
-        )
-
-
-class TelegramCircuitOpenError(RuntimeError):
-    pass
-
-
-class TelegramAuthCircuitBreaker:
-    def __init__(self, *, failure_threshold: int = 1, cooldown_s: float = 60.0) -> None:
-        self.failure_threshold = max(1, int(failure_threshold))
-        self.cooldown_s = max(1.0, float(cooldown_s))
-        self._consecutive_failures = 0
-        self._open_until_monotonic: float | None = None
-
-    @property
-    def is_open(self) -> bool:
-        if self._open_until_monotonic is None:
-            return False
-        return time.monotonic() < self._open_until_monotonic
-
-    def on_success(self) -> None:
-        self._consecutive_failures = 0
-        self._open_until_monotonic = None
-
-    def on_auth_failure(self) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self.failure_threshold:
-            self._open_until_monotonic = time.monotonic() + self.cooldown_s
-
-
-def _status_code_from_exc(exc: Exception) -> int | None:
-    for attr in ("status_code", "error_code"):
-        value = getattr(exc, attr, None)
-        try:
-            if value is not None:
-                return int(value)
-        except (TypeError, ValueError):
-            pass
-
-    response = getattr(exc, "response", None)
-    if response is not None:
-        value = getattr(response, "status_code", None)
-        try:
-            if value is not None:
-                return int(value)
-        except (TypeError, ValueError):
-            pass
-    return None
-
-
-def _exception_text(exc: Exception) -> str:
-    return str(exc or "").strip().lower()
-
-
-def _is_auth_failure(exc: Exception) -> bool:
-    status_code = _status_code_from_exc(exc)
-    if status_code in {401, 403}:
-        return True
-    name = exc.__class__.__name__.lower()
-    return "unauthorized" in name or "forbidden" in name
-
-
-def _is_transient_failure(exc: Exception) -> bool:
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
-        return True
-
-    status_code = _status_code_from_exc(exc)
-    if status_code == 429:
-        return True
-
-    name = exc.__class__.__name__.lower()
-    if any(part in name for part in ("timeout", "network", "retryafter")):
-        return True
-
-    text = _exception_text(exc)
-    return any(
-        snippet in text
-        for snippet in (
-            "timed out",
-            "timeout",
-            "temporary failure",
-            "connection reset",
-            "too many requests",
-            "retry after",
-            "network",
-        )
-    )
-
-
-def _is_formatting_error(exc: Exception) -> bool:
-    if _status_code_from_exc(exc) != 400:
-        return False
-    text = _exception_text(exc)
-    return "can't parse entities" in text or "parse entities" in text
-
-
-def _is_thread_not_found_error(exc: Exception) -> bool:
-    status_code = _status_code_from_exc(exc)
-    if status_code not in {None, 400}:
-        return False
-    return "message thread not found" in _exception_text(exc)
-
-
-def _retry_delay_s(policy: TelegramRetryPolicy, attempt: int) -> float:
-    normalized = policy.normalized()
-    base = normalized.base_backoff_s * (2 ** max(0, int(attempt) - 1))
-    capped = min(base, normalized.max_backoff_s)
-    if capped <= 0:
-        return 0.0
-    jitter_span = capped * normalized.jitter_ratio
-    jitter = (random.random() * 2.0 - 1.0) * jitter_span
-    return max(0.0, capped + jitter)
-
-
-def _coerce_retry_after_seconds(value: Any) -> float | None:
-    if value is None:
-        return None
-    if hasattr(value, "total_seconds"):
-        try:
-            seconds = float(value.total_seconds())
-            if math.isfinite(seconds) and seconds > 0:
-                return seconds
-        except (TypeError, ValueError):
-            pass
-    try:
-        seconds = float(value)
-        if math.isfinite(seconds) and seconds > 0:
-            return seconds
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            seconds = float(text)
-            if math.isfinite(seconds) and seconds > 0:
-                return seconds
-        except ValueError:
-            pass
-        try:
-            when = parsedate_to_datetime(text)
-            if when.tzinfo is None:
-                return None
-            seconds = when.timestamp() - time.time()
-            if math.isfinite(seconds) and seconds > 0:
-                return seconds
-        except (TypeError, ValueError, IndexError):
-            return None
-    return None
-
-
-def _retry_after_delay_s(exc: Exception) -> float | None:
-    direct = _coerce_retry_after_seconds(getattr(exc, "retry_after", None))
-    if direct is not None:
-        return direct
-
-    parameters = getattr(exc, "parameters", None)
-    from_parameters = _coerce_retry_after_seconds(
-        getattr(parameters, "retry_after", None)
-    )
-    if from_parameters is not None:
-        return from_parameters
-
-    response = getattr(exc, "response", None)
-    if response is None:
-        return None
-
-    headers = getattr(response, "headers", None)
-    if headers is None and isinstance(response, dict):
-        headers = response.get("headers")
-    if headers is None:
-        return None
-
-    if hasattr(headers, "get"):
-        for key in ("retry-after", "Retry-After", "RETRY-AFTER"):
-            value = headers.get(key)
-            delay = _coerce_retry_after_seconds(value)
-            if delay is not None:
-                return delay
-    return None
-
 
 def split_message(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
     content = text or ""
@@ -550,6 +404,7 @@ class TelegramChannel(BaseChannel):
             token=self.token,
             state_path=self.offset_state_path,
         )
+        self._offset_runtime = TelegramOffsetRuntime(offset_store=self._offset_store)
         self._transcription_provider: Any | None = None
         self.callback_signing_enabled = bool(
             getattr(telegram_config, "callback_signing_enabled", False)
@@ -665,8 +520,10 @@ class TelegramChannel(BaseChannel):
             32,
             int(getattr(telegram_config, "update_dedupe_limit", 4096) or 4096),
         )
-        self._seen_update_keys: set[str] = set()
-        self._seen_update_order: deque[str] = deque()
+        self._update_dedupe = TelegramUpdateDedupeState(
+            state_path=self.dedupe_state_path,
+            limit=self._update_dedupe_limit,
+        )
         # In-flight set: prevents concurrent webhook workers from processing the
         # same update_id simultaneously (closes TOCTOU between check and commit).
         # Removed on failure so retries are allowed; only moved to _seen on success.
@@ -712,114 +569,40 @@ class TelegramChannel(BaseChannel):
         return f"telegram:{normalized_chat_id}"
 
     def _dedupe_state_payload(self) -> dict[str, Any]:
-        return {
-            "schema_version": 1,
-            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(
-                timespec="seconds"
-            ),
-            "keys": list(self._seen_update_order),
-        }
+        return self._update_dedupe.payload()
 
     def _load_update_dedupe_state(self) -> None:
-        path = self.dedupe_state_path
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return
-        if not path.exists():
-            return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            keys_raw = data.get("keys", []) if isinstance(data, dict) else []
-            if not isinstance(keys_raw, list):
-                return
-            normalized: deque[str] = deque(maxlen=self._update_dedupe_limit)
-            seen_local: set[str] = set()
-            for item in keys_raw:
-                key = str(item or "").strip()
-                if key.startswith("polling:") or key.startswith("webhook:"):
-                    _, _, maybe_key = key.partition(":")
-                    key = maybe_key.strip()
-                if not key or key in seen_local:
-                    continue
-                seen_local.add(key)
-                normalized.append(key)
-            self._seen_update_order = deque(normalized)
-            self._seen_update_keys = set(self._seen_update_order)
+            self._update_dedupe.load()
         except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
             self._signals["update_dedupe_state_load_error_count"] += 1
             logger.warning(
-                "telegram dedupe state load failed path={} error={}", path, exc
+                "telegram dedupe state load failed path={} error={}",
+                self.dedupe_state_path,
+                exc,
             )
 
     def _refresh_update_dedupe_state(self) -> None:
-        path = self.dedupe_state_path
         try:
-            if not path.exists():
-                return
-            data = json.loads(path.read_text(encoding="utf-8"))
-            keys_raw = data.get("keys", []) if isinstance(data, dict) else []
-            if not isinstance(keys_raw, list):
-                return
+            self._update_dedupe.refresh()
         except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
             self._signals["update_dedupe_state_load_error_count"] += 1
             logger.warning(
-                "telegram dedupe state refresh failed path={} error={}", path, exc
+                "telegram dedupe state refresh failed path={} error={}",
+                self.dedupe_state_path,
+                exc,
             )
-            return
-
-        changed = False
-        for item in keys_raw:
-            key = str(item or "").strip()
-            if key.startswith("polling:") or key.startswith("webhook:"):
-                _, _, maybe_key = key.partition(":")
-                key = maybe_key.strip()
-            if not key or key in self._seen_update_keys:
-                continue
-            self._seen_update_keys.add(key)
-            self._seen_update_order.append(key)
-            changed = True
-        if not changed:
-            return
-        while len(self._seen_update_order) > self._update_dedupe_limit:
-            oldest = self._seen_update_order.popleft()
-            self._seen_update_keys.discard(oldest)
 
     async def _persist_update_dedupe_state(self) -> None:
-        path = self.dedupe_state_path
-        tmp_path = path.with_suffix(f"{path.suffix}.tmp.{secrets.token_hex(4)}")
-        dir_fd: int | None = None
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = self._dedupe_state_payload()
-            encoded_payload = json.dumps(payload).encode("utf-8")
-            with tmp_path.open("wb") as handle:
-                handle.write(encoded_payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            try:
-                open_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                dir_fd = os.open(str(path.parent), open_flags)
-                os.fsync(dir_fd)
-            except OSError:
-                pass
+            self._update_dedupe.persist()
         except (OSError, TypeError, ValueError) as exc:
             self._signals["update_dedupe_state_save_error_count"] += 1
             logger.debug(
-                "telegram dedupe state persist failed path={} error={}", path, exc
+                "telegram dedupe state persist failed path={} error={}",
+                self.dedupe_state_path,
+                exc,
             )
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
-        finally:
-            if dir_fd is not None:
-                try:
-                    os.close(dir_fd)
-                except OSError:
-                    pass
 
     def _schedule_dedupe_state_persist(self) -> None:
         try:
@@ -892,93 +675,44 @@ class TelegramChannel(BaseChannel):
     ) -> None:
         seen_open_attr = f"_{key_prefix}_auth_breaker_seen_open"
         seen_open = bool(getattr(self, seen_open_attr, False))
-        is_open = breaker.is_open
-        if is_open:
-            setattr(self, seen_open_attr, True)
-            return
-        if seen_open:
-            self._signals[f"{key_prefix}_auth_breaker_close_count"] += 1
-            setattr(self, seen_open_attr, False)
+        setattr(
+            self,
+            seen_open_attr,
+            _sync_auth_breaker_signal_transition(
+                signals=self._signals,
+                breaker=breaker,
+                key_prefix=key_prefix,
+                seen_open=seen_open,
+            ),
+        )
 
     @staticmethod
     def _coerce_thread_id(value: Any) -> int | None:
-        if value is None:
-            return None
-        try:
-            thread_id = int(value)
-        except (TypeError, ValueError):
-            return None
-        return thread_id if thread_id > 0 else None
+        return _coerce_thread_id_value(value)
 
     @staticmethod
     def _parse_target(target: str) -> tuple[str, int | None]:
-        raw_target = str(target).strip()
-        if not raw_target:
-            return "", None
-        if raw_target.startswith("telegram:"):
-            payload = raw_target.split(":", 1)[1].strip()
-            if ":topic:" in payload:
-                chat_id, _, maybe_thread = payload.partition(":topic:")
-                return (
-                    chat_id.strip(),
-                    TelegramChannel._coerce_thread_id(maybe_thread.strip()),
-                )
-            if ":thread:" in payload:
-                chat_id, _, maybe_thread = payload.partition(":thread:")
-                return (
-                    chat_id.strip(),
-                    TelegramChannel._coerce_thread_id(maybe_thread.strip()),
-                )
-            raw_target = payload
-        elif raw_target.startswith("tg_"):
-            payload = raw_target[3:].strip()
-            if ":topic:" in payload:
-                chat_id, _, maybe_thread = payload.partition(":topic:")
-                return (
-                    chat_id.strip(),
-                    TelegramChannel._coerce_thread_id(maybe_thread.strip()),
-                )
-            if ":thread:" in payload:
-                chat_id, _, maybe_thread = payload.partition(":thread:")
-                return (
-                    chat_id.strip(),
-                    TelegramChannel._coerce_thread_id(maybe_thread.strip()),
-                )
-            raw_target = payload
-        chat_id, sep, maybe_thread = raw_target.partition(":")
-        if not sep:
-            return chat_id.strip(), None
-        thread_id = TelegramChannel._coerce_thread_id(maybe_thread.strip())
-        return chat_id.strip(), thread_id
+        return _parse_target_value(target)
 
     @staticmethod
     def _typing_key(*, chat_id: str, message_thread_id: int | None) -> str:
-        if message_thread_id is None:
-            return chat_id
-        return f"{chat_id}:{message_thread_id}"
+        return _typing_key_value(chat_id=chat_id, message_thread_id=message_thread_id)
 
     @staticmethod
     def _threadless_retry_allowed(*, chat_id: str) -> bool:
-        return not str(chat_id or "").strip().startswith("-")
+        return _threadless_retry_allowed_value(chat_id=chat_id)
 
     def _normalize_api_message_thread_id(
         self, *, chat_id: str, message_thread_id: Any
     ) -> int | None:
-        thread_id = self._coerce_thread_id(message_thread_id)
-        if thread_id is None:
-            return None
-        if str(chat_id or "").strip().startswith("-") and thread_id == 1:
-            return None
-        return thread_id
+        return _normalize_api_message_thread_id_value(
+            chat_id=chat_id,
+            message_thread_id=message_thread_id,
+        )
 
     @staticmethod
     def _typing_task_is_active(task: asyncio.Task[Any] | None) -> bool:
-        if task is None:
-            return False
-        cancelling = getattr(task, "cancelling", None)
-        if callable(cancelling) and cancelling() > 0:
-            return True
-        return not task.done()
+        return _typing_task_is_active_value(task)
 
     def _on_send_auth_failure(self) -> None:
         was_open = self._send_auth_breaker.is_open
@@ -1013,69 +747,42 @@ class TelegramChannel(BaseChannel):
         self._sync_auth_breaker_signal_transition(
             breaker=self._typing_auth_breaker, key_prefix="typing"
         )
-        offset_snapshot = self._offset_store.snapshot()
-        return {
-            **self._signals,
-            "send_auth_breaker_open": self._send_auth_breaker.is_open,
-            "typing_auth_breaker_open": self._typing_auth_breaker.is_open,
-            "typing_keepalive_active": len(self._typing_tasks),
-            "webhook_mode_active": self._webhook_mode_active,
-            "offset_next": offset_snapshot.next_offset,
-            "offset_watermark_update_id": offset_snapshot.safe_update_id,
-            "offset_highest_completed_update_id": offset_snapshot.highest_completed_update_id,
-            "offset_pending_count": offset_snapshot.pending_count,
-            "offset_min_pending_update_id": offset_snapshot.min_pending_update_id,
-        }
+        return telegram_signals_payload(
+            signals=self._signals,
+            send_auth_breaker_open=self._send_auth_breaker.is_open,
+            typing_auth_breaker_open=self._typing_auth_breaker.is_open,
+            typing_keepalive_active=len(self._typing_tasks),
+            webhook_mode_active=self._webhook_mode_active,
+            offset_snapshot=self._offset_store.snapshot(),
+        )
 
     def operator_status(self) -> dict[str, Any]:
         offset_snapshot = self._offset_store.snapshot()
         try:
             pending_requests = list(self._pairing_store.list_pending())
-            pairing_pending = len(pending_requests)
         except Exception as exc:
             logger.warning("telegram pairing pending snapshot failed error={}", exc)
             pending_requests = []
-            pairing_pending = 0
         try:
-            pairing_approved = len(self._pairing_store.approved_entries())
+            approved_entries = list(self._pairing_store.approved_entries())
         except Exception as exc:
             logger.warning("telegram pairing approved snapshot failed error={}", exc)
-            pairing_approved = 0
-        hints: list[str] = []
-        if self._webhook_requested() and not self.webhook_url:
-            hints.append("Webhook mode is requested but no webhook URL is configured.")
-        if self._webhook_requested() and not self._webhook_mode_active:
-            hints.append("Webhook mode is requested but not active; try refreshing Telegram transport.")
-        if offset_snapshot.pending_count > 0:
-            hints.append(
-                f"{offset_snapshot.pending_count} Telegram updates are still pending; replay inbound events or reconcile the next offset carefully."
-            )
-        if pairing_pending > 0:
-            hints.append(f"{pairing_pending} Telegram pairing request(s) are pending review.")
-        if self._last_error:
-            hints.append("Telegram recorded a transport error; inspect the error and consider refreshing transport state.")
-        return {
-            "mode": self.mode,
-            "webhook_requested": self._webhook_requested(),
-            "webhook_mode_active": self._webhook_mode_active,
-            "webhook_path": self.webhook_path,
-            "webhook_url_configured": bool(self.webhook_url),
-            "webhook_secret_configured": bool(self.webhook_secret),
-            "offset_path": str(self._offset_path()),
-            "offset_next": offset_snapshot.next_offset,
-            "offset_watermark_update_id": offset_snapshot.safe_update_id,
-            "offset_highest_completed_update_id": offset_snapshot.highest_completed_update_id,
-            "offset_pending_count": offset_snapshot.pending_count,
-            "offset_min_pending_update_id": offset_snapshot.min_pending_update_id,
-            "pairing_pending_count": pairing_pending,
-            "pairing_approved_count": pairing_approved,
-            "pairing_pending": pending_requests,
-            "pairing_approved": list(self._pairing_store.approved_entries()),
-            "connected": bool(self._connected),
-            "running": bool(self._running),
-            "last_error": str(self._last_error or ""),
-            "hints": hints,
-        }
+            approved_entries = []
+        return telegram_operator_status_payload(
+            mode=self.mode,
+            webhook_requested=self._webhook_requested(),
+            webhook_mode_active=self._webhook_mode_active,
+            webhook_path=self.webhook_path,
+            webhook_url_configured=bool(self.webhook_url),
+            webhook_secret_configured=bool(self.webhook_secret),
+            offset_path=str(self._offset_path()),
+            offset_snapshot=offset_snapshot,
+            pending_requests=pending_requests,
+            approved_entries=approved_entries,
+            connected=bool(self._connected),
+            running=bool(self._running),
+            last_error=str(self._last_error or ""),
+        )
 
     async def operator_approve_pairing(self, code: str) -> dict[str, Any]:
         normalized_code = str(code or "").strip().upper()
@@ -1135,8 +842,8 @@ class TelegramChannel(BaseChannel):
         normalized = self._coerce_update_id(next_offset)
         if normalized <= 0 and not allow_reset:
             return {"ok": False, "error": "allow_reset_required"}
-        snapshot = self._offset_store.sync_next_offset(normalized)
-        self._offset = snapshot.next_offset
+        _snapshot, resolved_offset, _advanced = self._offset_runtime.sync_next_offset(normalized)
+        self._offset = resolved_offset
         return {
             "ok": True,
             "next_offset": normalized,
@@ -1145,17 +852,13 @@ class TelegramChannel(BaseChannel):
         }
 
     async def operator_refresh_transport(self) -> dict[str, Any]:
-        summary: dict[str, Any] = {
-            "mode": self.mode,
-            "webhook_requested": self._webhook_requested(),
-            "offset_reloaded": False,
-            "webhook_deleted": False,
-            "webhook_activated": False,
-            "bot_initialized": False,
-            "connected": bool(self._connected),
-            "webhook_mode_active": bool(self._webhook_mode_active),
-            "last_error": "",
-        }
+        summary = _operator_refresh_summary(
+            mode=self.mode,
+            webhook_requested=self._webhook_requested(),
+            webhook_mode_active=self._webhook_mode_active,
+            connected=self._connected,
+            last_error="",
+        )
         try:
             self._load_offset()
             summary["offset_reloaded"] = True
@@ -1194,7 +897,10 @@ class TelegramChannel(BaseChannel):
         return mode
 
     def _webhook_requested(self) -> bool:
-        return self.mode == "webhook" or self.webhook_enabled
+        return _webhook_requested_transport(
+            mode=self.mode,
+            webhook_enabled=self.webhook_enabled,
+        )
 
     @staticmethod
     def _normalize_webhook_payload(value: Any) -> Any:
@@ -1446,7 +1152,7 @@ class TelegramChannel(BaseChannel):
         if not key:
             return False
         normalized_source = str(source or "").strip().lower() or "unknown"
-        if key in self._seen_update_keys:
+        if self._update_dedupe.contains(key):
             self._signals["update_duplicate_skip_count"] += 1
             if normalized_source == "webhook":
                 self._signals["webhook_update_duplicate_count"] += 1
@@ -1456,14 +1162,8 @@ class TelegramChannel(BaseChannel):
     def _commit_update_dedupe_key(
         self, dedupe_key: str, *, schedule_persist: bool = True
     ) -> None:
-        key = str(dedupe_key or "").strip()
-        if not key or key in self._seen_update_keys:
+        if not self._update_dedupe.commit(dedupe_key):
             return
-        self._seen_update_keys.add(key)
-        self._seen_update_order.append(key)
-        while len(self._seen_update_order) > self._update_dedupe_limit:
-            oldest = self._seen_update_order.popleft()
-            self._seen_update_keys.discard(oldest)
         if schedule_persist:
             self._schedule_dedupe_state_persist()
 
@@ -1487,86 +1187,70 @@ class TelegramChannel(BaseChannel):
     async def _ensure_bot(self) -> Any:
         if self.bot is not None:
             return self.bot
-        from telegram import (
-            Bot,
-        )  # lazy import for environments without dependency during tests
+        try:
+            from telegram import (
+                Bot,
+            )  # lazy import for environments without dependency during tests
+        except ImportError as exc:
+            raise RuntimeError(
+                'telegram dependency missing. Run: pip install "clawlite[telegram]"'
+            ) from exc
 
         self.bot = Bot(token=self.token)
         return self.bot
 
     async def _try_delete_webhook(self, *, reason: str) -> bool:
-        bot = self.bot
-        if bot is None or not hasattr(bot, "delete_webhook"):
-            return False
-        try:
-            await bot.delete_webhook(drop_pending_updates=False)
+        result = await _delete_webhook_transport(bot=self.bot)
+        if result.deleted:
             self._signals["webhook_delete_count"] += 1
-            logger.info("telegram webhook deleted reason={}", reason)
-            return True
-        except TypeError as exc:
-            if "drop_pending_updates" not in str(exc):
-                logger.warning(
-                    "telegram webhook delete failed reason={} error={}", reason, exc
-                )
-                return False
-            try:
-                await bot.delete_webhook()
-                self._signals["webhook_delete_count"] += 1
+            if result.legacy:
                 logger.info("telegram webhook deleted reason={} legacy=true", reason)
-                return True
-            except Exception as legacy_exc:  # pragma: no cover
-                logger.warning(
-                    "telegram webhook delete failed reason={} error={}",
-                    reason,
-                    legacy_exc,
-                )
-                return False
-        except Exception as exc:  # pragma: no cover
+            else:
+                logger.info("telegram webhook deleted reason={}", reason)
+            return True
+        if result.error:
             logger.warning(
-                "telegram webhook delete failed reason={} error={}", reason, exc
+                "telegram webhook delete failed reason={} error={}",
+                reason,
+                result.error,
             )
-            return False
+        return False
 
     async def _activate_webhook_mode(self) -> bool:
-        if not self.webhook_url or not self.webhook_secret:
-            missing = []
-            if not self.webhook_url:
-                missing.append("webhook_url")
-            if not self.webhook_secret:
-                missing.append("webhook_secret")
+        result: TelegramWebhookActivationResult = await _activate_webhook_transport(
+            ensure_bot=self._ensure_bot,
+            webhook_url=self.webhook_url,
+            webhook_secret=self.webhook_secret,
+            allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+        )
+        if result.missing:
             logger.warning(
-                "telegram webhook activation skipped missing={}", ",".join(missing)
+                "telegram webhook activation skipped missing={}",
+                ",".join(result.missing),
             )
             return False
-        try:
-            bot = await self._ensure_bot()
-        except Exception as exc:  # pragma: no cover
-            self._last_error = str(exc)
-            logger.warning("telegram webhook bot init failed error={}", exc)
+        if result.bot_init_error:
+            self._last_error = result.last_error
+            logger.warning("telegram webhook bot init failed error={}", result.last_error)
             return False
-        if not hasattr(bot, "set_webhook"):
+        if result.bot_missing_set_webhook:
             logger.warning(
                 "telegram webhook activation skipped reason=bot_missing_set_webhook"
             )
             return False
-        try:
-            await bot.set_webhook(
-                url=self.webhook_url,
-                secret_token=self.webhook_secret,
-                allowed_updates=TELEGRAM_ALLOWED_UPDATES,
-            )
+        if result.activated:
             self._signals["webhook_set_count"] += 1
-            self._connected = True
-            self._webhook_mode_active = True
+            self._connected = result.connected
+            self._webhook_mode_active = result.webhook_mode_active
             logger.info(
                 "telegram connected polling=false webhook=true path={}",
                 self.webhook_path,
             )
             return True
-        except Exception as exc:
-            self._last_error = str(exc)
-            logger.warning("telegram webhook activation failed error={}", exc)
-            return False
+        if result.last_error:
+            self._last_error = result.last_error
+            logger.warning("telegram webhook activation failed error={}", result.last_error)
+        return False
 
     def _remember_message_signature(
         self, *, msg_key: tuple[str, int], signature: str
@@ -2216,91 +1900,25 @@ class TelegramChannel(BaseChannel):
             text = "\n\n".join(part for part in (text, suffix) if part.strip())
         return text
 
-    @staticmethod
-    def _media_group_key(message: Any) -> str:
-        group_id = str(getattr(message, "media_group_id", "") or "").strip()
-        if not group_id:
-            return ""
-        chat_id = str(getattr(message, "chat_id", "") or "").strip()
-        if not chat_id:
-            return ""
-        return f"{chat_id}:{group_id}"
-
-    @staticmethod
-    def _merge_media_counts(target: dict[str, int], counts: dict[str, Any]) -> None:
-        for media_type, raw_count in dict(counts or {}).items():
-            normalized_type = str(media_type or "").strip().lower()
-            if not normalized_type:
-                continue
-            try:
-                count = max(0, int(raw_count or 0))
-            except (TypeError, ValueError):
-                continue
-            if count <= 0:
-                continue
-            target[normalized_type] = int(target.get(normalized_type, 0) or 0) + count
-
-    @staticmethod
-    def _append_unique_text(rows: list[str], text: str) -> None:
-        normalized = str(text or "").strip()
-        if not normalized:
-            return
-        if normalized in rows:
-            return
-        rows.append(normalized)
-
     async def _flush_media_group(self, group_key: str) -> None:
         try:
             await asyncio.sleep(MEDIA_GROUP_FLUSH_DELAY_S)
             buffer = self._media_group_buffers.pop(group_key, None)
             if not isinstance(buffer, dict):
                 return
-            texts = list(buffer.get("texts", []))
-            counts = dict(buffer.get("media_counts", {}))
-            media_types = sorted(counts.keys())
-            media_items = list(buffer.get("media_items", []))
-            if counts:
-                placeholder = self._build_media_placeholder(
-                    {"has_media": True, "counts": counts}
-                )
-                if placeholder and placeholder not in texts:
-                    texts.insert(0, placeholder)
-            combined_text = "\n\n".join(
-                text for text in texts if isinstance(text, str) and text.strip()
-            ).strip()
-            if not combined_text:
-                return
-            metadata = dict(buffer.get("metadata", {}))
-            metadata["text"] = combined_text
-            metadata["media_present"] = bool(counts)
-            metadata["media_types"] = media_types
-            metadata["media_counts"] = counts
-            metadata["media_total_count"] = int(sum(counts.values()))
-            metadata["media_items"] = media_items
-            metadata["media_group_id"] = str(buffer.get("media_group_id", "") or "")
-            metadata["message_ids"] = list(buffer.get("message_ids", []))
-            metadata["update_ids"] = list(buffer.get("update_ids", []))
-            metadata["media_group_message_count"] = len(metadata["message_ids"])
-            chat_id = str(metadata.get("chat_id", "") or "")
-            message_thread_id = self._coerce_thread_id(
-                metadata.get("message_thread_id")
+            emit_payload = _build_media_group_flush_payload(
+                buffer=buffer,
+                build_media_placeholder=self._build_media_placeholder,
+                coerce_thread_id=self._coerce_thread_id,
             )
-            if chat_id:
-                self._start_typing_keepalive(
-                    chat_id=chat_id, message_thread_id=message_thread_id
-                )
-            try:
-                await self.emit(
-                    session_id=str(buffer.get("session_id", "") or ""),
-                    user_id=str(buffer.get("user_id", "") or ""),
-                    text=combined_text,
-                    metadata=metadata,
-                )
-            finally:
-                if chat_id:
-                    await self._stop_typing_keepalive(
-                        chat_id=chat_id, message_thread_id=message_thread_id
-                    )
+            if emit_payload is None:
+                return
+            await _emit_payload_with_typing(
+                emit_payload,
+                start_typing=self._start_typing_keepalive,
+                stop_typing=self._stop_typing_keepalive,
+                emit=self.emit,
+            )
             self._signals["media_group_flush_count"] += 1
         finally:
             self._media_group_tasks.pop(group_key, None)
@@ -2315,7 +1933,7 @@ class TelegramChannel(BaseChannel):
         media_info: dict[str, Any],
         message: Any,
     ) -> bool:
-        group_key = self._media_group_key(message)
+        group_key = _media_group_key_value(message)
         if not group_key:
             return False
         group_id = str(getattr(message, "media_group_id", "") or "").strip()
@@ -2335,8 +1953,8 @@ class TelegramChannel(BaseChannel):
                 "metadata": dict(metadata),
             }
             self._media_group_buffers[group_key] = buffer
-        self._append_unique_text(buffer["texts"], text)
-        self._merge_media_counts(buffer["media_counts"], media_info.get("counts", {}))
+        _append_unique_text_row(buffer["texts"], text)
+        _merge_media_counts_value(buffer["media_counts"], media_info.get("counts", {}))
         for item in media_info.get("items", []):
             if isinstance(item, dict):
                 buffer["media_items"].append(dict(item))
@@ -2362,55 +1980,40 @@ class TelegramChannel(BaseChannel):
             buffer = self._media_group_buffers.pop(key, None)
             if not isinstance(buffer, dict):
                 continue
-            texts = list(buffer.get("texts", []))
-            counts = dict(buffer.get("media_counts", {}))
-            if counts:
-                placeholder = self._build_media_placeholder(
-                    {"has_media": True, "counts": counts}
-                )
-                if placeholder and placeholder not in texts:
-                    texts.insert(0, placeholder)
-            combined_text = "\n\n".join(
-                text for text in texts if isinstance(text, str) and text.strip()
-            ).strip()
-            if not combined_text:
+            emit_payload = _build_media_group_flush_payload(
+                buffer=buffer,
+                build_media_placeholder=self._build_media_placeholder,
+                coerce_thread_id=self._coerce_thread_id,
+            )
+            if emit_payload is None:
                 continue
-            metadata = dict(buffer.get("metadata", {}))
-            metadata["text"] = combined_text
-            metadata["media_present"] = bool(counts)
-            metadata["media_types"] = sorted(counts.keys())
-            metadata["media_counts"] = counts
-            metadata["media_total_count"] = int(sum(counts.values()))
-            metadata["media_items"] = list(buffer.get("media_items", []))
-            metadata["media_group_id"] = str(buffer.get("media_group_id", "") or "")
-            metadata["message_ids"] = list(buffer.get("message_ids", []))
-            metadata["update_ids"] = list(buffer.get("update_ids", []))
-            metadata["media_group_message_count"] = len(metadata["message_ids"])
             await self.emit(
-                session_id=str(buffer.get("session_id", "") or ""),
-                user_id=str(buffer.get("user_id", "") or ""),
-                text=combined_text,
-                metadata=metadata,
+                session_id=emit_payload.session_id,
+                user_id=emit_payload.user_id,
+                text=emit_payload.text,
+                metadata=emit_payload.metadata,
             )
             self._signals["media_group_flush_count"] += 1
 
     def _load_offset(self) -> int:
         try:
-            snapshot = self._offset_store.refresh_from_disk()
+            next_offset = self._offset_runtime.load()
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
             self._signals["offset_load_error_count"] += 1
             self._offset_store.reset_runtime_state()
+            self._offset_runtime.reset()
             logger.warning(
                 "telegram offset load failed path={} error={}",
                 self._offset_path(),
                 exc,
             )
             return 0
-        return self._apply_offset_snapshot(snapshot, count_signal=False)
+        self._offset = next_offset
+        return next_offset
 
     def _save_offset(self) -> None:
         try:
-            snapshot = self._offset_store.sync_next_offset(
+            _snapshot, next_offset, _advanced = self._offset_runtime.sync_next_offset(
                 max(0, int(self._offset or 0))
             )
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
@@ -2421,21 +2024,20 @@ class TelegramChannel(BaseChannel):
                 exc,
             )
             return
-        self._apply_offset_snapshot(snapshot, count_signal=False)
+        self._offset = next_offset
 
     def _apply_offset_snapshot(
         self, snapshot: Any, *, count_signal: bool = True
     ) -> int:
-        previous_offset = max(0, int(getattr(self, "_offset", 0) or 0))
-        next_offset = max(0, int(getattr(snapshot, "next_offset", 0) or 0))
-        if count_signal and next_offset > previous_offset:
+        next_offset, advanced = self._offset_runtime.apply_snapshot(snapshot)
+        if count_signal and advanced:
             self._signals["offset_safe_advance_count"] += 1
         self._offset = next_offset
         return next_offset
 
     def _persist_offset_operation(self, action: str, callback) -> Any:
         try:
-            snapshot = callback()
+            snapshot, next_offset, advanced = self._offset_runtime.persist_operation(callback)
         except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
             self._signals["offset_persist_error_count"] += 1
             logger.warning(
@@ -2445,14 +2047,13 @@ class TelegramChannel(BaseChannel):
                 exc,
             )
             raise
-        self._apply_offset_snapshot(snapshot)
+        if advanced:
+            self._signals["offset_safe_advance_count"] += 1
+        self._offset = next_offset
         return snapshot
 
     def _begin_safe_offset_update(self, update_id: int) -> None:
-        self._persist_offset_operation(
-            "begin",
-            lambda: self._offset_store.begin(update_id),
-        )
+        self._persist_offset_operation("begin", lambda: self._offset_store.begin(update_id))
 
     def _complete_safe_offset_update(
         self, update_id: int, *, tracked_pending: bool = True
@@ -2466,21 +2067,16 @@ class TelegramChannel(BaseChannel):
         )
 
     def _force_commit_offset_update(self, update_id: int) -> None:
-        self._persist_offset_operation(
-            "force_commit",
-            lambda: self._offset_store.force_commit(update_id),
-        )
+        self._persist_offset_operation("force_commit", lambda: self._offset_store.force_commit(update_id))
 
     def _is_stale_offset_update(self, update_id: int) -> bool:
-        return self._offset_store.is_safe_committed(update_id)
+        return self._offset_runtime.is_stale(update_id)
 
     def _should_begin_webhook_offset_tracking(self, update_id: int) -> bool:
-        return update_id == self._offset or self._offset_store.is_pending(update_id)
+        return self._offset_runtime.should_begin_webhook_tracking(update_id)
 
     def _webhook_offset_completion_policy(self, update_id: int) -> tuple[bool, bool]:
-        return True, bool(
-            self._offset_store.is_pending(update_id) or update_id == self._offset
-        )
+        return self._offset_runtime.webhook_completion_policy(update_id)
 
     @staticmethod
     def _metadata_user_id(value: Any) -> int | str:
@@ -2816,241 +2412,66 @@ class TelegramChannel(BaseChannel):
             self._signals["business_connection_received_count"] += 1
             return True
 
-        deleted_business_messages = getattr(item, "deleted_business_messages", None)
-        if deleted_business_messages is not None:
-            self._signals["deleted_business_messages_received_count"] += 1
-            deleted_chat = getattr(deleted_business_messages, "chat", None)
-            deleted_chat_id = str(
-                getattr(deleted_business_messages, "chat_id", "")
-                or getattr(deleted_chat, "id", "")
-                or ""
-            )
-            deleted_chat_type = str(getattr(deleted_chat, "type", "") or "")
-            deleted_message_ids = getattr(
-                deleted_business_messages, "message_ids", None
-            )
-            normalized_deleted_ids = (
-                [int(item_id) for item_id in deleted_message_ids]
-                if isinstance(deleted_message_ids, list)
-                else []
-            )
+        aux_update_event = extract_aux_update_event(item)
+        if aux_update_event is not None:
+            self._signals[aux_update_event.signal_key] += 1
             return await self._emit_aux_update_event(
                 item=item,
-                update_kind="deleted_business_messages",
-                chat_id=deleted_chat_id,
-                chat_type=deleted_chat_type,
-                user_id=deleted_chat_id,
-                username="",
-                text="[telegram deleted business messages]",
-                extra_metadata={
-                    "is_deleted_business_messages": True,
-                    "business_connection_id": str(
-                        getattr(deleted_business_messages, "business_connection_id", "")
-                        or ""
-                    ).strip(),
-                    "message_ids": normalized_deleted_ids,
-                },
+                update_kind=aux_update_event.update_kind,
+                chat_id=aux_update_event.chat_id,
+                chat_type=aux_update_event.chat_type,
+                user_id=aux_update_event.user_id,
+                username=aux_update_event.username,
+                text=aux_update_event.text,
+                extra_metadata=aux_update_event.extra_metadata,
                 authorize=False,
             )
 
-        message_reaction_count = getattr(item, "message_reaction_count", None)
-        if message_reaction_count is not None:
-            self._signals["message_reaction_count_received_count"] += 1
-            reaction_count_chat = getattr(message_reaction_count, "chat", None)
-            reaction_count_chat_id = str(
-                getattr(message_reaction_count, "chat_id", "")
-                or getattr(reaction_count_chat, "id", "")
-                or ""
-            )
-            reaction_count_chat_type = str(
-                getattr(reaction_count_chat, "type", "") or ""
-            )
-            try:
-                reaction_count_message_id = int(
-                    getattr(message_reaction_count, "message_id", 0) or 0
-                )
-            except (TypeError, ValueError):
-                reaction_count_message_id = 0
-            return await self._emit_aux_update_event(
-                item=item,
-                update_kind="message_reaction_count",
-                chat_id=reaction_count_chat_id,
-                chat_type=reaction_count_chat_type,
-                user_id=reaction_count_chat_id,
-                username="",
-                text="[telegram reaction count]",
-                extra_metadata={
-                    "is_message_reaction_count": True,
-                    "message_id": reaction_count_message_id,
-                },
-                authorize=False,
-            )
-
-        chat_boost = getattr(item, "chat_boost", None)
-        if chat_boost is not None:
-            self._signals["chat_boost_received_count"] += 1
-            boost_chat = getattr(chat_boost, "chat", None)
-            boost_row = getattr(chat_boost, "boost", None) or chat_boost
-            boost_source = getattr(boost_row, "source", None)
-            boost_user = getattr(boost_source, "user", None) or getattr(
-                boost_source, "from_user", None
-            )
-            boost_chat_id = str(
-                getattr(boost_chat, "id", "")
-                or getattr(chat_boost, "chat_id", "")
-                or ""
-            )
-            boost_chat_type = str(getattr(boost_chat, "type", "") or "")
-            boost_user_id = str(getattr(boost_user, "id", "") or boost_chat_id)
-            boost_username = str(getattr(boost_user, "username", "") or "").strip()
-            return await self._emit_aux_update_event(
-                item=item,
-                update_kind="chat_boost",
-                chat_id=boost_chat_id,
-                chat_type=boost_chat_type,
-                user_id=boost_user_id,
-                username=boost_username,
-                text="[telegram chat boost]",
-                extra_metadata={
-                    "is_chat_boost": True,
-                    "boost_id": str(getattr(boost_row, "boost_id", "") or "").strip(),
-                },
-                authorize=False,
-            )
-
-        removed_chat_boost = getattr(item, "removed_chat_boost", None)
-        if removed_chat_boost is not None:
-            self._signals["removed_chat_boost_received_count"] += 1
-            removed_chat = getattr(removed_chat_boost, "chat", None)
-            removed_boost = (
-                getattr(removed_chat_boost, "boost", None) or removed_chat_boost
-            )
-            removed_source = getattr(removed_boost, "source", None)
-            removed_user = getattr(removed_source, "user", None) or getattr(
-                removed_source, "from_user", None
-            )
-            removed_chat_id = str(
-                getattr(removed_chat, "id", "")
-                or getattr(removed_chat_boost, "chat_id", "")
-                or ""
-            )
-            removed_chat_type = str(getattr(removed_chat, "type", "") or "")
-            removed_user_id = str(getattr(removed_user, "id", "") or removed_chat_id)
-            removed_username = str(getattr(removed_user, "username", "") or "").strip()
-            return await self._emit_aux_update_event(
-                item=item,
-                update_kind="removed_chat_boost",
-                chat_id=removed_chat_id,
-                chat_type=removed_chat_type,
-                user_id=removed_user_id,
-                username=removed_username,
-                text="[telegram removed chat boost]",
-                extra_metadata={
-                    "is_removed_chat_boost": True,
-                    "boost_id": str(
-                        getattr(removed_boost, "boost_id", "") or ""
-                    ).strip(),
-                },
-                authorize=False,
-            )
-
-        purchased_paid_media = getattr(item, "purchased_paid_media", None)
-        if purchased_paid_media is not None:
-            self._signals["purchased_paid_media_received_count"] += 1
-            paid_media_chat = getattr(purchased_paid_media, "chat", None)
-            paid_media_user = getattr(
-                purchased_paid_media, "from_user", None
-            ) or getattr(purchased_paid_media, "user", None)
-            paid_media_chat_id = str(
-                getattr(purchased_paid_media, "chat_id", "")
-                or getattr(paid_media_chat, "id", "")
-                or ""
-            )
-            paid_media_chat_type = str(getattr(paid_media_chat, "type", "") or "")
-            paid_media_user_id = str(
-                getattr(paid_media_user, "id", "") or paid_media_chat_id
-            )
-            paid_media_username = str(
-                getattr(paid_media_user, "username", "") or ""
-            ).strip()
-            return await self._emit_aux_update_event(
-                item=item,
-                update_kind="purchased_paid_media",
-                chat_id=paid_media_chat_id,
-                chat_type=paid_media_chat_type,
-                user_id=paid_media_user_id,
-                username=paid_media_username,
-                text="[telegram purchased paid media]",
-                extra_metadata={
-                    "is_purchased_paid_media": True,
-                    "payload": str(
-                        getattr(purchased_paid_media, "payload", "") or ""
-                    ).strip(),
-                },
-                authorize=False,
-            )
-
-        callback_query = getattr(item, "callback_query", None)
-        if callback_query is not None:
+        callback_payload = _extract_callback_query_payload(
+            item,
+            coerce_thread_id=self._coerce_thread_id,
+        )
+        if callback_payload is not None:
             self._signals["callback_query_received_count"] += 1
-            callback_query_id = str(getattr(callback_query, "id", "") or "")
-            callback_data_raw = getattr(callback_query, "data", "")
-            callback_data = str(callback_data_raw or "")
-            callback_text = callback_data.strip() or "[telegram callback_query]"
-            callback_message = getattr(callback_query, "message", None)
-            callback_message_chat = getattr(callback_message, "chat", None)
-            callback_chat_type = str(getattr(callback_message_chat, "type", "") or "")
-            callback_chat_id = str(
-                getattr(callback_message, "chat_id", "")
-                or getattr(callback_message_chat, "id", "")
-                or ""
-            )
-            if not callback_chat_id:
+            if not callback_payload.chat_id:
                 logger.debug("telegram callback_query skipped reason=missing_chat_id")
                 return True
 
-            callback_from_user = getattr(callback_query, "from_user", None)
-            callback_user_id = str(
-                getattr(callback_from_user, "id", "") or callback_chat_id
-            )
-            callback_username = str(
-                getattr(callback_from_user, "username", "") or ""
-            ).strip()
-            callback_thread_id = self._coerce_thread_id(
-                getattr(callback_message, "message_thread_id", None)
-            )
+            callback_query = getattr(item, "callback_query", None)
+            callback_data = callback_payload.callback_data
+            callback_text = callback_payload.callback_text
 
             if (
                 self.bot is not None
-                and callback_query_id
+                and callback_payload.query_id
                 and hasattr(self.bot, "answer_callback_query")
             ):
                 try:
                     await self.bot.answer_callback_query(
-                        callback_query_id=callback_query_id
+                        callback_query_id=callback_payload.query_id
                     )
                 except Exception as exc:
                     self._signals["callback_query_ack_error_count"] += 1
                     logger.debug(
                         "telegram callback_query ack failed id={} chat={} error={}",
-                        callback_query_id,
-                        callback_chat_id,
+                        callback_payload.query_id,
+                        callback_payload.chat_id,
                         exc,
                     )
 
             if not self._authorize_inbound_context(
-                chat_type=callback_chat_type,
-                chat_id=callback_chat_id,
-                message_thread_id=callback_thread_id,
-                user_id=callback_user_id,
-                username=callback_username,
+                chat_type=callback_payload.chat_type,
+                chat_id=callback_payload.chat_id,
+                message_thread_id=callback_payload.thread_id,
+                user_id=callback_payload.user_id,
+                username=callback_payload.username,
             ):
                 self._signals["callback_query_blocked_count"] += 1
                 logger.debug(
                     "telegram callback_query blocked user={} chat={} id={}",
-                    callback_user_id,
-                    callback_chat_id,
-                    callback_query_id,
+                    callback_payload.user_id,
+                    callback_payload.chat_id,
+                    callback_payload.query_id,
                 )
                 return True
 
@@ -3076,89 +2497,49 @@ class TelegramChannel(BaseChannel):
                 self._signals["callback_query_signature_blocked_count"] += 1
                 logger.debug(
                     "telegram callback_query blocked signature chat={} id={} signed={} require_signed={}",
-                    callback_chat_id,
-                    callback_query_id,
+                    callback_payload.chat_id,
+                    callback_payload.query_id,
                     callback_signed,
                     self.callback_require_signed,
                 )
                 return True
 
             session_id = self._session_id_for_chat(
-                chat_id=callback_chat_id,
-                chat_type=callback_chat_type,
-                message_thread_id=callback_thread_id,
+                chat_id=callback_payload.chat_id,
+                chat_type=callback_payload.chat_type,
+                message_thread_id=callback_payload.thread_id,
             )
-            metadata: dict[str, Any] = {
-                "channel": "telegram",
-                "chat_id": callback_chat_id,
-                "chat_type": callback_chat_type,
-                "is_group": callback_chat_type != "private",
-                "update_kind": "callback_query",
-                "is_callback_query": True,
-                "callback_query_id": callback_query_id,
-                "callback_data": callback_data,
-                "callback_signed": callback_signed,
-                "callback_chat_instance": str(
-                    getattr(callback_query, "chat_instance", "") or ""
-                ),
-                "user_id": int(getattr(callback_from_user, "id", 0) or 0),
-                "username": callback_username,
-                "text": callback_text,
-                "update_id": int(getattr(item, "update_id", 0) or 0),
-            }
-            callback_message_id = getattr(callback_message, "message_id", None)
-            try:
-                callback_message_id_int = int(callback_message_id)
-            except (TypeError, ValueError):
-                callback_message_id_int = 0
-            if callback_message_id_int > 0:
-                metadata["message_id"] = callback_message_id_int
-
-            if callback_thread_id is not None:
-                metadata["message_thread_id"] = callback_thread_id
+            metadata = _callback_query_metadata(
+                payload=callback_payload,
+                callback_data=callback_data,
+                callback_signed=callback_signed,
+            )
 
             logger.info(
                 "telegram callback_query received chat={} user={} chars={} id={}",
-                callback_chat_id,
-                callback_user_id,
+                callback_payload.chat_id,
+                callback_payload.user_id,
                 len(callback_text),
-                callback_query_id,
+                callback_payload.query_id,
             )
             await self.emit(
                 session_id=session_id,
-                user_id=callback_user_id,
+                user_id=callback_payload.user_id,
                 text=callback_text,
                 metadata=metadata,
             )
             return True
 
-        message_reaction = getattr(item, "message_reaction", None)
-        if message_reaction is not None:
+        reaction_payload = _extract_message_reaction_payload(
+            item,
+            coerce_thread_id=self._coerce_thread_id,
+        )
+        if reaction_payload is not None:
             self._signals["message_reaction_received_count"] += 1
-            reaction_chat = getattr(message_reaction, "chat", None)
-            reaction_chat_type = str(getattr(reaction_chat, "type", "") or "")
-            chat_id = str(
-                getattr(message_reaction, "chat_id", "")
-                or getattr(reaction_chat, "id", "")
-                or ""
-            )
-            if not chat_id:
+            if not reaction_payload.chat_id:
                 return True
 
-            try:
-                message_id = int(getattr(message_reaction, "message_id", 0) or 0)
-            except (TypeError, ValueError):
-                message_id = 0
-
-            reactor = getattr(message_reaction, "user", None) or getattr(
-                message_reaction, "from_user", None
-            )
-            reactor_user_id = str(getattr(reactor, "id", "") or chat_id)
-            reactor_username = str(getattr(reactor, "username", "") or "").strip()
-            reaction_thread_id = self._coerce_thread_id(
-                getattr(message_reaction, "message_thread_id", None)
-            )
-            if bool(getattr(reactor, "is_bot", False)):
+            if reaction_payload.is_bot:
                 self._signals["message_reaction_ignored_bot_count"] += 1
                 return True
 
@@ -3168,129 +2549,76 @@ class TelegramChannel(BaseChannel):
 
             if self.reaction_notifications == "own":
                 if (
-                    message_id <= 0
-                    or (chat_id, message_id) not in self._own_sent_message_keys
+                    reaction_payload.message_id <= 0
+                    or (
+                        reaction_payload.chat_id,
+                        reaction_payload.message_id,
+                    )
+                    not in self._own_sent_message_keys
                 ):
                     self._signals["message_reaction_blocked_count"] += 1
                     return True
 
             if not self._authorize_inbound_context(
-                chat_type=reaction_chat_type,
-                chat_id=chat_id,
-                message_thread_id=reaction_thread_id,
-                user_id=reactor_user_id,
-                username=reactor_username,
+                chat_type=reaction_payload.chat_type,
+                chat_id=reaction_payload.chat_id,
+                message_thread_id=reaction_payload.thread_id,
+                user_id=reaction_payload.user_id,
+                username=reaction_payload.username,
             ):
                 self._signals["message_reaction_blocked_count"] += 1
                 return True
 
-            old_reaction = getattr(message_reaction, "old_reaction", None)
-            new_reaction = getattr(message_reaction, "new_reaction", None)
             reaction_added = self._added_reaction_tokens(
-                old_reaction=old_reaction, new_reaction=new_reaction
+                old_reaction=reaction_payload.old_reaction,
+                new_reaction=reaction_payload.new_reaction,
             )
             if not reaction_added:
                 return True
 
-            reaction_new_tokens = self._reaction_tokens(new_reaction)
-            reaction_old_tokens = self._reaction_tokens(old_reaction)
-            reaction_marker = " ".join(reaction_added)
-            reaction_text = f"[telegram reaction] {reaction_marker}".strip()
-            session_id = self._session_id_for_chat(
-                chat_id=chat_id,
-                chat_type=reaction_chat_type,
-                message_thread_id=reaction_thread_id,
+            reaction_new_tokens = self._reaction_tokens(reaction_payload.new_reaction)
+            reaction_old_tokens = self._reaction_tokens(reaction_payload.old_reaction)
+            reaction_text, metadata = _message_reaction_metadata(
+                payload=reaction_payload,
+                reaction_added=reaction_added,
+                reaction_new=reaction_new_tokens,
+                reaction_old=reaction_old_tokens,
             )
-            metadata = {
-                "channel": "telegram",
-                "chat_id": chat_id,
-                "chat_type": reaction_chat_type,
-                "is_group": reaction_chat_type != "private",
-                "update_kind": "message_reaction",
-                "is_message_reaction": True,
-                "message_id": message_id,
-                "user_id": reactor_user_id,
-                "username": reactor_username,
-                "reaction_added": reaction_added,
-                "reaction_new": reaction_new_tokens,
-                "reaction_old": reaction_old_tokens,
-                "update_id": int(getattr(item, "update_id", 0) or 0),
-                "text": reaction_text,
-            }
-            if reaction_thread_id is not None:
-                metadata["message_thread_id"] = reaction_thread_id
+            session_id = self._session_id_for_chat(
+                chat_id=reaction_payload.chat_id,
+                chat_type=reaction_payload.chat_type,
+                message_thread_id=reaction_payload.thread_id,
+            )
             await self.emit(
                 session_id=session_id,
-                user_id=reactor_user_id,
+                user_id=reaction_payload.user_id,
                 text=reaction_text,
                 metadata=metadata,
             )
             self._signals["message_reaction_emitted_count"] += 1
             return True
 
-        message = getattr(item, "message", None)
-        update_kind = "message"
-        is_edit = False
-        if message is None:
-            message = getattr(item, "edited_message", None)
-            is_edit = message is not None
-            if message is not None:
-                update_kind = "edited_message"
-        if message is None:
-            message = getattr(item, "business_message", None)
-            is_edit = False
-            if message is not None:
-                update_kind = "business_message"
-        if message is None:
-            message = getattr(item, "edited_business_message", None)
-            is_edit = message is not None
-            if message is not None:
-                update_kind = "edited_business_message"
-        if message is None:
-            message = getattr(item, "channel_post", None)
-            is_edit = False
-            if message is not None:
-                update_kind = "channel_post"
-        if message is None:
-            message = getattr(item, "edited_channel_post", None)
-            is_edit = message is not None
-            if message is not None:
-                update_kind = "edited_channel_post"
-        if message is None:
-            message = getattr(item, "effective_message", None)
-            is_edit = bool(
-                getattr(item, "edited_message", None)
-                or getattr(item, "edited_business_message", None)
-                or getattr(item, "edited_channel_post", None)
-            )
-            if message is not None:
-                update_kind = "effective_message"
-        if message is None:
+        inbound_update = _select_inbound_message(item)
+        if inbound_update is None:
             self._signals["unhandled_update_received_count"] += 1
             return True
+        message = inbound_update.message
+        update_kind = inbound_update.update_kind
+        is_edit = inbound_update.is_edit
 
         media_info = self._extract_media_info(message)
-        base_text = (
-            getattr(message, "text", "") or getattr(message, "caption", "") or ""
-        ).strip()
-
-        chat_id = str(getattr(message, "chat_id", "") or "")
-        message_thread_id = self._coerce_thread_id(
-            getattr(message, "message_thread_id", None)
+        message_context = _extract_inbound_message_context(
+            message,
+            coerce_thread_id=self._coerce_thread_id,
         )
-        if not chat_id:
+        if not message_context.chat_id:
             return True
-        user = getattr(message, "from_user", None)
-        chat = getattr(message, "chat", None)
-        chat_type = str(getattr(chat, "type", "") or "")
-        user_id = str(getattr(user, "id", "") or chat_id)
-        username = str(getattr(user, "username", "") or "").strip()
         auth_decision = self._authorization_decision(
-            chat_type=chat_type,
-            chat_id=chat_id,
-            message_thread_id=message_thread_id,
-            user_id=user_id,
-            username=username,
+            chat_type=message_context.chat_type,
+            chat_id=message_context.chat_id,
+            message_thread_id=message_context.thread_id,
+            user_id=message_context.user_id,
+            username=message_context.username,
         )
         if auth_decision == "allow":
             self._signals["policy_allowed_count"] += 1
@@ -3299,49 +2627,65 @@ class TelegramChannel(BaseChannel):
             if auth_decision == "pairing":
                 self._signals["pairing_required_count"] += 1
                 await self._handle_pairing_required(
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    username=username,
-                    first_name=str(getattr(user, "first_name", "") or "").strip(),
+                    chat_id=message_context.chat_id,
+                    user_id=message_context.user_id,
+                    username=message_context.username,
+                    first_name=message_context.first_name,
                 )
-            logger.debug("telegram inbound blocked user={} chat={}", user_id, chat_id)
+            logger.debug(
+                "telegram inbound blocked user={} chat={}",
+                message_context.user_id,
+                message_context.chat_id,
+            )
             return True
 
-        message_id = int(getattr(message, "message_id", 0) or 0)
         await self._download_media_items(
-            chat_id=chat_id, message_id=message_id, media_info=media_info
+            chat_id=message_context.chat_id,
+            message_id=message_context.message_id,
+            media_info=media_info,
         )
-        text = self._compose_inbound_text(base_text=base_text, media_info=media_info)
+        text = self._compose_inbound_text(
+            base_text=message_context.base_text,
+            media_info=media_info,
+        )
         if not text:
             return True
-        signature = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        msg_key = (chat_id, message_id)
-        previous_signature = self._message_signatures.get(msg_key)
-        if previous_signature == signature:
+        dispatch_state = _build_inbound_dispatch_state(
+            text=text,
+            chat_id=message_context.chat_id,
+            message_id=message_context.message_id,
+            parse_command=parse_command,
+            handle_commands=self.handle_commands,
+        )
+        previous_signature = self._message_signatures.get(dispatch_state.msg_key)
+        if previous_signature == dispatch_state.signature:
             logger.debug(
                 "telegram inbound duplicate skipped chat={} message_id={} is_edit={}",
-                chat_id,
-                message_id,
+                message_context.chat_id,
+                message_context.message_id,
                 is_edit,
             )
             return True
 
-        command, command_args = parse_command(text)
-        is_command = bool(command)
-        if is_command and self.handle_commands:
-            if command == "start":
-                await self._send_start_message(chat_id=chat_id)
-                self._remember_message_signature(msg_key=msg_key, signature=signature)
-                return True
-            if command == "help":
-                await self._send_help_message(chat_id=chat_id)
-                self._remember_message_signature(msg_key=msg_key, signature=signature)
-                return True
+        if dispatch_state.local_action == "start":
+            await self._send_start_message(chat_id=message_context.chat_id)
+            self._remember_message_signature(
+                msg_key=dispatch_state.msg_key,
+                signature=dispatch_state.signature,
+            )
+            return True
+        if dispatch_state.local_action == "help":
+            await self._send_help_message(chat_id=message_context.chat_id)
+            self._remember_message_signature(
+                msg_key=dispatch_state.msg_key,
+                signature=dispatch_state.signature,
+            )
+            return True
 
         session_id = self._session_id_for_chat(
-            chat_id=chat_id,
-            chat_type=chat_type,
-            message_thread_id=message_thread_id,
+            chat_id=message_context.chat_id,
+            chat_type=message_context.chat_type,
+            message_thread_id=message_context.thread_id,
         )
         metadata = self._build_metadata(
             item=item,
@@ -3349,44 +2693,51 @@ class TelegramChannel(BaseChannel):
             text=text,
             is_edit=is_edit,
             update_kind=update_kind,
-            command=command,
-            command_args=command_args,
+            command=dispatch_state.command,
+            command_args=dispatch_state.command_args,
             media_info=media_info,
         )
         if self._buffer_media_group_message(
             session_id=session_id,
-            user_id=user_id,
+            user_id=message_context.user_id,
             text=text,
             metadata=metadata,
             media_info=media_info,
             message=message,
         ):
-            self._remember_message_signature(msg_key=msg_key, signature=signature)
+            self._remember_message_signature(
+                msg_key=dispatch_state.msg_key,
+                signature=dispatch_state.signature,
+            )
             return True
         logger.info(
             "telegram inbound received chat={} user={} chars={} edit={} command={}",
-            chat_id,
-            user_id,
+            message_context.chat_id,
+            message_context.user_id,
             len(text),
             is_edit,
-            command or "",
+            dispatch_state.command or "",
         )
-        self._start_typing_keepalive(
-            chat_id=chat_id, message_thread_id=message_thread_id
+        emit_payload = _build_inbound_emit_payload(
+            session_id=session_id,
+            user_id=message_context.user_id,
+            text=text,
+            metadata=metadata,
+            coerce_thread_id=self._coerce_thread_id,
         )
         try:
-            await self.emit(
-                session_id=session_id, user_id=user_id, text=text, metadata=metadata
+            await _emit_payload_with_typing(
+                emit_payload,
+                start_typing=self._start_typing_keepalive,
+                stop_typing=self._stop_typing_keepalive,
+                emit=self.emit,
             )
         except Exception:
-            await self._stop_typing_keepalive(
-                chat_id=chat_id, message_thread_id=message_thread_id
-            )
             raise
-        await self._stop_typing_keepalive(
-            chat_id=chat_id, message_thread_id=message_thread_id
+        self._remember_message_signature(
+            msg_key=dispatch_state.msg_key,
+            signature=dispatch_state.signature,
         )
-        self._remember_message_signature(msg_key=msg_key, signature=signature)
         return True
 
     def _build_metadata(
@@ -3784,6 +3135,35 @@ class TelegramChannel(BaseChannel):
             raise ValueError(f"telegram:action_unsupported:{media_type}")
         return sender, payload_key
 
+    def _outbound_runtime(self) -> TelegramOutboundRuntime:
+        return TelegramOutboundRuntime(
+            bot=self.bot,
+            policy=self._send_retry_policy,
+            send_timeout_s=float(self.send_timeout_s),
+            send_auth_breaker=self._send_auth_breaker,
+            signals=self._signals,
+            split_message=split_message,
+            render_outbound_text=lambda text, *, parse_mode: self._render_outbound_text(
+                text,
+                parse_mode=parse_mode,
+            ),
+            normalize_api_message_thread_id=lambda *, chat_id, message_thread_id: self._normalize_api_message_thread_id(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+            ),
+            threadless_retry_allowed=lambda *, chat_id: self._threadless_retry_allowed(
+                chat_id=chat_id
+            ),
+            resolve_media_sender=self._resolve_media_sender,
+            resolve_outbound_media_payload=self._resolve_outbound_media_payload,
+            sync_auth_breaker_signal_transition=lambda *, breaker, key_prefix: self._sync_auth_breaker_signal_transition(
+                breaker=breaker,
+                key_prefix=key_prefix,
+            ),
+            on_send_auth_success=self._on_send_auth_success,
+            on_send_auth_failure=self._on_send_auth_failure,
+        )
+
     async def _send_text_chunks(
         self,
         *,
@@ -3795,120 +3175,16 @@ class TelegramChannel(BaseChannel):
         reply_markup: Any | None,
         message_ids: list[int],
     ) -> int:
-        chunks = split_message(text)
-        policy = self._send_retry_policy.normalized()
-
-        def _remember_message_id(result: Any) -> None:
-            if result is None:
-                return
-            raw_message_id = getattr(result, "message_id", None)
-            try:
-                message_id = int(raw_message_id)
-            except (TypeError, ValueError):
-                return
-            if message_id > 0:
-                message_ids.append(message_id)
-
-        for idx, chunk in enumerate(chunks, start=1):
-            payload_text, payload_parse_mode = self._render_outbound_text(
-                chunk, parse_mode=outbound_parse_mode
-            )
-            formatting_fallback_used = False
-
-            for attempt in range(1, policy.max_attempts + 1):
-                self._sync_auth_breaker_signal_transition(
-                    breaker=self._send_auth_breaker, key_prefix="send"
-                )
-                if self._send_auth_breaker.is_open:
-                    raise TelegramCircuitOpenError("telegram auth circuit is open")
-                active_thread_id = self._normalize_api_message_thread_id(
-                    chat_id=chat_id,
-                    message_thread_id=thread_state.get("message_thread_id"),
-                )
-                try:
-                    payload: dict[str, Any] = {
-                        "chat_id": chat_id,
-                        "text": payload_text,
-                        "parse_mode": payload_parse_mode,
-                        "reply_to_message_id": reply_to_message_id,
-                    }
-                    if reply_markup is not None:
-                        payload["reply_markup"] = reply_markup
-                    if active_thread_id is not None:
-                        payload["message_thread_id"] = active_thread_id
-                    send_result = await asyncio.wait_for(
-                        self.bot.send_message(**payload),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except TypeError as exc:
-                    if active_thread_id is None or "message_thread_id" not in str(exc):
-                        raise
-                    thread_state["message_thread_id"] = None
-                    send_result = await asyncio.wait_for(
-                        self.bot.send_message(
-                            chat_id=chat_id,
-                            text=payload_text,
-                            parse_mode=payload_parse_mode,
-                            reply_to_message_id=reply_to_message_id,
-                            reply_markup=reply_markup,
-                        ),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except Exception as exc:
-                    if (
-                        payload_parse_mode
-                        and not formatting_fallback_used
-                        and _is_formatting_error(exc)
-                    ):
-                        payload_text = chunk
-                        payload_parse_mode = None
-                        formatting_fallback_used = True
-                        continue
-                    if (
-                        active_thread_id is not None
-                        and self._threadless_retry_allowed(chat_id=chat_id)
-                        and _is_thread_not_found_error(exc)
-                    ):
-                        logger.warning(
-                            "telegram outbound thread not found chat={} chunk={}/{}; retrying without message_thread_id",
-                            chat_id,
-                            idx,
-                            len(chunks),
-                        )
-                        thread_state["message_thread_id"] = None
-                        continue
-
-                    if _is_auth_failure(exc):
-                        self._on_send_auth_failure()
-                        raise
-
-                    logger.error(
-                        "telegram outbound failed chat={} chunk={}/{} attempt={}/{} error={}",
-                        chat_id,
-                        idx,
-                        len(chunks),
-                        attempt,
-                        policy.max_attempts,
-                        exc,
-                    )
-                    if attempt >= policy.max_attempts or not _is_transient_failure(exc):
-                        raise
-
-                    self._signals["send_retry_count"] += 1
-                    delay_s = _retry_after_delay_s(exc)
-                    if delay_s is None:
-                        delay_s = _retry_delay_s(policy, attempt)
-                    else:
-                        self._signals["send_retry_after_count"] += 1
-                    if delay_s > 0:
-                        await asyncio.sleep(delay_s)
-        return len(chunks)
+        return await _send_text_chunks_impl(
+            runtime=self._outbound_runtime(),
+            chat_id=chat_id,
+            text=text,
+            outbound_parse_mode=outbound_parse_mode,
+            reply_to_message_id=reply_to_message_id,
+            thread_state=thread_state,
+            reply_markup=reply_markup,
+            message_ids=message_ids,
+        )
 
     async def _send_media_items(
         self,
@@ -3922,147 +3198,18 @@ class TelegramChannel(BaseChannel):
         reply_markup: Any | None,
         message_ids: list[int],
     ) -> int:
-        policy = self._send_retry_policy.normalized()
-        caption_index: int | None = None
-        if caption_text:
-            for idx, item in enumerate(items, start=1):
-                if self._media_type_supports_caption(
-                    str(item.get("type", "") or "").strip()
-                ):
-                    caption_index = idx
-                    break
-
-        def _remember_message_id(result: Any) -> None:
-            if result is None:
-                return
-            raw_message_id = getattr(result, "message_id", None)
-            try:
-                message_id = int(raw_message_id)
-            except (TypeError, ValueError):
-                return
-            if message_id > 0:
-                message_ids.append(message_id)
-
-        for idx, item in enumerate(items, start=1):
-            sender, payload_key = self._resolve_media_sender(
-                self.bot, str(item["type"])
-            )
-            raw_caption = caption_text if idx == caption_index else None
-            if raw_caption:
-                caption_payload, caption_parse_mode = self._render_outbound_text(
-                    raw_caption,
-                    parse_mode=outbound_parse_mode,
-                )
-            else:
-                caption_payload, caption_parse_mode = None, None
-            formatting_fallback_used = False
-
-            for attempt in range(1, policy.max_attempts + 1):
-                self._sync_auth_breaker_signal_transition(
-                    breaker=self._send_auth_breaker, key_prefix="send"
-                )
-                if self._send_auth_breaker.is_open:
-                    raise TelegramCircuitOpenError("telegram auth circuit is open")
-                active_thread_id = self._normalize_api_message_thread_id(
-                    chat_id=chat_id,
-                    message_thread_id=thread_state.get("message_thread_id"),
-                )
-                try:
-                    media_payload = await self._resolve_outbound_media_payload(item)
-                    payload: dict[str, Any] = {
-                        "chat_id": chat_id,
-                        payload_key: media_payload,
-                    }
-                    if idx == 1 and reply_to_message_id is not None:
-                        payload["reply_to_message_id"] = reply_to_message_id
-                    if idx == 1 and reply_markup is not None:
-                        payload["reply_markup"] = reply_markup
-                    if active_thread_id is not None:
-                        payload["message_thread_id"] = active_thread_id
-                    if caption_payload is not None:
-                        payload["caption"] = caption_payload
-                        payload["parse_mode"] = caption_parse_mode
-                    send_result = await asyncio.wait_for(
-                        sender(**payload),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except TypeError as exc:
-                    if active_thread_id is None or "message_thread_id" not in str(exc):
-                        raise
-                    thread_state["message_thread_id"] = None
-                    media_payload = await self._resolve_outbound_media_payload(item)
-                    payload = {
-                        "chat_id": chat_id,
-                        payload_key: media_payload,
-                    }
-                    if idx == 1 and reply_to_message_id is not None:
-                        payload["reply_to_message_id"] = reply_to_message_id
-                    if idx == 1 and reply_markup is not None:
-                        payload["reply_markup"] = reply_markup
-                    if caption_payload is not None:
-                        payload["caption"] = caption_payload
-                        payload["parse_mode"] = caption_parse_mode
-                    send_result = await asyncio.wait_for(
-                        sender(**payload),
-                        timeout=max(1.0, float(self.send_timeout_s)),
-                    )
-                    _remember_message_id(send_result)
-                    self._on_send_auth_success()
-                    break
-                except Exception as exc:
-                    if (
-                        caption_parse_mode
-                        and not formatting_fallback_used
-                        and _is_formatting_error(exc)
-                    ):
-                        caption_payload = raw_caption
-                        caption_parse_mode = None
-                        formatting_fallback_used = True
-                        continue
-                    if (
-                        active_thread_id is not None
-                        and self._threadless_retry_allowed(chat_id=chat_id)
-                        and _is_thread_not_found_error(exc)
-                    ):
-                        logger.warning(
-                            "telegram outbound media thread not found chat={} media={}/{} type={}; retrying without message_thread_id",
-                            chat_id,
-                            idx,
-                            len(items),
-                            item["type"],
-                        )
-                        thread_state["message_thread_id"] = None
-                        continue
-
-                    if _is_auth_failure(exc):
-                        self._on_send_auth_failure()
-                        raise
-
-                    logger.error(
-                        "telegram outbound media failed chat={} media={}/{} type={} attempt={}/{} error={}",
-                        chat_id,
-                        idx,
-                        len(items),
-                        item["type"],
-                        attempt,
-                        policy.max_attempts,
-                        exc,
-                    )
-                    if attempt >= policy.max_attempts or not _is_transient_failure(exc):
-                        raise
-
-                    self._signals["send_retry_count"] += 1
-                    delay_s = _retry_after_delay_s(exc)
-                    if delay_s is None:
-                        delay_s = _retry_delay_s(policy, attempt)
-                    else:
-                        self._signals["send_retry_after_count"] += 1
-                    if delay_s > 0:
-                        await asyncio.sleep(delay_s)
-        return len(items)
+        return await _send_media_items_impl(
+            runtime=self._outbound_runtime(),
+            chat_id=chat_id,
+            items=items,
+            caption_text=caption_text,
+            outbound_parse_mode=outbound_parse_mode,
+            reply_to_message_id=reply_to_message_id,
+            thread_state=thread_state,
+            reply_markup=reply_markup,
+            message_ids=message_ids,
+            media_type_supports_caption=self._media_type_supports_caption,
+        )
 
     async def _send_start_message(self, *, chat_id: str) -> None:
         await self.send(

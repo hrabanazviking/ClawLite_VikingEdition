@@ -43,6 +43,7 @@ class JobQueue:
         # heap: (-priority, created_at, job_id)
         self._pending: list[tuple[int, str, str]] = []
         self._workers: list[asyncio.Task] = []
+        self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._worker_fn: WorkerFn | None = None
         self._custom: dict[str, WorkerFn] = {}
         self._running = False
@@ -85,11 +86,19 @@ class JobQueue:
             self._new_job.set()
         return job
 
-    def status(self, job_id: str) -> Job | None:
-        return self._jobs.get(job_id)
-
-    def cancel(self, job_id: str) -> bool:
+    def _owned_job(self, job_id: str, *, session_id: str | None = None) -> Job | None:
         job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if session_id is not None and job.session_id != session_id:
+            return None
+        return job
+
+    def status(self, job_id: str, *, session_id: str | None = None) -> Job | None:
+        return self._owned_job(job_id, session_id=session_id)
+
+    def cancel(self, job_id: str, *, session_id: str | None = None) -> bool:
+        job = self._owned_job(job_id, session_id=session_id)
         if job is None:
             return False
         if job.status == "queued":
@@ -103,6 +112,9 @@ class JobQueue:
             return True
         if job.status == "running":
             job.cancellation_requested = True
+            task = self._running_tasks.get(job.id)
+            if task is not None and not task.done():
+                task.cancel()
             return True
         return False
 
@@ -173,11 +185,26 @@ class JobQueue:
                 self._journal.save(job)
             except Exception:
                 pass
+        if job.cancellation_requested:
+            job.status = "cancelled"
+            job.finished_at = _utc_now()
+            if self._journal:
+                try:
+                    self._journal.save(job)
+                except Exception:
+                    pass
+            return
         try:
             fn = self._resolve_worker(job)
-            result = await fn(job)
+            task = asyncio.create_task(fn(job))
+            self._running_tasks[job.id] = task
+            result = await task
             job.status = "done"
             job.result = str(result)
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            job.result = ""
+            job.error = ""
         except Exception as exc:
             if job.retry_count < job.max_retries:
                 job.retry_count += 1
@@ -190,6 +217,8 @@ class JobQueue:
             else:
                 job.status = "failed"
                 job.error = str(exc)
+        finally:
+            self._running_tasks.pop(job.id, None)
         job.finished_at = _utc_now() if job.status in ("done", "failed", "cancelled") else ""
         if self._journal:
             try:

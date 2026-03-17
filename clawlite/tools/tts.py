@@ -29,7 +29,7 @@ class TTSTool(Tool):
         try:
             import edge_tts
         except ImportError:
-            return "error: edge-tts not installed"
+            return 'error: edge-tts not installed. Run: pip install "clawlite[media]"'
         text = str(arguments.get("text", "") or "").strip()[:5000]
         if not text: return "error: text is required"
         voice = str(arguments.get("voice", self.default_voice) or self.default_voice).strip()

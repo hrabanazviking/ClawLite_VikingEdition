@@ -25,6 +25,35 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from clawlite.core.memory_backend import MemoryBackend, resolve_memory_backend
+from clawlite.core.memory_maintenance import (
+    consolidate_categories as _consolidate_categories,
+    periodic_task_loop as _periodic_task_loop,
+    purge_decayed_records as _purge_decayed_records,
+    start_periodic_task as _start_periodic_task,
+    stop_periodic_task as _stop_periodic_task,
+)
+from clawlite.core.memory_quality import (
+    merge_quality_tuning_state as _merge_quality_tuning_state,
+    normalize_quality_tuning_state as _normalize_quality_tuning_state,
+    quality_state_snapshot as _quality_state_snapshot,
+    update_quality_state as _update_quality_state,
+    update_quality_tuning_state as _update_quality_tuning_state,
+)
+from clawlite.core.memory_reporting import (
+    build_memory_analysis_stats as _build_memory_analysis_stats,
+    build_memory_diagnostics as _build_memory_diagnostics,
+)
+from clawlite.core.memory_versions import (
+    checkout_memory_branch as _checkout_memory_branch,
+    create_memory_branch as _create_memory_branch,
+    diff_memory_versions as _diff_memory_versions,
+    export_memory_payload as _export_memory_payload,
+    import_memory_payload as _import_memory_payload,
+    list_memory_branches as _list_memory_branches,
+    merge_memory_branches as _merge_memory_branches,
+    rollback_memory_version as _rollback_memory_version,
+    write_snapshot_payload as _write_snapshot_payload_helper,
+)
 
 try:
     from rank_bm25 import BM25Okapi
@@ -1258,20 +1287,12 @@ class MemoryStore:
         }
 
     def quality_state_snapshot(self) -> dict[str, Any]:
-        payload = self._load_json_dict(self.quality_state_path, self._default_quality_state())
-        history_raw = payload.get("history", [])
-        history = history_raw if isinstance(history_raw, list) else []
-        baseline = payload.get("baseline", {}) if isinstance(payload.get("baseline", {}), dict) else {}
-        current = payload.get("current", {}) if isinstance(payload.get("current", {}), dict) else {}
-        tuning = self._normalize_quality_tuning_state(payload.get("tuning", {}))
-        return {
-            "version": 1,
-            "updated_at": str(payload.get("updated_at", "") or ""),
-            "baseline": baseline,
-            "current": current,
-            "history": history,
-            "tuning": tuning,
-        }
+        return _quality_state_snapshot(
+            quality_state_path=self.quality_state_path,
+            load_json_dict=self._load_json_dict,
+            default_quality_state=self._default_quality_state,
+            normalize_quality_tuning_state=self._normalize_quality_tuning_state,
+        )
 
     @staticmethod
     def _quality_mode_from_state(score: int, drift: str, degrading_streak: int, last_error: str, *, has_report: bool) -> tuple[str, str]:
@@ -1461,94 +1482,30 @@ class MemoryStore:
         )
 
     def _normalize_quality_tuning_state(self, raw: Any) -> dict[str, Any]:
-        payload = dict(raw) if isinstance(raw, dict) else {}
-        defaults = self._default_quality_tuning_state()
-        recent_actions_raw = payload.get("recent_actions", payload.get("recentActions", defaults["recent_actions"]))
-        if not isinstance(recent_actions_raw, list):
-            recent_actions_raw = []
-
-        normalized_recent_actions: list[dict[str, Any]] = []
-        for row in recent_actions_raw:
-            if isinstance(row, dict):
-                entry = dict(row)
-                for key in ("action", "status", "reason", "at"):
-                    if key in entry:
-                        entry[key] = str(entry.get(key, "") or "")
-                normalized_recent_actions.append(entry)
-            elif row is not None:
-                normalized_recent_actions.append({"action": str(row)})
-
-        return {
-            "degrading_streak": self._quality_int(payload.get("degrading_streak", defaults["degrading_streak"])),
-            "last_action": str(payload.get("last_action", defaults["last_action"]) or ""),
-            "last_action_at": str(payload.get("last_action_at", defaults["last_action_at"]) or ""),
-            "last_action_status": str(payload.get("last_action_status", defaults["last_action_status"]) or ""),
-            "last_reason": str(payload.get("last_reason", defaults["last_reason"]) or ""),
-            "next_run_at": str(payload.get("next_run_at", defaults["next_run_at"]) or ""),
-            "last_run_at": str(payload.get("last_run_at", defaults["last_run_at"]) or ""),
-            "last_error": str(payload.get("last_error", defaults["last_error"]) or ""),
-            "recent_actions": normalized_recent_actions[-self._MAX_QUALITY_TUNING_RECENT_ACTIONS :],
-        }
+        return _normalize_quality_tuning_state(
+            raw=raw,
+            default_quality_tuning_state=self._default_quality_tuning_state,
+            quality_int=self._quality_int,
+            max_recent_actions=self._MAX_QUALITY_TUNING_RECENT_ACTIONS,
+        )
 
     def _merge_quality_tuning_state(self, current: Any, patch: Any) -> dict[str, Any]:
-        merged = self._normalize_quality_tuning_state(current)
-        payload = dict(patch) if isinstance(patch, dict) else {}
-        if not payload:
-            return merged
-
-        for key in (
-            "degrading_streak",
-            "last_action",
-            "last_action_at",
-            "last_action_status",
-            "last_reason",
-            "next_run_at",
-            "last_run_at",
-            "last_error",
-        ):
-            if key not in payload:
-                continue
-            if key == "degrading_streak":
-                merged[key] = self._quality_int(payload.get(key), minimum=0, default=int(merged.get(key, 0) or 0))
-            else:
-                merged[key] = str(payload.get(key, "") or "")
-
-        if "recentActions" in payload and "recent_actions" not in payload:
-            recent_patch_raw = payload.get("recentActions")
-        else:
-            recent_patch_raw = payload.get("recent_actions")
-
-        if isinstance(recent_patch_raw, list):
-            merged["recent_actions"] = self._normalize_quality_tuning_state(
-                {"recent_actions": list(merged.get("recent_actions", [])) + list(recent_patch_raw)}
-            )["recent_actions"]
-        elif isinstance(recent_patch_raw, dict):
-            merged["recent_actions"] = self._normalize_quality_tuning_state(
-                {"recent_actions": list(merged.get("recent_actions", [])) + [recent_patch_raw]}
-            )["recent_actions"]
-
-        return merged
+        return _merge_quality_tuning_state(
+            current=current,
+            patch=patch,
+            normalize_quality_tuning_state=self._normalize_quality_tuning_state,
+            quality_int=self._quality_int,
+        )
 
     def update_quality_tuning_state(self, tuning_patch: dict[str, Any] | None = None) -> dict[str, Any]:
-        previous_state = self.quality_state_snapshot()
-        tuning = self._merge_quality_tuning_state(previous_state.get("tuning", {}), tuning_patch)
-        updated_at = str(previous_state.get("updated_at", "") or self._utcnow_iso())
-        if isinstance(tuning_patch, dict) and tuning_patch:
-            updated_at = self._utcnow_iso()
-
-        state = {
-            "version": 1,
-            "updated_at": updated_at,
-            "baseline": previous_state.get("baseline", {}),
-            "current": previous_state.get("current", {}),
-            "history": previous_state.get("history", []),
-            "tuning": tuning,
-        }
-        self._atomic_write_text_locked(
-            self.quality_state_path,
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        return _update_quality_tuning_state(
+            previous_state=self.quality_state_snapshot(),
+            tuning_patch=tuning_patch,
+            merge_quality_tuning_state=self._merge_quality_tuning_state,
+            utcnow_iso=self._utcnow_iso,
+            atomic_write_text_locked=self._atomic_write_text_locked,
+            quality_state_path=self.quality_state_path,
         )
-        return tuning
 
     def update_quality_state(
         self,
@@ -1561,200 +1518,24 @@ class MemoryStore:
         sampled_at: str = "",
         tuning_patch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        previous_state = self.quality_state_snapshot()
-        previous = previous_state.get("current", {}) if isinstance(previous_state.get("current", {}), dict) else {}
-
-        retrieval_raw = retrieval_metrics if isinstance(retrieval_metrics, dict) else {}
-        turn_raw = turn_stability_metrics if isinstance(turn_stability_metrics, dict) else {}
-        semantic_raw = semantic_metrics if isinstance(semantic_metrics, dict) else {}
-        reasoning_raw = reasoning_layer_metrics if isinstance(reasoning_layer_metrics, dict) else {}
-
-        attempts = self._quality_int(retrieval_raw.get("attempts"))
-        hits = self._quality_int(retrieval_raw.get("hits"))
-        rewrites = self._quality_int(retrieval_raw.get("rewrites"))
-        if hits > attempts:
-            hits = attempts
-        hit_rate = self._quality_float((float(hits) / float(attempts)) if attempts else retrieval_raw.get("hit_rate", 0.0))
-
-        turn_successes = self._quality_int(turn_raw.get("successes"))
-        turn_errors = self._quality_int(turn_raw.get("errors"))
-        turn_total = turn_successes + turn_errors
-        success_rate = self._quality_float(
-            (float(turn_successes) / float(turn_total)) if turn_total else turn_raw.get("success_rate", 1.0),
-            default=1.0,
+        return _update_quality_state(
+            previous_state=self.quality_state_snapshot(),
+            retrieval_metrics=retrieval_metrics,
+            turn_stability_metrics=turn_stability_metrics,
+            semantic_metrics=semantic_metrics,
+            reasoning_layer_metrics=reasoning_layer_metrics,
+            gateway_metrics=gateway_metrics,
+            sampled_at=sampled_at,
+            tuning_patch=tuning_patch,
+            quality_int=self._quality_int,
+            quality_float=self._quality_float,
+            quality_reasoning_metrics_payload=self._quality_reasoning_metrics_payload,
+            merge_quality_tuning_state=self._merge_quality_tuning_state,
+            utcnow_iso=self._utcnow_iso,
+            atomic_write_text_locked=self._atomic_write_text_locked,
+            quality_state_path=self.quality_state_path,
+            max_quality_history=self._MAX_QUALITY_HISTORY,
         )
-        error_rate = self._quality_float(1.0 - success_rate)
-
-        semantic_coverage = self._quality_float(semantic_raw.get("coverage_ratio", 0.0))
-        reasoning_payload = self._quality_reasoning_metrics_payload(reasoning_raw)
-
-        reasoning_present = bool(
-            reasoning_payload["provided"]
-            and (reasoning_payload["has_distribution_signal"] or reasoning_payload["has_confidence_signal"])
-        )
-        confidence_average = float(reasoning_payload["confidence"]["average"])
-        if not bool(reasoning_payload["has_confidence_signal"]):
-            confidence_average = 0.5
-        balance_score = float(reasoning_payload["balance_score"])
-        weakest_ratio = float(reasoning_payload["weakest_ratio"])
-        imbalance_penalty = 0.0
-        if reasoning_present and weakest_ratio < 0.12:
-            imbalance_penalty = min(1.0, (0.12 - weakest_ratio) / 0.12)
-
-        reasoning_adjustment = 0.0
-        if reasoning_present:
-            reasoning_adjustment = ((balance_score - 0.5) * 3.0) + ((confidence_average - 0.5) * 3.0) - (imbalance_penalty * 2.0)
-            reasoning_adjustment = max(-6.0, min(6.0, reasoning_adjustment))
-
-        score_float = (hit_rate * 55.0) + (success_rate * 30.0) + (semantic_coverage * 15.0) + reasoning_adjustment
-        score = self._quality_int(round(score_float), minimum=0)
-        if score > 100:
-            score = 100
-
-        previous_score = self._quality_int(previous.get("score", 0))
-        previous_hit_rate = self._quality_float(previous.get("retrieval", {}).get("hit_rate", 0.0)) if isinstance(previous.get("retrieval", {}), dict) else 0.0
-
-        baseline_payload = previous_state.get("baseline", {}) if isinstance(previous_state.get("baseline", {}), dict) else {}
-        baseline_score = self._quality_int(baseline_payload.get("score", score), default=score)
-        baseline_hit_rate = (
-            self._quality_float(baseline_payload.get("retrieval", {}).get("hit_rate", hit_rate))
-            if isinstance(baseline_payload.get("retrieval", {}), dict)
-            else hit_rate
-        )
-
-        score_delta_prev = score - previous_score
-        score_delta_baseline = score - baseline_score
-        hit_rate_delta_prev = round(hit_rate - previous_hit_rate, 6)
-        hit_rate_delta_baseline = round(hit_rate - baseline_hit_rate, 6)
-
-        previous_reasoning = previous.get("reasoning_layers", {}) if isinstance(previous.get("reasoning_layers", {}), dict) else {}
-        previous_balance = self._quality_float(previous_reasoning.get("balance_score", balance_score), default=balance_score)
-        previous_confidence_payload = previous_reasoning.get("confidence", {}) if isinstance(previous_reasoning.get("confidence", {}), dict) else {}
-        previous_confidence_average = self._quality_float(
-            previous_confidence_payload.get("average", confidence_average),
-            default=confidence_average,
-        )
-        previous_weakest_ratio = self._quality_float(previous_reasoning.get("weakest_ratio", weakest_ratio), default=weakest_ratio)
-
-        reasoning_balance_delta = round(balance_score - previous_balance, 6) if reasoning_present and bool(previous) else 0.0
-        reasoning_confidence_delta = (
-            round(confidence_average - previous_confidence_average, 6) if reasoning_present and bool(previous) else 0.0
-        )
-        reasoning_weakest_ratio_delta = (
-            round(weakest_ratio - previous_weakest_ratio, 6) if reasoning_present and bool(previous) else 0.0
-        )
-
-        reasoning_degrading = bool(
-            reasoning_present
-            and bool(previous)
-            and (
-                reasoning_balance_delta <= -0.1
-                or reasoning_confidence_delta <= -0.12
-                or reasoning_weakest_ratio_delta <= -0.1
-            )
-        )
-        reasoning_improving = bool(
-            reasoning_present
-            and bool(previous)
-            and reasoning_balance_delta >= 0.1
-            and reasoning_confidence_delta >= 0.08
-            and reasoning_weakest_ratio_delta >= 0.08
-        )
-
-        if previous:
-            score_degrading_threshold = -4 if reasoning_present else -5
-            score_improving_threshold = 4 if reasoning_present else 5
-            if score_delta_prev <= score_degrading_threshold or hit_rate_delta_prev <= -0.08 or reasoning_degrading:
-                drift_assessment = "degrading"
-            elif score_delta_prev >= score_improving_threshold or hit_rate_delta_prev >= 0.08 or reasoning_improving:
-                drift_assessment = "improving"
-            else:
-                drift_assessment = "stable"
-        else:
-            drift_assessment = "baseline"
-
-        recommendations: list[str] = []
-        if attempts < 5:
-            recommendations.append("Increase retrieval sample size to reduce score variance.")
-        if hit_rate < 0.7:
-            recommendations.append("Improve retrieval hit rate with stronger memory curation and query rewrites.")
-        if error_rate > 0.2:
-            recommendations.append("Reduce turn error rate by investigating recent memory and privacy failures.")
-        if bool(semantic_raw.get("enabled", False)) and semantic_coverage < 0.6:
-            recommendations.append("Run semantic embedding backfill to improve retrieval coverage.")
-        if reasoning_present and weakest_ratio < 0.15:
-            recommendations.append(
-                f"Strengthen {reasoning_payload['weakest_layer']} reasoning coverage to rebalance memory quality signals."
-            )
-        if reasoning_present and balance_score < 0.65:
-            recommendations.append("Rebalance reasoning layers by increasing underrepresented records in recent sessions.")
-        if reasoning_present and confidence_average < 0.6:
-            recommendations.append("Raise confidence quality by validating uncertain memories before promotion.")
-        if drift_assessment == "degrading":
-            recommendations.append("Quality drift detected; review memory diagnostics and recent regressions.")
-        if not recommendations:
-            recommendations.append("Quality is stable; continue monitoring and periodic memory snapshots.")
-
-        report = {
-            "sampled_at": str(sampled_at or self._utcnow_iso()),
-            "score": score,
-            "retrieval": {
-                "attempts": attempts,
-                "hits": hits,
-                "rewrites": rewrites,
-                "hit_rate": round(hit_rate, 6),
-            },
-            "turn_stability": {
-                "successes": turn_successes,
-                "errors": turn_errors,
-                "success_rate": round(success_rate, 6),
-                "error_rate": round(error_rate, 6),
-            },
-            "drift": {
-                "assessment": drift_assessment,
-                "score_delta_previous": score_delta_prev,
-                "score_delta_baseline": score_delta_baseline,
-                "hit_rate_delta_previous": hit_rate_delta_prev,
-                "hit_rate_delta_baseline": hit_rate_delta_baseline,
-                "reasoning_balance_delta_previous": reasoning_balance_delta,
-                "reasoning_confidence_delta_previous": reasoning_confidence_delta,
-                "reasoning_weakest_ratio_delta_previous": reasoning_weakest_ratio_delta,
-            },
-            "semantic": {
-                "enabled": bool(semantic_raw.get("enabled", False)),
-                "coverage_ratio": round(semantic_coverage, 6),
-            },
-            "reasoning_layers": {
-                "total_records": int(reasoning_payload["total_records"]),
-                "distribution": reasoning_payload["distribution"],
-                "balance_score": float(reasoning_payload["balance_score"]),
-                "weakest_layer": str(reasoning_payload["weakest_layer"]),
-                "weakest_ratio": float(reasoning_payload["weakest_ratio"]),
-                "confidence": reasoning_payload["confidence"],
-            },
-            "recommendations": recommendations,
-        }
-        if isinstance(gateway_metrics, dict) and gateway_metrics:
-            report["gateway"] = gateway_metrics
-
-        history = previous_state.get("history", []) if isinstance(previous_state.get("history", []), list) else []
-        history.append(report)
-        bounded_history = history[-self._MAX_QUALITY_HISTORY :]
-        baseline = baseline_payload if baseline_payload else report
-
-        state = {
-            "version": 1,
-            "updated_at": str(report["sampled_at"]),
-            "baseline": baseline,
-            "current": report,
-            "history": bounded_history,
-            "tuning": self._merge_quality_tuning_state(previous_state.get("tuning", {}), tuning_patch),
-        }
-        self._atomic_write_text_locked(
-            self.quality_state_path,
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        )
-        return report
 
     @classmethod
     def _ensure_json_file(cls, path: Path, default_payload: dict[str, Any]) -> None:
@@ -5164,6 +4945,13 @@ class MemoryStore:
                 reader = pypdf.PdfReader(str(p))
                 pages = [page.extract_text() or "" for page in reader.pages]
                 text = "\n\n".join(pages).strip()
+            except ImportError:
+                return {
+                    "ok": False,
+                    "modality": "document",
+                    "record_id": "",
+                    "reason": 'pdf read error: pypdf not installed. Run: pip install "clawlite[media]"',
+                }
             except Exception as exc:
                 return {"ok": False, "modality": "document", "record_id": "", "reason": f"pdf read error: {exc}"}
             if not text:
@@ -6842,36 +6630,10 @@ class MemoryStore:
         return picked
 
     def diagnostics(self) -> dict[str, int | str | bool]:
-        return {
-            "history_read_corrupt_lines": int(self._diagnostics["history_read_corrupt_lines"]),
-            "history_repaired_files": int(self._diagnostics["history_repaired_files"]),
-            "consolidate_writes": int(self._diagnostics["consolidate_writes"]),
-            "consolidate_dedup_hits": int(self._diagnostics["consolidate_dedup_hits"]),
-            "session_recovery_attempts": int(self._diagnostics["session_recovery_attempts"]),
-            "session_recovery_hits": int(self._diagnostics["session_recovery_hits"]),
-            "working_memory_promotions": int(self._diagnostics["working_memory_promotions"]),
-            "working_memory_promotion_skips": int(self._diagnostics["working_memory_promotion_skips"]),
-            "privacy_audit_writes": int(self._diagnostics["privacy_audit_writes"]),
-            "privacy_audit_skipped": int(self._diagnostics["privacy_audit_skipped"]),
-            "privacy_audit_errors": int(self._diagnostics["privacy_audit_errors"]),
-            "privacy_ttl_deleted": int(self._diagnostics["privacy_ttl_deleted"]),
-            "privacy_encrypt_events": int(self._diagnostics["privacy_encrypt_events"]),
-            "privacy_encrypt_errors": int(self._diagnostics["privacy_encrypt_errors"]),
-            "privacy_decrypt_events": int(self._diagnostics["privacy_decrypt_events"]),
-            "privacy_decrypt_errors": int(self._diagnostics["privacy_decrypt_errors"]),
-            "privacy_key_load_events": int(self._diagnostics["privacy_key_load_events"]),
-            "privacy_key_create_events": int(self._diagnostics["privacy_key_create_events"]),
-            "privacy_key_errors": int(self._diagnostics["privacy_key_errors"]),
-            "last_error": str(self._diagnostics["last_error"]),
-            "backend_name": str(self._backend_diagnostics["backend_name"]),
-            "backend_supported": bool(self._backend_diagnostics["backend_supported"]),
-            "backend_initialized": bool(self._backend_diagnostics["backend_initialized"]),
-            "backend_init_error": str(self._backend_diagnostics["backend_init_error"]),
-            "backend_driver": str(self._backend_diagnostics["backend_driver"]),
-            "backend_connection_ok": bool(self._backend_diagnostics["backend_connection_ok"]),
-            "backend_vector_extension": bool(self._backend_diagnostics["backend_vector_extension"]),
-            "backend_vector_version": str(self._backend_diagnostics["backend_vector_version"]),
-        }
+        return _build_memory_diagnostics(
+            diagnostics=self._diagnostics,
+            backend_diagnostics=self._backend_diagnostics,
+        )
 
     @staticmethod
     def _normalize_prefix(value: str) -> str:
@@ -6943,57 +6705,36 @@ class MemoryStore:
         return deleted
 
     def export_payload(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "exported_at": self._utcnow_iso(),
-            "history": [asdict(row) for row in self.all()],
-            "curated": [asdict(row) for row in self.curated()],
-            "checkpoints": self._parse_checkpoints(self.checkpoints_path.read_text(encoding="utf-8")),
-            "profile": self._load_json_dict(self.profile_path, self._default_profile()),
-            "privacy": self._load_json_dict(self.privacy_path, self._default_privacy()),
-        }
+        return _export_memory_payload(
+            history_rows=self.all(),
+            curated_rows=self.curated(),
+            checkpoints_path=self.checkpoints_path,
+            parse_checkpoints=self._parse_checkpoints,
+            profile_path=self.profile_path,
+            privacy_path=self.privacy_path,
+            load_json_dict=self._load_json_dict,
+            default_profile=self._default_profile,
+            default_privacy=self._default_privacy,
+            utcnow_iso=self._utcnow_iso,
+        )
 
     def import_payload(self, payload: dict[str, Any]) -> None:
-        if not isinstance(payload, dict):
-            return
-        history_rows = payload.get("history", [])
-        curated_rows = payload.get("curated", [])
-        checkpoints = payload.get("checkpoints", {})
-        profile = payload.get("profile", {})
-        privacy = payload.get("privacy", {})
-
-        history_lines: list[str] = []
-        if isinstance(history_rows, list):
-            for row in history_rows:
-                if not isinstance(row, dict):
-                    continue
-                parsed = self._record_from_payload(row)
-                if parsed is None:
-                    continue
-                stored = asdict(parsed)
-                stored["text"] = self._encrypt_text_for_category(str(parsed.text or ""), parsed.category)
-                history_lines.append(json.dumps(stored, ensure_ascii=False))
-        self._atomic_write_text_locked(self.history_path, ("\n".join(history_lines) + "\n") if history_lines else "")
-
-        if self.curated_path is not None and isinstance(curated_rows, list):
-            facts = []
-            for row in curated_rows:
-                if isinstance(row, dict):
-                    facts.append(row)
-            self._write_curated_facts(facts)
-
-        if isinstance(checkpoints, dict):
-            self._atomic_write_text_locked(self.checkpoints_path, self._format_checkpoints(checkpoints))
-
-        if isinstance(profile, dict):
-            merged_profile = self._default_profile()
-            merged_profile.update(profile)
-            self._write_json_dict(self.profile_path, merged_profile)
-
-        if isinstance(privacy, dict):
-            merged_privacy = self._default_privacy()
-            merged_privacy.update(privacy)
-            self._write_json_dict(self.privacy_path, merged_privacy)
+        _import_memory_payload(
+            payload=payload,
+            record_from_payload=self._record_from_payload,
+            encrypt_text_for_category=self._encrypt_text_for_category,
+            atomic_write_text_locked=self._atomic_write_text_locked,
+            history_path=self.history_path,
+            curated_enabled=self.curated_path is not None,
+            write_curated_facts=self._write_curated_facts,
+            checkpoints_path=self.checkpoints_path,
+            format_checkpoints=self._format_checkpoints,
+            profile_path=self.profile_path,
+            privacy_path=self.privacy_path,
+            write_json_dict=self._write_json_dict,
+            default_profile=self._default_profile,
+            default_privacy=self._default_privacy,
+        )
 
     def _write_snapshot_payload(
         self,
@@ -7003,374 +6744,85 @@ class MemoryStore:
         advance_branch: bool = True,
         branch_name: str = "",
     ) -> str:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        safe_tag = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(tag or "").strip()).strip("-")
-        version_id = f"{stamp}-{safe_tag}" if safe_tag else stamp
-        version_path = self.versions_path / f"{version_id}.json.gz"
-        with gzip.open(version_path, "wt", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False)
-        if advance_branch:
-            current_branch = branch_name or self._current_branch_name()
-            self._advance_branch_head(current_branch, version_id)
-        return version_id
+        return _write_snapshot_payload_helper(
+            payload=payload,
+            versions_path=self.versions_path,
+            tag=tag,
+            advance_branch=advance_branch,
+            branch_name=branch_name,
+            current_branch_name=self._current_branch_name,
+            advance_branch_head=self._advance_branch_head,
+        )
 
     def snapshot(self, tag: str = "") -> str:
         payload = self.export_payload()
         return self._write_snapshot_payload(payload, tag=tag)
 
     def branch(self, name: str, from_version: str = "", checkout: bool = False) -> dict[str, Any]:
-        clean_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(name or "").strip()).strip("-")
-        if not clean_name:
-            raise ValueError("branch name is required")
-        meta = self._load_branches_metadata()
-        branches = meta.get("branches", {})
-        if not isinstance(branches, dict):
-            branches = {}
-        if clean_name in branches:
-            raise ValueError(f"branch already exists: {clean_name}")
-
-        base_version = str(from_version or "").strip() or self._current_branch_head()
-        now_iso = self._utcnow_iso()
-        branches[clean_name] = {
-            "head": base_version,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
-        meta["branches"] = branches
-        if checkout:
-            meta["current"] = clean_name
-        self._save_branches_metadata(meta)
-        self._sync_branch_head_file()
-        return {
-            "name": clean_name,
-            "head": base_version,
-            "current": str(meta.get("current", "main") or "main"),
-            "checkout": bool(checkout),
-        }
+        return _create_memory_branch(
+            name=name,
+            from_version=from_version,
+            checkout=checkout,
+            load_branches_metadata=self._load_branches_metadata,
+            save_branches_metadata=self._save_branches_metadata,
+            sync_branch_head_file=self._sync_branch_head_file,
+            current_branch_head=self._current_branch_head,
+            utcnow_iso=self._utcnow_iso,
+        )
 
     def branches(self) -> dict[str, Any]:
-        meta = self._load_branches_metadata()
-        return {
-            "current": str(meta.get("current", "main") or "main"),
-            "branches": meta.get("branches", {}),
-        }
+        return _list_memory_branches(load_branches_metadata=self._load_branches_metadata)
 
     def checkout_branch(self, name: str) -> dict[str, Any]:
-        clean_name = str(name or "").strip()
-        if not clean_name:
-            raise ValueError("branch name is required")
-        self._set_current_branch(clean_name)
-        return {"current": clean_name, "head": self._current_branch_head()}
-
-    @staticmethod
-    def _merge_record_lists(preferred: list[dict[str, Any]], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        merged: dict[str, dict[str, Any]] = {}
-        for row in fallback:
-            if not isinstance(row, dict):
-                continue
-            row_id = str(row.get("id", "")).strip()
-            if row_id:
-                merged[row_id] = dict(row)
-        for row in preferred:
-            if not isinstance(row, dict):
-                continue
-            row_id = str(row.get("id", "")).strip()
-            if row_id:
-                merged[row_id] = dict(row)
-        return sorted(merged.values(), key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
-
-    @staticmethod
-    def _merge_profile_conservative(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-        merged = dict(target)
-        for key, value in source.items():
-            current_value = merged.get(key)
-            if key not in merged or current_value is None or current_value == "" or current_value == [] or current_value == {}:
-                merged[key] = value
-        source_interests = source.get("interests", [])
-        target_interests = target.get("interests", [])
-        if isinstance(source_interests, list) and isinstance(target_interests, list):
-            merged["interests"] = sorted({str(item) for item in source_interests + target_interests if str(item).strip()})
-        return merged
-
-    @staticmethod
-    def _merge_privacy_conservative(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-        merged = dict(target)
-        for key in ("never_memorize_patterns", "ephemeral_categories", "encrypted_categories"):
-            src_list = source.get(key, [])
-            tgt_list = target.get(key, [])
-            if isinstance(src_list, list) and isinstance(tgt_list, list):
-                merged[key] = sorted({str(item) for item in src_list + tgt_list if str(item).strip()})
-        src_ttl = source.get("ephemeral_ttl_days")
-        tgt_ttl = target.get("ephemeral_ttl_days")
-        try:
-            src_ttl_i = int(src_ttl)
-        except Exception:
-            src_ttl_i = 0
-        try:
-            tgt_ttl_i = int(tgt_ttl)
-        except Exception:
-            tgt_ttl_i = 0
-        ttl_candidates = [val for val in (src_ttl_i, tgt_ttl_i) if val > 0]
-        if ttl_candidates:
-            merged["ephemeral_ttl_days"] = min(ttl_candidates)
-        merged["audit_log"] = bool(source.get("audit_log", True)) and bool(target.get("audit_log", True))
-        return merged
+        return _checkout_memory_branch(
+            name=name,
+            set_current_branch=self._set_current_branch,
+            current_branch_head=self._current_branch_head,
+        )
 
     def merge(self, source_branch: str, target_branch: str, tag: str = "merge") -> dict[str, Any]:
-        meta = self._load_branches_metadata()
-        branches = meta.get("branches", {})
-        if not isinstance(branches, dict):
-            raise ValueError("branch metadata missing")
-        source_row = branches.get(source_branch)
-        target_row = branches.get(target_branch)
-        if not isinstance(source_row, dict) or not isinstance(target_row, dict):
-            raise ValueError("source or target branch not found")
-
-        source_head = str(source_row.get("head", "") or "")
-        target_head = str(target_row.get("head", "") or "")
-        if not source_head or not target_head:
-            raise ValueError("source and target branches must have head versions")
-
-        def _load(version_id: str) -> dict[str, Any]:
-            version_path = self.versions_path / f"{version_id}.json.gz"
-            if not version_path.exists():
-                return {}
-            with gzip.open(version_path, "rt", encoding="utf-8") as fh:
-                payload = json.load(fh)
-            return payload if isinstance(payload, dict) else {}
-
-        source_payload = _load(source_head)
-        target_payload = _load(target_head)
-        merged_payload = {
-            "version": 1,
-            "exported_at": self._utcnow_iso(),
-            "history": self._merge_record_lists(
-                list(source_payload.get("history", [])) if isinstance(source_payload.get("history", []), list) else [],
-                list(target_payload.get("history", [])) if isinstance(target_payload.get("history", []), list) else [],
-            ),
-            "curated": self._merge_record_lists(
-                list(source_payload.get("curated", [])) if isinstance(source_payload.get("curated", []), list) else [],
-                list(target_payload.get("curated", [])) if isinstance(target_payload.get("curated", []), list) else [],
-            ),
-            "checkpoints": target_payload.get("checkpoints", {}),
-            "profile": self._merge_profile_conservative(
-                dict(source_payload.get("profile", {})) if isinstance(source_payload.get("profile", {}), dict) else {},
-                dict(target_payload.get("profile", {})) if isinstance(target_payload.get("profile", {}), dict) else {},
-            ),
-            "privacy": self._merge_privacy_conservative(
-                dict(source_payload.get("privacy", {})) if isinstance(source_payload.get("privacy", {}), dict) else {},
-                dict(target_payload.get("privacy", {})) if isinstance(target_payload.get("privacy", {}), dict) else {},
-            ),
-        }
-
-        version_id = self._write_snapshot_payload(
-            merged_payload,
-            tag=f"{tag}-{source_branch}-into-{target_branch}",
-            advance_branch=False,
+        return _merge_memory_branches(
+            source_branch=source_branch,
+            target_branch=target_branch,
+            tag=tag,
+            load_branches_metadata=self._load_branches_metadata,
+            save_branches_metadata=self._save_branches_metadata,
+            sync_branch_head_file=self._sync_branch_head_file,
+            versions_path=self.versions_path,
+            utcnow_iso=self._utcnow_iso,
+            write_snapshot_payload=self._write_snapshot_payload,
+            import_payload=self.import_payload,
         )
-        meta = self._load_branches_metadata()
-        branches = meta.get("branches", {})
-        if not isinstance(branches, dict):
-            branches = {}
-        target_meta = branches.get(target_branch, {})
-        if not isinstance(target_meta, dict):
-            target_meta = {}
-        target_meta["head"] = version_id
-        target_meta["updated_at"] = self._utcnow_iso()
-        if "created_at" not in target_meta:
-            target_meta["created_at"] = self._utcnow_iso()
-        branches[target_branch] = target_meta
-        meta["branches"] = branches
-        self._save_branches_metadata(meta)
-        self._sync_branch_head_file()
-
-        current_branch = str(meta.get("current", "main") or "main")
-        imported = False
-        if current_branch == target_branch:
-            self.import_payload(merged_payload)
-            imported = True
-        return {
-            "source": source_branch,
-            "target": target_branch,
-            "source_head": source_head,
-            "target_head_before": target_head,
-            "target_head_after": version_id,
-            "version": version_id,
-            "imported": imported,
-        }
 
     def rollback(self, version_id: str) -> None:
-        clean = str(version_id or "").strip()
-        if not clean:
-            return
-        version_path = self.versions_path / f"{clean}.json.gz"
-        if not version_path.exists():
-            raise FileNotFoundError(str(version_path))
-        with gzip.open(version_path, "rt", encoding="utf-8") as fh:
-            payload = json.load(fh)
-        self.import_payload(payload if isinstance(payload, dict) else {})
-
-    def diff(self, version_a: str, version_b: str) -> dict[str, Any]:
-        def _load_version(version_id: str) -> dict[str, Any]:
-            path = self.versions_path / f"{version_id}.json.gz"
-            if not path.exists():
-                return {}
-            with gzip.open(path, "rt", encoding="utf-8") as fh:
-                payload = json.load(fh)
-            return payload if isinstance(payload, dict) else {}
-
-        left = _load_version(version_a)
-        right = _load_version(version_b)
-
-        left_history = {
-            str(item.get("id", "")): str(item.get("text", ""))
-            for item in left.get("history", [])
-            if isinstance(item, dict) and str(item.get("id", "")).strip()
-        }
-        right_history = {
-            str(item.get("id", "")): str(item.get("text", ""))
-            for item in right.get("history", [])
-            if isinstance(item, dict) and str(item.get("id", "")).strip()
-        }
-        left_ids = set(left_history.keys())
-        right_ids = set(right_history.keys())
-        added_ids = sorted(right_ids - left_ids)
-        removed_ids = sorted(left_ids - right_ids)
-        changed_ids = sorted(
-            row_id for row_id in left_ids.intersection(right_ids) if left_history.get(row_id) != right_history.get(row_id)
+        _rollback_memory_version(
+            version_id=version_id,
+            versions_path=self.versions_path,
+            import_payload=self.import_payload,
         )
 
-        return {
-            "added": {row_id: right_history[row_id] for row_id in added_ids},
-            "removed": {row_id: left_history[row_id] for row_id in removed_ids},
-            "changed": {
-                row_id: {"from": left_history[row_id], "to": right_history[row_id]}
-                for row_id in changed_ids
-            },
-            "counts": {
-                "added": len(added_ids),
-                "removed": len(removed_ids),
-                "changed": len(changed_ids),
-            },
-        }
+    def diff(self, version_a: str, version_b: str) -> dict[str, Any]:
+        return _diff_memory_versions(
+            versions_path=self.versions_path,
+            version_a=version_a,
+            version_b=version_b,
+        )
 
     def analysis_stats(self) -> dict[str, Any]:
-        history_rows = self.all()
-        curated_rows = self.curated()
-        combined = history_rows + curated_rows
-        record_ids = {
-            str(row.id or "").strip()
-            for row in combined
-            if str(row.id or "").strip()
-        }
-
-        now = datetime.now(timezone.utc)
-        cutoff_24h = now.timestamp() - (24 * 3600)
-        cutoff_7d = now.timestamp() - (7 * 24 * 3600)
-        cutoff_30d = now.timestamp() - (30 * 24 * 3600)
-
-        last_24h = 0
-        last_7d = 0
-        last_30d = 0
-        temporal_marked_count = 0
-        sources: Counter[str] = Counter()
-        categories: Counter[str] = Counter()
-        reasoning_layers: Counter[str] = Counter()
-        confidence_values: list[float] = []
-        confidence_buckets: Counter[str] = Counter()
-
-        for row in combined:
-            text = str(row.text or "")
-            created_at = self._parse_iso_timestamp(str(row.created_at or ""))
-            created_ts = created_at.timestamp() if created_at.year > 1 else 0.0
-
-            if created_ts >= cutoff_24h:
-                last_24h += 1
-            if created_ts >= cutoff_7d:
-                last_7d += 1
-            if created_ts >= cutoff_30d:
-                last_30d += 1
-            if self._memory_has_temporal_markers(text):
-                temporal_marked_count += 1
-            sources[str(row.source or "unknown")] += 1
-            categories[str(getattr(row, "category", "context") or "context")] += 1
-            reasoning_layers[self._normalize_reasoning_layer(getattr(row, "reasoning_layer", "fact"))] += 1
-
-            confidence_value = self._normalize_confidence(getattr(row, "confidence", 1.0), default=1.0)
-            if math.isfinite(confidence_value):
-                confidence_values.append(confidence_value)
-                bounded_confidence = max(0.0, min(1.0, confidence_value))
-                if bounded_confidence < 0.4:
-                    confidence_buckets["low"] += 1
-                elif bounded_confidence < 0.7:
-                    confidence_buckets["medium"] += 1
-                elif bounded_confidence < 0.9:
-                    confidence_buckets["high"] += 1
-                else:
-                    confidence_buckets["very_high"] += 1
-            else:
-                confidence_buckets["unknown"] += 1
-
-        top_sources = [
-            {"source": source, "count": count}
-            for source, count in sorted(sources.items(), key=lambda item: (-item[1], item[0]))[:8]
-        ]
-
-        try:
-            embeddings = self._read_embeddings_map()
-        except Exception as exc:
+        def _on_embeddings_error(exc: Exception) -> None:
             self._diagnostics["last_error"] = str(exc)
-            embeddings = {}
-        embedded_records = len(record_ids.intersection(set(embeddings.keys())))
-        total_records = len(record_ids)
-        missing_records = max(0, total_records - embedded_records)
-        coverage_ratio = float(1.0 if total_records == 0 else embedded_records / total_records)
 
-        confidence_count = len(confidence_values)
-        confidence_avg = round((sum(confidence_values) / confidence_count), 6) if confidence_count else 0.0
-        confidence_min = round(min(confidence_values), 6) if confidence_count else 0.0
-        confidence_max = round(max(confidence_values), 6) if confidence_count else 0.0
-
-        return {
-            "counts": {
-                "history": len(history_rows),
-                "curated": len(curated_rows),
-                "total": len(combined),
-            },
-            "recent": {
-                "last_24h": last_24h,
-                "last_7d": last_7d,
-                "last_30d": last_30d,
-            },
-            "temporal_marked_count": temporal_marked_count,
-            "top_sources": top_sources,
-            "categories": {
-                name: count
-                for name, count in sorted(categories.items(), key=lambda item: (-item[1], item[0]))
-            },
-            "reasoning_layers": {
-                name: count
-                for name, count in sorted(reasoning_layers.items(), key=lambda item: (-item[1], item[0]))
-            },
-            "confidence": {
-                "count": confidence_count,
-                "average": confidence_avg,
-                "minimum": confidence_min,
-                "maximum": confidence_max,
-                "buckets": {
-                    name: count
-                    for name, count in sorted(confidence_buckets.items(), key=lambda item: item[0])
-                },
-            },
-            "semantic": {
-                "enabled": bool(self.semantic_enabled),
-                "total_records": total_records,
-                "embedded_records": embedded_records,
-                "missing_records": missing_records,
-                "coverage_ratio": round(coverage_ratio, 6),
-                "coverage_percent": round(coverage_ratio * 100.0, 2),
-            },
-        }
+        return _build_memory_analysis_stats(
+            history_rows=self.all(),
+            curated_rows=self.curated(),
+            semantic_enabled=self.semantic_enabled,
+            parse_iso_timestamp=self._parse_iso_timestamp,
+            has_temporal_markers=self._memory_has_temporal_markers,
+            normalize_reasoning_layer=self._normalize_reasoning_layer,
+            normalize_confidence=lambda value: self._normalize_confidence(value, default=1.0),
+            read_embeddings_map=self._read_embeddings_map,
+            on_embeddings_error=_on_embeddings_error,
+        )
 
     # ── Consolidation Loop ─────────────────────────────────────────────────
 
@@ -7378,33 +6830,26 @@ class MemoryStore:
 
     async def start_consolidation_loop(self, interval_s: float = 21600.0) -> None:
         """Start background consolidation task (idempotent, default every 6h)."""
-        existing = getattr(self, "_consolidation_task", None)
-        if existing and not existing.done():
-            return
-        self._consolidation_interval_s: float = max(60.0, float(interval_s or 21600.0))
-        self._consolidation_task: asyncio.Task = asyncio.create_task(self._consolidation_loop())
+        await _start_periodic_task(
+            owner=self,
+            task_attr="_consolidation_task",
+            interval_attr="_consolidation_interval_s",
+            interval_s=interval_s,
+            default_interval_s=21600.0,
+            loop_factory=self._consolidation_loop,
+        )
 
     async def stop_consolidation_loop(self) -> None:
         """Cancel background consolidation task cleanly."""
-        task = getattr(self, "_consolidation_task", None)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._consolidation_task = None
+        await _stop_periodic_task(owner=self, task_attr="_consolidation_task")
 
     async def _consolidation_loop(self) -> None:
-        interval = getattr(self, "_consolidation_interval_s", 21600.0)
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                await self.consolidate_categories()
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                self._diagnostics["last_error"] = f"consolidation_loop: {exc}"
+        await _periodic_task_loop(
+            interval_s=getattr(self, "_consolidation_interval_s", 21600.0),
+            work=self.consolidate_categories,
+            diagnostics=self._diagnostics,
+            error_prefix="consolidation_loop",
+        )
 
     # ── Decay GC Loop ─────────────────────────────────────────────────────────
 
@@ -7417,69 +6862,39 @@ class MemoryStore:
         accumulated decay_penalty has reached _DECAY_GC_THRESHOLD × _DECAY_MAX_PENALTY,
         preventing unbounded growth of stale ephemeral records.
         """
-        existing = getattr(self, "_decay_task", None)
-        if existing and not existing.done():
-            return
-        self._decay_interval_s: float = max(60.0, float(interval_s or 3600.0))
-        self._decay_task: asyncio.Task = asyncio.create_task(self._decay_loop())
+        await _start_periodic_task(
+            owner=self,
+            task_attr="_decay_task",
+            interval_attr="_decay_interval_s",
+            interval_s=interval_s,
+            default_interval_s=3600.0,
+            loop_factory=self._decay_loop,
+        )
 
     async def stop_decay_loop(self) -> None:
         """Cancel background decay GC task cleanly."""
-        task = getattr(self, "_decay_task", None)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._decay_task = None
+        await _stop_periodic_task(owner=self, task_attr="_decay_task")
 
     async def _decay_loop(self) -> None:
-        interval = getattr(self, "_decay_interval_s", 3600.0)
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                await self.purge_decayed_records()
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                self._diagnostics["last_error"] = f"decay_loop: {exc}"
+        await _periodic_task_loop(
+            interval_s=getattr(self, "_decay_interval_s", 3600.0),
+            work=self.purge_decayed_records,
+            diagnostics=self._diagnostics,
+            error_prefix="decay_loop",
+        )
 
     async def purge_decayed_records(self) -> dict[str, int]:
         """Delete records whose decay penalty has reached the GC threshold.
 
         Only targets records with decay_rate > 0. Returns {purged: N}.
         """
-        threshold = self._DECAY_MAX_PENALTY * self._DECAY_GC_THRESHOLD
-        expired_ids: set[str] = set()
-
-        try:
-            history = await asyncio.to_thread(self._read_history_records)
-        except Exception:
-            history = []
-
-        for row in history:
-            if float(getattr(row, "decay_rate", 0.0) or 0.0) <= 0.0:
-                continue
-            if self._decay_penalty(row) >= threshold:
-                row_id = str(getattr(row, "id", "") or "").strip()
-                if row_id:
-                    expired_ids.add(row_id)
-
-        if not expired_ids:
-            return {"purged": 0}
-
-        try:
-            deleted = await asyncio.to_thread(self._delete_records_by_ids, expired_ids)
-            purged = int(deleted.get("deleted_count", 0) or 0)
-        except Exception as exc:
-            self._diagnostics["last_error"] = f"decay_purge: {exc}"
-            purged = 0
-
-        if purged > 0:
-            self._diagnostics["decay_gc_purged"] = int(self._diagnostics.get("decay_gc_purged", 0)) + purged
-
-        return {"purged": purged}
+        return await _purge_decayed_records(
+            read_history_records=self._read_history_records,
+            decay_penalty=self._decay_penalty,
+            delete_records_by_ids=self._delete_records_by_ids,
+            diagnostics=self._diagnostics,
+            threshold=self._DECAY_MAX_PENALTY * self._DECAY_GC_THRESHOLD,
+        )
 
     async def consolidate_categories(self) -> dict[str, int]:
         """Group episodic records by category and store a summary as a knowledge record.
@@ -7490,92 +6905,12 @@ class MemoryStore:
 
         Returns {category: consolidated_count}.
         """
-        results: dict[str, int] = {}
-        threshold = int(getattr(self, "consolidation_threshold", 10))
-
-        backend = getattr(self, "backend", None)
-        fetch = getattr(backend, "fetch_layer_records", None)
-        if not callable(fetch):
-            return results
-
-        try:
-            all_rows: list[dict] = await asyncio.to_thread(fetch, layer="item", limit=4000)
-        except Exception as exc:
-            self._diagnostics["last_error"] = f"consolidation_fetch: {exc}"
-            return results
-
-        # Group unconsolidated event records by category
-        by_category: dict[str, list[dict]] = {}
-        for row in all_rows:
-            payload = row.get("payload", {})
-            if not isinstance(payload, dict):
-                continue
-            meta = payload.get("metadata") or {}
-            if bool(meta.get("consolidated", False)):
-                continue
-            mem_type = str(payload.get("memory_type", "") or "").strip()
-            if mem_type not in ("event", ""):
-                continue
-            category = str(row.get("category", "") or "context").strip()
-            by_category.setdefault(category, []).append(row)
-
-        for category, rows in by_category.items():
-            if len(rows) < threshold:
-                continue
-
-            # Build summary text from record texts
-            lines = []
-            for row in rows:
-                payload = row.get("payload", {})
-                text = str(payload.get("text", "") or "").strip()
-                if text:
-                    lines.append(text)
-
-            if not lines:
-                continue
-
-            summary = f"[{category}] {len(lines)} events: " + " | ".join(lines[:20])
-            now = datetime.now(timezone.utc).isoformat()
-
-            try:
-                await asyncio.to_thread(
-                    self.add,
-                    summary,
-                    source="consolidation",
-                    memory_type="knowledge",
-                    metadata={"consolidated_from": category, "consolidated_count": len(lines)},
-                )
-            except Exception as exc:
-                self._diagnostics["last_error"] = f"consolidation_add: {exc}"
-                continue
-
-            # Mark source records as consolidated
-            upsert = getattr(backend, "upsert_layer_record", None)
-            if callable(upsert):
-                for row in rows:
-                    payload = row.get("payload", {})
-                    if not isinstance(payload, dict):
-                        continue
-                    meta = dict(payload.get("metadata") or {})
-                    meta["consolidated"] = True
-                    meta["consolidated_at"] = now
-                    updated_payload = {**payload, "metadata": meta}
-                    try:
-                        await asyncio.to_thread(
-                            upsert,
-                            layer=row.get("layer", "item"),
-                            record_id=row["record_id"],
-                            payload=updated_payload,
-                            category=row.get("category", "context"),
-                            created_at=row.get("created_at", now),
-                            updated_at=now,
-                        )
-                    except Exception:
-                        pass
-
-            results[category] = len(lines)
-
-        return results
+        return await _consolidate_categories(
+            backend=getattr(self, "backend", None),
+            threshold=int(getattr(self, "consolidation_threshold", 10)),
+            add_record=self.add,
+            diagnostics=self._diagnostics,
+        )
 
 
 # Backward-compatible API expected by legacy CLI.

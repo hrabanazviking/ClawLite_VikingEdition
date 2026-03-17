@@ -224,82 +224,104 @@ class ToolRegistry:
         return f"{clean_path}.{clean_fragment}"
 
     @classmethod
-    def _validate_schema_value(cls, value: Any, schema: dict[str, Any], *, path: str = "") -> str:
+    def _normalize_validation_errors(cls, errors: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in errors:
+            clean = str(item or "").strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            normalized.append(clean)
+        return normalized
+
+    @classmethod
+    def _format_argument_validation_failure(cls, *, tool_name: str, errors: list[str]) -> str:
+        normalized = cls._normalize_validation_errors(errors)
+        if not normalized:
+            return f"tool_invalid_arguments:{tool_name}:unknown"
+        if len(normalized) == 1:
+            return f"tool_invalid_arguments:{tool_name}:{normalized[0]}"
+        payload = json.dumps(normalized, ensure_ascii=False)
+        return f"tool_invalid_arguments:{tool_name}:multiple:{payload}"
+
+    @classmethod
+    def _validate_schema_value(cls, value: Any, schema: dict[str, Any], *, path: str = "") -> list[str]:
         if not isinstance(schema, dict):
-            return ""
+            return []
 
         raw_type = schema.get("type")
         accepted_types = raw_type if isinstance(raw_type, list) else [raw_type] if raw_type is not None else []
         normalized_types = [str(item or "").strip().lower() for item in accepted_types if str(item or "").strip()]
         if normalized_types and not any(cls._matches_schema_type(value, item) for item in normalized_types):
-            return cls._format_validation_error(path=path, reason=f"expected_{'_or_'.join(normalized_types)}")
+            return [cls._format_validation_error(path=path, reason=f"expected_{'_or_'.join(normalized_types)}")]
 
         enum_values = schema.get("enum")
         if isinstance(enum_values, list) and enum_values and value not in enum_values:
-            return cls._format_validation_error(path=path, reason="value_not_allowed")
+            return [cls._format_validation_error(path=path, reason="value_not_allowed")]
 
         if value is None:
-            return ""
+            return []
+
+        errors: list[str] = []
 
         min_length = schema.get("minLength")
         if min_length is not None and isinstance(value, str):
             try:
                 if len(value) < int(min_length):
-                    return cls._format_validation_error(path=path, reason=f"min_length_{min_length}")
+                    errors.append(cls._format_validation_error(path=path, reason=f"min_length_{min_length}"))
             except Exception:
-                return cls._format_validation_error(path=path, reason="invalid_min_length")
+                errors.append(cls._format_validation_error(path=path, reason="invalid_min_length"))
 
         max_length = schema.get("maxLength")
         if max_length is not None and isinstance(value, str):
             try:
                 if len(value) > int(max_length):
-                    return cls._format_validation_error(path=path, reason=f"max_length_{max_length}")
+                    errors.append(cls._format_validation_error(path=path, reason=f"max_length_{max_length}"))
             except Exception:
-                return cls._format_validation_error(path=path, reason="invalid_max_length")
+                errors.append(cls._format_validation_error(path=path, reason="invalid_max_length"))
 
         minimum = schema.get("minimum")
         if minimum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
             try:
                 if value < minimum:
-                    return cls._format_validation_error(path=path, reason=f"minimum_{minimum}")
+                    errors.append(cls._format_validation_error(path=path, reason=f"minimum_{minimum}"))
             except Exception:
-                return cls._format_validation_error(path=path, reason="invalid_minimum")
+                errors.append(cls._format_validation_error(path=path, reason="invalid_minimum"))
 
         maximum = schema.get("maximum")
         if maximum is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
             try:
                 if value > maximum:
-                    return cls._format_validation_error(path=path, reason=f"maximum_{maximum}")
+                    errors.append(cls._format_validation_error(path=path, reason=f"maximum_{maximum}"))
             except Exception:
-                return cls._format_validation_error(path=path, reason="invalid_maximum")
+                errors.append(cls._format_validation_error(path=path, reason="invalid_maximum"))
 
         if isinstance(value, list):
             min_items = schema.get("minItems")
             if min_items is not None:
                 try:
                     if len(value) < int(min_items):
-                        return cls._format_validation_error(path=path, reason=f"min_items_{min_items}")
+                        errors.append(cls._format_validation_error(path=path, reason=f"min_items_{min_items}"))
                 except Exception:
-                    return cls._format_validation_error(path=path, reason="invalid_min_items")
+                    errors.append(cls._format_validation_error(path=path, reason="invalid_min_items"))
 
             max_items = schema.get("maxItems")
             if max_items is not None:
                 try:
                     if len(value) > int(max_items):
-                        return cls._format_validation_error(path=path, reason=f"max_items_{max_items}")
+                        errors.append(cls._format_validation_error(path=path, reason=f"max_items_{max_items}"))
                 except Exception:
-                    return cls._format_validation_error(path=path, reason="invalid_max_items")
+                    errors.append(cls._format_validation_error(path=path, reason="invalid_max_items"))
 
             items_schema = schema.get("items")
             if isinstance(items_schema, dict):
                 for index, item in enumerate(value):
-                    nested_error = cls._validate_schema_value(
+                    errors.extend(cls._validate_schema_value(
                         item,
                         items_schema,
                         path=cls._child_schema_path(path, f"[{index}]"),
-                    )
-                    if nested_error:
-                        return nested_error
+                    ))
 
         if isinstance(value, dict):
             properties = schema.get("properties", {})
@@ -312,33 +334,27 @@ class ToolRegistry:
                     if str(item).strip() and str(item).strip() not in value
                 ]
                 if missing:
-                    return cls._format_validation_error(
-                        path=path,
-                        reason=f"missing_required:{','.join(sorted(missing))}",
-                    )
+                    for item in sorted(missing):
+                        errors.append(cls._format_validation_error(path=path, reason=f"missing_required:{item}"))
 
             additional_properties = schema.get("additionalProperties", True)
             if additional_properties is False:
                 unexpected = sorted(str(key).strip() for key in value.keys() if key not in property_schemas)
                 if unexpected:
-                    return cls._format_validation_error(
-                        path=path,
-                        reason=f"unexpected_arguments:{','.join(unexpected)}",
-                    )
+                    for item in unexpected:
+                        errors.append(cls._format_validation_error(path=path, reason=f"unexpected_arguments:{item}"))
 
             for key, item in value.items():
                 child_schema = property_schemas.get(key)
                 if not isinstance(child_schema, dict):
                     continue
-                nested_error = cls._validate_schema_value(
+                errors.extend(cls._validate_schema_value(
                     item,
                     child_schema,
                     path=cls._child_schema_path(path, str(key).strip()),
-                )
-                if nested_error:
-                    return nested_error
+                ))
 
-        return ""
+        return cls._normalize_validation_errors(errors)
 
     @classmethod
     def _validate_arguments(cls, tool: Tool, arguments: Any) -> dict[str, Any]:
@@ -353,31 +369,9 @@ class ToolRegistry:
         if schema_type and schema_type != "object":
             return dict(arguments)
 
-        required = schema.get("required", [])
-        if isinstance(required, list):
-            missing = [str(item).strip() for item in required if str(item).strip() and str(item).strip() not in arguments]
-            if missing:
-                raise RuntimeError(
-                    f"tool_invalid_arguments:{tool.name}:missing_required:{','.join(sorted(missing))}"
-                )
-
-        properties = schema.get("properties", {})
-        property_schemas = properties if isinstance(properties, dict) else {}
-        additional_properties = schema.get("additionalProperties", True)
-        if additional_properties is False:
-            unexpected = sorted(str(key).strip() for key in arguments.keys() if key not in property_schemas)
-            if unexpected:
-                raise RuntimeError(
-                    f"tool_invalid_arguments:{tool.name}:unexpected_arguments:{','.join(unexpected)}"
-                )
-
-        for key, value in arguments.items():
-            property_schema = property_schemas.get(key)
-            if not isinstance(property_schema, dict):
-                continue
-            validation_error = cls._validate_schema_value(value, property_schema, path=str(key).strip())
-            if validation_error:
-                raise RuntimeError(f"tool_invalid_arguments:{tool.name}:{validation_error}")
+        validation_errors = cls._validate_schema_value(arguments, schema)
+        if validation_errors:
+            raise RuntimeError(cls._format_argument_validation_failure(tool_name=tool.name, errors=validation_errors))
 
         return dict(arguments)
 

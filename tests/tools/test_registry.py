@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from clawlite.config.schema import ToolSafetyLayerConfig, ToolSafetyPolicyConfig
 from clawlite.tools.base import Tool, ToolContext
@@ -435,5 +436,35 @@ def test_tool_registry_blocks_nested_item_type_and_min_items_fail_closed() -> No
             raise AssertionError("expected nested item type validation block")
         except RuntimeError as exc:
             assert str(exc) == "tool_invalid_arguments:nested:buttons[0][0].text:expected_string"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_aggregates_multiple_validation_errors() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(StrictSchemaTool())
+        try:
+            await reg.execute(
+                "strict",
+                {
+                    "path": 123,
+                    "count": 0,
+                    "mode": "turbo",
+                    "extra": True,
+                },
+                session_id="cli:1",
+            )
+            raise AssertionError("expected aggregated validation block")
+        except RuntimeError as exc:
+            message = str(exc)
+            assert message.startswith("tool_invalid_arguments:strict:multiple:")
+            payload = json.loads(message.split(":multiple:", 1)[1])
+            assert payload == [
+                "unexpected_arguments:extra",
+                "path:expected_string",
+                "count:minimum_1",
+                "mode:value_not_allowed",
+            ]
 
     asyncio.run(_scenario())

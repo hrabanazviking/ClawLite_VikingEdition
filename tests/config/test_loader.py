@@ -416,6 +416,27 @@ def test_load_config_channels_and_gateway_heartbeat_backward_compat(tmp_path: Pa
     assert "qq" in cfg.channels.extra
 
 
+def test_load_config_scheduler_cron_concurrency(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "scheduler": {
+                    "heartbeat_interval_seconds": 2222,
+                    "cron_max_concurrent_jobs": 4,
+                    "cron_completed_job_retention_seconds": 900,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+    assert cfg.gateway.heartbeat.interval_s == 2222
+    assert cfg.scheduler.cron_max_concurrent_jobs == 4
+    assert cfg.scheduler.cron_completed_job_retention_seconds == 900
+
+
 def test_load_config_strict_mode_rejects_invalid_keys(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"gateway": {"port": 8787, "unknown": True}}), encoding="utf-8")

@@ -109,6 +109,59 @@ async def test_job_retry_on_failure():
 
 
 @pytest.mark.asyncio
+async def test_cancel_running_job_marks_cancelled(queue):
+    started = asyncio.Event()
+    interrupted = asyncio.Event()
+
+    async def worker(job):
+        del job
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
+
+    job = queue.submit("agent_run", {"msg": "world"}, session_id="s1")
+    queue.start(worker)
+
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    assert queue.cancel(job.id, session_id="s1") is True
+    await asyncio.wait_for(interrupted.wait(), timeout=2.0)
+
+    deadline = asyncio.get_running_loop().time() + 2.0
+    while asyncio.get_running_loop().time() < deadline:
+        result = queue.status(job.id, session_id="s1")
+        if result is not None and result.status == "cancelled":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("timed out waiting for cancelled job status")
+
+    await queue.stop()
+
+    result = queue.status(job.id, session_id="s1")
+    assert result is not None
+    assert result.status == "cancelled"
+    assert result.finished_at
+
+
+@pytest.mark.asyncio
+async def test_status_and_cancel_respect_session_scope(queue):
+    job = queue.submit("agent_run", {"x": 1}, session_id="s1")
+
+    assert queue.status(job.id, session_id="s2") is None
+    assert queue.cancel(job.id, session_id="s2") is False
+
+    owned = queue.status(job.id, session_id="s1")
+    assert owned is not None
+    assert owned.id == job.id
+
+    assert queue.cancel(job.id, session_id="s1") is True
+    assert queue.status(job.id, session_id="s1").status == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_list_jobs_by_session():
     from clawlite.jobs.queue import JobQueue
 

@@ -4,6 +4,8 @@ import asyncio
 import json
 import threading
 
+import pytest
+
 from clawlite.core.subagent import SubagentManager
 from clawlite.tools.base import ToolContext
 from clawlite.tools.cron import CronTool
@@ -42,13 +44,16 @@ class FakeCronAPI:
     async def list_jobs(self, *, session_id: str):
         return [{"id": "j1", "expression": "*/2 * * * *", "timezone": "UTC"}]
 
-    def remove_job(self, job_id: str) -> bool:
+    def remove_job(self, job_id: str, *, session_id: str | None = None) -> bool:
+        self.last_remove = {"job_id": job_id, "session_id": session_id}
         return job_id == "j1"
 
-    def enable_job(self, job_id: str, *, enabled: bool) -> bool:
+    def enable_job(self, job_id: str, *, enabled: bool, session_id: str | None = None) -> bool:
+        self.last_enable = {"job_id": job_id, "enabled": enabled, "session_id": session_id}
         return job_id == "j1"
 
-    async def run_job(self, job_id: str, *, force: bool = True) -> str | None:
+    async def run_job(self, job_id: str, *, force: bool = True, session_id: str | None = None) -> str | None:
+        self.last_run = {"job_id": job_id, "force": force, "session_id": session_id}
         if job_id != "j1":
             raise KeyError(job_id)
         return "ran"
@@ -104,18 +109,22 @@ def test_cron_tool_add_and_list() -> None:
 
         removed = json.loads(await tool.run({"action": "remove", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert removed["ok"] is True
+        assert api.last_remove == {"job_id": "j1", "session_id": "s1"}
 
         enabled = json.loads(await tool.run({"action": "enable", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert enabled["ok"] is True
         assert enabled["enabled"] is True
+        assert api.last_enable == {"job_id": "j1", "enabled": True, "session_id": "s1"}
 
         disabled = json.loads(await tool.run({"action": "disable", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert disabled["ok"] is True
         assert disabled["enabled"] is False
+        assert api.last_enable == {"job_id": "j1", "enabled": False, "session_id": "s1"}
 
         ran = json.loads(await tool.run({"action": "run", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert ran["ok"] is True
         assert ran["output"] == "ran"
+        assert api.last_run == {"job_id": "j1", "force": True, "session_id": "s1"}
 
         missing = json.loads(await tool.run({"action": "run", "job_id": "missing"}, ToolContext(session_id="s1")))
         assert missing["ok"] is False
@@ -143,16 +152,18 @@ def test_cron_tool_sync_remove_and_enable_run_off_event_loop_thread() -> None:
         def list_jobs(self, *, session_id: str):
             return [{"id": f"job:{session_id}"}]
 
-        def remove_job(self, job_id: str) -> bool:
+        def remove_job(self, job_id: str, *, session_id: str | None = None) -> bool:
             self.remove_thread_id = threading.get_ident()
+            self.remove_session_id = session_id
             return job_id == "j1"
 
-        def enable_job(self, job_id: str, *, enabled: bool) -> bool:
+        def enable_job(self, job_id: str, *, enabled: bool, session_id: str | None = None) -> bool:
             self.enable_thread_id = threading.get_ident()
             self.enable_enabled = enabled
+            self.enable_session_id = session_id
             return job_id == "j1"
 
-        async def run_job(self, job_id: str, *, force: bool = True) -> str | None:
+        async def run_job(self, job_id: str, *, force: bool = True, session_id: str | None = None) -> str | None:
             return None
 
     async def _scenario() -> None:
@@ -163,11 +174,22 @@ def test_cron_tool_sync_remove_and_enable_run_off_event_loop_thread() -> None:
         removed = json.loads(await tool.run({"action": "remove", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert removed["ok"] is True
         assert api.remove_thread_id != loop_thread_id
+        assert api.remove_session_id == "s1"
 
         enabled = json.loads(await tool.run({"action": "enable", "job_id": "j1"}, ToolContext(session_id="s1")))
         assert enabled["ok"] is True
         assert api.enable_enabled is True
         assert api.enable_thread_id != loop_thread_id
+        assert api.enable_session_id == "s1"
+
+    asyncio.run(_scenario())
+
+
+def test_cron_tool_rejects_foreign_session_override() -> None:
+    async def _scenario() -> None:
+        tool = CronTool(FakeCronAPI())
+        with pytest.raises(ValueError, match="session_id override is not allowed"):
+            await tool.run({"action": "list", "session_id": "s2"}, ToolContext(session_id="s1"))
 
     asyncio.run(_scenario())
 

@@ -6,6 +6,7 @@ Start here if you are setting up ClawLite from GitHub and want the current opera
 
 - [Repository README](../README.md) - overview and quickstart
 - [Status](./STATUS.md) - current milestone, strengths, and known gaps
+- [Robustness Scorecard](./ROBUSTNESS_SCORECARD.md) - current score by area plus `P0/P1/P2` hardening backlog
 - [Autonomy Plan](./AUTONOMY_PLAN.md) - phased plan for robustness and 24/7 autonomy
 - [Runbook](./RUNBOOK.md) - operator validation and incident flow
 - [Releasing](./RELEASING.md) - tag and release workflow

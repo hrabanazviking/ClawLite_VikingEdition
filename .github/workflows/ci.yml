@@ -26,22 +26,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          if python - <<'PY'
-          import pathlib
-          try:
-              import tomllib
-          except Exception:
-              import tomli as tomllib  # type: ignore
-          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))
-          optional = (data.get('project', {}) or {}).get('optional-dependencies', {}) or {}
-          raise SystemExit(0 if 'dev' in optional else 1)
-          PY
-          then
-            pip install -e ".[dev]"
-          else
-            pip install -e .
-          fi
-          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn questionary rich
+          pip install -e ".[dev]"
+          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn
 
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
@@ -81,7 +67,6 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e .
-          pip install httpx fastapi uvicorn rich questionary
 
       - name: Smoke - import core modules
         run: |
@@ -128,8 +113,8 @@ jobs:
       - name: Install ClawLite
         run: |
           pip install --upgrade pip
-          pip install -e .
-          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn questionary rich
+          pip install -e ".[dev]"
+          pip install pytest pytest-asyncio pytest-anyio anyio httpx "fastapi[all]" uvicorn
 
       - name: Run autonomy contract tests
         run: python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py

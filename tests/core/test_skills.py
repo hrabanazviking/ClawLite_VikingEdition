@@ -2,9 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from clawlite.core.skills import SkillsLoader
+
+
+class _FakeWatchfiles:
+    def __init__(self) -> None:
+        self.paths: tuple[str, ...] = ()
+        self._queue: asyncio.Queue[set[tuple[int, str]] | None] = asyncio.Queue()
+
+    async def awatch(self, *paths: str, stop_event=None):
+        self.paths = tuple(str(path) for path in paths)
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return
+            try:
+                batch = await asyncio.wait_for(self._queue.get(), timeout=0.05)
+            except asyncio.TimeoutError:
+                continue
+            if batch is None:
+                return
+            yield batch
+
+    async def emit(self, *paths: Path) -> None:
+        await self._queue.put({(1, str(path)) for path in paths})
 
 
 def test_skills_loader_discovers_skill_md(tmp_path: Path) -> None:
@@ -159,8 +183,9 @@ def test_skills_loader_debounces_skill_file_refreshes(tmp_path: Path) -> None:
     assert refreshed.version != first_version
 
 
-def test_skills_loader_watcher_refreshes_pending_skill_changes(tmp_path: Path) -> None:
+def test_skills_loader_watcher_refreshes_pending_skill_changes(tmp_path: Path, monkeypatch) -> None:
     async def _scenario() -> None:
+        monkeypatch.setitem(sys.modules, "watchfiles", None)
         skill_dir = tmp_path / "alpha"
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_dir / "SKILL.md"
@@ -196,6 +221,7 @@ def test_skills_loader_watcher_refreshes_pending_skill_changes(tmp_path: Path) -
 
             watcher = loader.watcher_status()
             assert watcher["running"] is True
+            assert watcher["backend"] == "polling"
             assert int(watcher["ticks"]) >= 1
             diagnostics = loader.diagnostics_report()
             assert diagnostics["watcher"]["running"] is True
@@ -208,6 +234,7 @@ def test_skills_loader_watcher_refreshes_pending_skill_changes(tmp_path: Path) -
 
 def test_skills_loader_watcher_survives_refresh_failure(tmp_path: Path, monkeypatch) -> None:
     async def _scenario() -> None:
+        monkeypatch.setitem(sys.modules, "watchfiles", None)
         skill_dir = tmp_path / "alpha"
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
@@ -240,11 +267,66 @@ def test_skills_loader_watcher_survives_refresh_failure(tmp_path: Path, monkeypa
                 watcher = loader.watcher_status()
                 if calls["count"] >= 2 and watcher["last_error"] == "":
                     assert watcher["running"] is True
+                    assert watcher["backend"] == "polling"
                     assert watcher["task_state"] == "running"
                     assert watcher["last_result"] in {"idle", "refreshed"}
                     break
             else:
                 raise AssertionError("watcher did not recover after refresh failure")
+        finally:
+            stopped = await loader.stop_watcher()
+            assert stopped["running"] is False
+
+    asyncio.run(_scenario())
+
+
+def test_skills_loader_watcher_uses_watchfiles_backend_when_available(tmp_path: Path, monkeypatch) -> None:
+    async def _scenario() -> None:
+        fake_watchfiles = _FakeWatchfiles()
+        monkeypatch.setitem(sys.modules, "watchfiles", SimpleNamespace(awatch=fake_watchfiles.awatch))
+
+        skill_dir = tmp_path / "alpha"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\nname: alpha\ndescription: first\n---\n\n# Alpha\n",
+            encoding="utf-8",
+        )
+
+        loader = SkillsLoader(
+            builtin_root=tmp_path,
+            state_path=tmp_path / "skills-state.json",
+            watch_debounce_ms=20,
+            watch_interval_s=0.5,
+        )
+        first = loader.get("alpha")
+        assert first is not None
+        first_version = first.version
+
+        started = await loader.start_watcher()
+        assert started["backend"] == "watchfiles"
+        try:
+            skill_path.write_text(
+                "---\nname: alpha\ndescription: second\n---\n\n# Alpha 2\n",
+                encoding="utf-8",
+            )
+            await fake_watchfiles.emit(skill_path)
+
+            for _ in range(40):
+                await asyncio.sleep(0.02)
+                updated = loader.get("alpha")
+                assert updated is not None
+                if updated.version != first_version:
+                    watcher = loader.watcher_status()
+                    assert watcher["running"] is True
+                    assert watcher["backend"] == "watchfiles"
+                    assert int(watcher["ticks"]) >= 1
+                    break
+            else:
+                raise AssertionError("watchfiles watcher did not refresh changed skill")
+
+            assert fake_watchfiles.paths
+            assert str(tmp_path) in fake_watchfiles.paths
         finally:
             stopped = await loader.stop_watcher()
             assert stopped["running"] is False
@@ -357,6 +439,59 @@ def test_skills_loader_parses_multiline_metadata_json(tmp_path: Path) -> None:
     row = loader.get("meta")
     assert row is not None
     assert "env:TEST_MULTI_ENV" in row.missing
+
+
+def test_skills_loader_parses_nested_yaml_metadata(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "meta-yaml"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: meta-yaml\n"
+        "description: metadata parser yaml\n"
+        "metadata:\n"
+        "  clawlite:\n"
+        "    requires:\n"
+        "      env:\n"
+        "        - TEST_YAML_ENV\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("meta-yaml")
+    assert row is not None
+    assert "env:TEST_YAML_ENV" in row.missing
+
+
+def test_skills_loader_parses_nested_yaml_requirements(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "schema-yaml"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: schema-yaml\n"
+        "description: requirement schema yaml\n"
+        "requirements:\n"
+        "  bins:\n"
+        "    - python3\n"
+        "  env:\n"
+        "    - GOOD_ENV\n"
+        "    - bad-env\n"
+        "  os:\n"
+        "    - Linux\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("schema-yaml")
+    assert row is not None
+    assert row.requirements["os"] == ["linux"]
+    assert "python3" in row.requirements["bins"]
+    assert "GOOD_ENV" in row.requirements["env"]
+    assert any(issue.startswith("requirements:invalid_env_name:bad-env") for issue in row.contract_issues)
+    assert row.available is False
 
 
 def test_skills_loader_supports_openclaw_any_bins_requirement(tmp_path: Path, monkeypatch) -> None:

@@ -28,7 +28,7 @@ class PdfReadTool(Tool):
         try:
             from pypdf import PdfReader
         except ImportError:
-            return "error: pypdf not installed. Run: pip install pypdf"
+            return 'error: pypdf not installed. Run: pip install "clawlite[media]"'
         src = str(arguments.get("path", "") or "").strip()
         if not src: return "error: path is required"
         max_chars = int(arguments.get("max_chars", self.max_chars) or self.max_chars)

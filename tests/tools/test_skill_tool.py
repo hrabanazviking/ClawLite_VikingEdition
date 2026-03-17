@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 from clawlite.providers.base import LLMResult
 from clawlite.config.schema import ToolSafetyPolicyConfig
@@ -68,6 +67,36 @@ class FakeWebFetchPayloadTool(Tool):
                 "result": {"text": f"Fetched content from {url}"},
             }
         )
+
+
+class FakeWebFetchSequenceTool(Tool):
+    name = "web_fetch"
+    description = "fake ordered web fetch"
+
+    def __init__(self, responses: list[tuple[str, dict[str, object] | str]]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, object]] = []
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"url": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        url = str(arguments.get("url", "") or "")
+        self.calls.append(
+            {
+                "url": url,
+                "mode": str(arguments.get("mode", "") or ""),
+                "max_chars": int(arguments.get("max_chars", 0) or 0),
+            }
+        )
+        if not self.responses:
+            raise AssertionError(f"unexpected web_fetch call: {url}")
+        expected_url, payload = self.responses.pop(0)
+        assert url == expected_url
+        if isinstance(payload, str):
+            return payload
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class FakeReadTool(Tool):
@@ -639,45 +668,107 @@ def test_run_skill_weather_falls_back_to_open_meteo(tmp_path: Path) -> None:
         "name: weather\ndescription: weather\nscript: weather",
     )
 
-    class _Response:
-        def __init__(self, text: str, *, status_code: int = 200) -> None:
-            self.text = text
-            self.status_code = status_code
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeWebFetchSequenceTool(
+                [
+                    (
+                        "https://wttr.in/Lisbon?format=3",
+                        {
+                            "ok": False,
+                            "tool": "web_fetch",
+                            "error": {"code": "http_error", "message": "status=503"},
+                        },
+                    ),
+                    (
+                        "https://geocoding-api.open-meteo.com/v1/search?name=Lisbon&count=1&language=en&format=json",
+                        {
+                            "ok": True,
+                            "tool": "web_fetch",
+                            "result": {
+                                "text": json.dumps(
+                                    {
+                                        "results": [
+                                            {
+                                                "name": "Lisbon",
+                                                "country": "Portugal",
+                                                "latitude": 38.72,
+                                                "longitude": -9.13,
+                                            }
+                                        ]
+                                    }
+                                )
+                            },
+                        },
+                    ),
+                    (
+                        "https://api.open-meteo.com/v1/forecast?latitude=38.72&longitude=-9.13&current_weather=true&timezone=auto",
+                        {
+                            "ok": True,
+                            "tool": "web_fetch",
+                            "result": {
+                                "text": json.dumps(
+                                    {
+                                        "current_weather": {
+                                            "temperature": 19.5,
+                                            "windspeed": 12.0,
+                                            "weathercode": 2,
+                                        }
+                                    }
+                                )
+                            },
+                        },
+                    ),
+                ]
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run({"name": "weather", "location": "Lisbon"}, ToolContext(session_id="cli:weather"))
+        assert out == "Lisbon, Portugal: 19.5°C, partly cloudy, wind 12.0 km/h"
 
-        def raise_for_status(self) -> None:
-            if self.status_code >= 400:
-                raise RuntimeError(f"status={self.status_code}")
+    asyncio.run(_scenario())
 
-        def json(self):
-            return json.loads(self.text)
 
-    class _Client:
-        def __init__(self, responses: list[_Response], **_: object) -> None:
-            self._responses = responses
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-        async def get(self, url: str, params=None):
-            del url, params
-            if not self._responses:
-                raise RuntimeError("no response")
-            return self._responses.pop(0)
+def test_run_skill_weather_blocks_when_web_fetch_is_unavailable(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "weather",
+        "name: weather\ndescription: weather\nscript: weather",
+    )
 
     async def _scenario() -> None:
         reg = ToolRegistry()
         tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
-        responses = [
-            _Response("wttr unavailable", status_code=503),
-            _Response(json.dumps({"results": [{"name": "Lisbon", "country": "Portugal", "latitude": 38.72, "longitude": -9.13}]})),
-            _Response(json.dumps({"current_weather": {"temperature": 19.5, "windspeed": 12.0, "weathercode": 2}})),
-        ]
-        with patch("httpx.AsyncClient", side_effect=lambda **kwargs: _Client(responses, **kwargs)):
-            out = await tool.run({"name": "weather", "location": "Lisbon"}, ToolContext(session_id="cli:weather"))
-            assert out == "Lisbon, Portugal: 19.5°C, partly cloudy, wind 12.0 km/h"
+        out = await tool.run({"name": "weather", "location": "Lisbon"}, ToolContext(session_id="cli:weather"))
+        assert out == "skill_blocked:weather:weather_fetch_unavailable"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_weather_respects_web_fetch_channel_safety_policy(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "weather",
+        "name: weather\ndescription: weather\nscript: weather",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=["web_fetch"],
+                blocked_channels=["telegram"],
+                allowed_channels=[],
+            )
+        )
+        reg.register(FakeWebFetchPayloadTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "weather", "location": "Lisbon"},
+            ToolContext(session_id="telegram:weather", channel="telegram", user_id="42"),
+        )
+        assert out == "skill_blocked:weather:tool_blocked_by_safety_policy:web_fetch:telegram"
 
     asyncio.run(_scenario())
 

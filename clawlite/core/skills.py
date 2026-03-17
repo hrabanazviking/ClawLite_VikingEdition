@@ -15,6 +15,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
+import yaml
+
 
 _KEY_VALUE_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.*)$")
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -94,17 +96,8 @@ def _extract_frontmatter_block(text: str) -> tuple[str, str] | None:
     return front, body
 
 
-def _extract_frontmatter(text: str) -> tuple[dict[str, object], str]:
-    """
-    Parse markdown frontmatter without requiring PyYAML.
-    Returns: (metadata, body_without_frontmatter)
-    """
+def _extract_frontmatter_legacy(front: str) -> dict[str, object]:
     data: dict[str, object] = {}
-    split = _extract_frontmatter_block(text)
-    if split is None:
-        return data, text
-    front, body = split
-
     current_key = ""
     current_value: list[str] = []
 
@@ -133,7 +126,23 @@ def _extract_frontmatter(text: str) -> tuple[dict[str, object], str]:
         if current_key and not match:
             current_value.append(line)
     flush()
-    return data, body
+    return data
+
+
+def _extract_frontmatter(text: str) -> tuple[dict[str, object], str]:
+    split = _extract_frontmatter_block(text)
+    if split is None:
+        return {}, text
+    front, body = split
+    try:
+        payload = yaml.safe_load(front)
+    except yaml.YAMLError:
+        return _extract_frontmatter_legacy(front), body
+    if payload is None:
+        return {}, body
+    if not isinstance(payload, Mapping):
+        return {}, body
+    return dict(payload), body
 
 
 def _normalize_os_name(name: str) -> str:
@@ -475,6 +484,7 @@ class SkillsLoader:
         self._watcher_stop_event: asyncio.Event | None = None
         self._watcher_state: dict[str, object] = {
             "enabled": True,
+            "backend": "polling",
             "running": False,
             "interval_s": self.watch_interval_s,
             "ticks": 0,
@@ -637,6 +647,96 @@ class SkillsLoader:
     def invalidate(self) -> None:
         self._pending_signature = self._roots_signature()
 
+    @staticmethod
+    def _load_watchfiles_awatch():
+        try:
+            from watchfiles import awatch  # type: ignore
+        except Exception:
+            return None
+        return awatch
+
+    def _watch_targets(self) -> list[Path]:
+        targets: list[Path] = []
+        seen: set[str] = set()
+        for root in self.roots:
+            candidate = root
+            while not candidate.exists():
+                parent = candidate.parent
+                if parent == candidate:
+                    candidate = None
+                    break
+                candidate = parent
+            if candidate is None or not candidate.exists():
+                continue
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(candidate)
+        return targets
+
+    def _watcher_tick(self) -> None:
+        self._watcher_state["ticks"] = int(self._watcher_state.get("ticks", 0) or 0) + 1
+        self._watcher_state["last_tick_monotonic"] = float(self._now_monotonic())
+
+    def _watcher_record_failure(self, exc: Exception, *, result: str = "failed_refresh") -> None:
+        self._watcher_state["last_error"] = str(exc)
+        self._watcher_state["last_result"] = result
+        self._watcher_state["debounced"] = False
+        self._watcher_state["pending"] = False
+
+    def _watcher_apply_report(self, report: dict[str, object]) -> None:
+        self._watcher_state["last_error"] = ""
+        self._watcher_state["last_refresh_monotonic"] = float(report.get("refreshed_at_monotonic", 0.0) or 0.0)
+        self._watcher_state["debounced"] = bool(report.get("debounced", False))
+        self._watcher_state["pending"] = bool(report.get("pending", False))
+        self._watcher_state["last_result"] = "refreshed" if report.get("refreshed", False) else "idle"
+
+    async def _watcher_refresh_once(self, *, stop_event: asyncio.Event, retry_pending: bool) -> None:
+        try:
+            report = self.refresh(force=False)
+        except Exception as exc:
+            self._watcher_record_failure(exc)
+            return
+        self._watcher_apply_report(report)
+
+        if not retry_pending or stop_event.is_set() or not report.get("pending", False):
+            return
+
+        debounce_s = max(0.0, float(self.watch_debounce_ms) / 1000.0)
+        wait_s = debounce_s
+        if debounce_s > 0:
+            ready_at = float(self._last_refresh_monotonic) + debounce_s
+            wait_s = max(0.0, ready_at - float(self._now_monotonic()))
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+        if stop_event.is_set():
+            return
+        try:
+            report = self.refresh(force=False)
+        except Exception as exc:
+            self._watcher_record_failure(exc)
+            return
+        self._watcher_apply_report(report)
+
+    async def _watcher_loop_poll(self, *, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            self._watcher_tick()
+            await self._watcher_refresh_once(stop_event=stop_event, retry_pending=False)
+            await asyncio.sleep(self.watch_interval_s)
+
+    async def _watcher_loop_watchfiles(self, *, stop_event: asyncio.Event, awatch) -> None:
+        targets = self._watch_targets()
+        if not targets:
+            await self._watcher_loop_poll(stop_event=stop_event)
+            return
+
+        async for _changes in awatch(*[str(path) for path in targets], stop_event=stop_event):
+            if stop_event.is_set():
+                break
+            self._watcher_tick()
+            await self._watcher_refresh_once(stop_event=stop_event, retry_pending=True)
+
     def _watcher_done_callback(self, task: asyncio.Task[None]) -> None:
         self._watcher_state["running"] = False
         try:
@@ -659,29 +759,25 @@ class SkillsLoader:
 
         stop_event = asyncio.Event()
         self._watcher_stop_event = stop_event
+        awatch = self._load_watchfiles_awatch()
+        backend = "watchfiles" if awatch is not None and self._watch_targets() else "polling"
         self._watcher_state["running"] = True
+        self._watcher_state["backend"] = backend
         self._watcher_state["interval_s"] = self.watch_interval_s
         self._watcher_state["last_error"] = ""
         self._watcher_state["last_result"] = "starting"
 
         async def _loop() -> None:
-            while not stop_event.is_set():
-                self._watcher_state["ticks"] = int(self._watcher_state.get("ticks", 0) or 0) + 1
-                self._watcher_state["last_tick_monotonic"] = float(self._now_monotonic())
+            if backend == "watchfiles" and awatch is not None:
                 try:
-                    report = self.refresh(force=False)
+                    await self._watcher_loop_watchfiles(stop_event=stop_event, awatch=awatch)
                 except Exception as exc:
-                    self._watcher_state["last_error"] = str(exc)
-                    self._watcher_state["last_result"] = "failed_refresh"
-                    self._watcher_state["debounced"] = False
-                    self._watcher_state["pending"] = False
-                else:
-                    self._watcher_state["last_error"] = ""
-                    self._watcher_state["last_refresh_monotonic"] = float(report.get("refreshed_at_monotonic", 0.0) or 0.0)
-                    self._watcher_state["debounced"] = bool(report.get("debounced", False))
-                    self._watcher_state["pending"] = bool(report.get("pending", False))
-                    self._watcher_state["last_result"] = "refreshed" if report.get("refreshed", False) else "idle"
-                await asyncio.sleep(self.watch_interval_s)
+                    self._watcher_record_failure(exc, result="watchfiles_failed")
+                    self._watcher_state["backend"] = "polling"
+                    if not stop_event.is_set():
+                        await self._watcher_loop_poll(stop_event=stop_event)
+                return
+            await self._watcher_loop_poll(stop_event=stop_event)
 
         self._watcher_task = asyncio.create_task(_loop())
         self._watcher_task.add_done_callback(self._watcher_done_callback)
@@ -722,6 +818,7 @@ class SkillsLoader:
                 task_state = "done"
         return {
             "enabled": True,
+            "backend": str(self._watcher_state.get("backend", "polling") or "polling"),
             "running": bool(task is not None and not task.done() and self._watcher_state.get("running", False)),
             "task_state": task_state,
             "interval_s": self.watch_interval_s,

@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hmac
-from functools import lru_cache
-from importlib import resources
 import json
 import time
 import uuid
@@ -34,7 +32,6 @@ from clawlite.core.skills import SkillsLoader
 from clawlite.providers import build_provider, detect_provider_name
 from clawlite.providers.catalog import default_provider_model, provider_profile
 from clawlite.providers.discovery import detect_local_runtime, probe_local_provider_runtime
-from clawlite.providers.hints import provider_telemetry_summary
 from clawlite.providers.reliability import is_quota_429_error
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatDecision, HeartbeatService
@@ -47,7 +44,36 @@ from clawlite.runtime import (
     SupervisorComponentPolicy,
     SupervisorIncident,
 )
+from clawlite.gateway.control_handlers import GatewayControlHandlers
 from clawlite.gateway.tool_catalog import build_tools_catalog_payload, parse_include_schema_flag
+from clawlite.gateway.dashboard_state import (
+    dashboard_channels_summary as _dashboard_channels_summary_payload,
+    dashboard_cron_summary as _dashboard_cron_summary_payload,
+    dashboard_preview as _dashboard_preview_text,
+    dashboard_state_payload as _dashboard_state_payload_builder,
+    dashboard_self_evolution_summary as _dashboard_self_evolution_summary_payload,
+    operator_channel_summary as _operator_channel_summary,
+    recent_dashboard_sessions as _recent_dashboard_sessions_payload,
+)
+from clawlite.gateway.engine_diagnostics import (
+    engine_memory_integration_payload as _engine_memory_integration_payload,
+    engine_memory_payloads as _engine_memory_payloads,
+    engine_memory_quality_payload as _engine_memory_quality_payload,
+    memory_monitor_payload as _memory_monitor_payload,
+)
+from clawlite.gateway.memory_dashboard import (
+    dashboard_memory_summary as _dashboard_memory_summary_payload,
+)
+from clawlite.gateway.payloads import (
+    autonomy_provider_suppression_hint as _autonomy_provider_suppression_hint,
+    control_plane_to_dict as _control_plane_to_dict,
+    dashboard_asset_text as _dashboard_asset_text,
+    mask_secret as _mask_secret,
+    provider_autonomy_snapshot as _provider_autonomy_snapshot,
+    provider_telemetry_snapshot as _provider_telemetry_snapshot,
+    render_root_dashboard_html as _render_root_dashboard_html,
+)
+from clawlite.gateway.webhooks import GatewayWebhookHandlers
 from clawlite.cli.onboarding import build_dashboard_handoff
 from clawlite.cli.ops import memory_profile_snapshot, memory_snapshot_create, memory_snapshot_rollback, memory_suggest_snapshot, memory_version_snapshot
 from clawlite.jobs.queue import JobQueue
@@ -585,214 +611,6 @@ class WebSocketTelemetry:
             }
 
 
-@lru_cache(maxsize=1)
-def _dashboard_asset_text(name: str) -> str:
-    asset = resources.files("clawlite.dashboard").joinpath(name)
-    return asset.read_text(encoding="utf-8")
-
-
-def _dashboard_bootstrap_payload(*, control_plane: ControlPlaneResponse) -> dict[str, Any]:
-    return {
-        "brand": {
-            "name": "ClawLite",
-            "subtitle": "Gateway Dashboard",
-        },
-        "control_plane": control_plane.dict(),
-        "auth": dict(control_plane.auth),
-        "paths": {
-            "health": "/health",
-            "dashboard_state": "/api/dashboard/state",
-            "status": "/api/status",
-            "diagnostics": "/api/diagnostics",
-            "message": "/api/message",
-            "token": "/api/token",
-            "tools": "/api/tools/catalog",
-            "channels_replay": "/v1/control/channels/replay",
-            "channels_recover": "/v1/control/channels/recover",
-            "channels_inbound_replay": "/v1/control/channels/inbound-replay",
-            "telegram_refresh": "/v1/control/channels/telegram/refresh",
-            "telegram_pairing_approve": "/v1/control/channels/telegram/pairing/approve",
-            "telegram_pairing_reject": "/v1/control/channels/telegram/pairing/reject",
-            "telegram_pairing_revoke": "/v1/control/channels/telegram/pairing/revoke",
-            "telegram_offset_commit": "/v1/control/channels/telegram/offset/commit",
-            "telegram_offset_sync": "/v1/control/channels/telegram/offset/sync",
-            "telegram_offset_reset": "/v1/control/channels/telegram/offset/reset",
-            "discord_refresh": "/v1/control/channels/discord/refresh",
-            "memory_suggest_refresh": "/v1/control/memory/suggest/refresh",
-            "memory_snapshot_create": "/v1/control/memory/snapshot/create",
-            "memory_snapshot_rollback": "/v1/control/memory/snapshot/rollback",
-            "provider_recover": "/v1/control/provider/recover",
-            "autonomy_wake": "/v1/control/autonomy/wake",
-            "supervisor_recover": "/v1/control/supervisor/recover",
-            "heartbeat_trigger": "/v1/control/heartbeat/trigger",
-            "ws": "/ws",
-        },
-        "assets": {
-            "css": f"{_DASHBOARD_ASSET_ROOT}/dashboard.css",
-            "js": f"{_DASHBOARD_ASSET_ROOT}/dashboard.js",
-        },
-    }
-
-
-def _render_root_dashboard_html(*, control_plane: ControlPlaneResponse) -> str:
-    template = _dashboard_asset_text("index.html")
-    bootstrap = json.dumps(_dashboard_bootstrap_payload(control_plane=control_plane), ensure_ascii=False)
-    return template.replace(_DASHBOARD_BOOTSTRAP_TOKEN, bootstrap)
-
-
-def _mask_secret(value: str, *, keep: int = 4) -> str:
-    token = str(value or "").strip()
-    if not token:
-        return ""
-    if len(token) <= keep:
-        return "*" * len(token)
-    return f"{'*' * max(3, len(token) - keep)}{token[-keep:]}"
-
-
-_SENSITIVE_KEY_MARKERS: tuple[str, ...] = (
-    "api_key",
-    "access_token",
-    "token",
-    "authorization",
-    "auth",
-    "credential",
-    "credentials",
-    "secret",
-    "password",
-)
-
-
-def _is_sensitive_telemetry_key(key: Any) -> bool:
-    value = str(key or "").strip().lower()
-    if not value:
-        return False
-    return any(marker in value for marker in _SENSITIVE_KEY_MARKERS)
-
-
-def _sanitize_telemetry_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        sanitized: dict[str, Any] = {}
-        for key, nested in value.items():
-            if _is_sensitive_telemetry_key(key):
-                continue
-            sanitized[str(key)] = _sanitize_telemetry_payload(nested)
-        return sanitized
-    if isinstance(value, list):
-        return [_sanitize_telemetry_payload(item) for item in value]
-    return value
-
-
-def _provider_telemetry_snapshot(provider: Any) -> dict[str, Any]:
-    minimal: dict[str, Any] = {
-        "provider": str(getattr(provider, "provider_name", provider.__class__.__name__.lower()) or provider.__class__.__name__.lower()),
-        "model": str(getattr(provider, "model", "") or ""),
-        "diagnostics_available": False,
-        "counters": {},
-    }
-    diagnostics_fn = getattr(provider, "diagnostics", None)
-    if not callable(diagnostics_fn):
-        return minimal
-    try:
-        raw = diagnostics_fn()
-    except Exception:
-        return minimal
-    if not isinstance(raw, dict):
-        return minimal
-
-    telemetry = _sanitize_telemetry_payload(raw)
-    if not isinstance(telemetry, dict):
-        return minimal
-    telemetry.setdefault("provider", minimal["provider"])
-    telemetry.setdefault("model", minimal["model"])
-    telemetry["diagnostics_available"] = True
-    if not isinstance(telemetry.get("counters"), dict):
-        telemetry["counters"] = {}
-    telemetry["summary"] = provider_telemetry_summary(telemetry)
-    return telemetry
-
-
-def _autonomy_provider_suppression_hint(*, provider: str, reason: str) -> str:
-    provider_name = str(provider or "provider").strip() or "provider"
-    normalized_reason = str(reason or "").strip().lower()
-    hints = {
-        "auth": f"Provider {provider_name} needs valid credentials before autonomy should try again.",
-        "quota": f"Provider {provider_name} appears out of quota or billing; restore credits or switch provider/model.",
-        "rate_limit": f"Provider {provider_name} is rate-limited; wait for the limit window or use another provider.",
-        "retry_exhausted": f"Provider {provider_name} exhausted retries; wait briefly before autonomy retries.",
-        "network": f"Provider {provider_name} is unreachable; restore connectivity before autonomy retries.",
-        "http_transient": f"Provider {provider_name} is seeing transient HTTP failures; let it recover before autonomy retries.",
-        "circuit_open": f"Provider {provider_name} circuit breaker is open; autonomy will wait for cooldown.",
-        "cooldown": f"Provider {provider_name} still has candidates cooling down; autonomy will wait before retrying.",
-    }
-    return hints.get(normalized_reason, "")
-
-
-def _provider_autonomy_snapshot(*, provider: Any, default_circuit_cooldown_s: float = 30.0) -> dict[str, Any]:
-    telemetry = _provider_telemetry_snapshot(provider)
-    summary = telemetry.get("summary", {}) if isinstance(telemetry, dict) else {}
-    counters = telemetry.get("counters", {}) if isinstance(telemetry, dict) else {}
-    if not isinstance(summary, dict):
-        summary = {}
-    if not isinstance(counters, dict):
-        counters = {}
-
-    cooldown_candidates: list[float] = []
-    for key in ("primary_cooldown_remaining_s", "fallback_cooldown_remaining_s"):
-        try:
-            value = float(counters.get(key, 0.0) or 0.0)
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > 0.0:
-            cooldown_candidates.append(value)
-    cooling_candidates = summary.get("cooling_candidates", []) if isinstance(summary.get("cooling_candidates"), list) else []
-    for row in cooling_candidates:
-        if not isinstance(row, dict):
-            continue
-        try:
-            value = float(row.get("cooldown_remaining_s", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            value = 0.0
-        if value > 0.0:
-            cooldown_candidates.append(value)
-
-    state = str(summary.get("state", "healthy") or "healthy").strip().lower() or "healthy"
-    provider_name = str(telemetry.get("provider", "") or "")
-    last_error_class = str(telemetry.get("last_error_class", counters.get("last_error_class", "")) or "")
-    summary_suppression_reason = str(summary.get("suppression_reason", "") or "").strip().lower()
-    cooldown_remaining_s = max(cooldown_candidates, default=0.0)
-    if state == "circuit_open" and cooldown_remaining_s <= 0.0:
-        cooldown_remaining_s = max(0.0, float(default_circuit_cooldown_s or 0.0))
-
-    suppression_reason = ""
-    suppression_backoff_s = 0.0
-    if state in {"circuit_open", "cooldown"}:
-        suppression_reason = summary_suppression_reason or state
-        suppression_backoff_s = cooldown_remaining_s
-    else:
-        synthetic_backoff_s = {
-            "auth": 900.0,
-            "quota": 1800.0,
-            "rate_limit": 120.0,
-            "retry_exhausted": 120.0,
-            "network": 60.0,
-            "http_transient": 60.0,
-        }
-        suppression_backoff_s = float(synthetic_backoff_s.get(last_error_class, 0.0) or 0.0)
-        if suppression_backoff_s > 0.0:
-            suppression_reason = last_error_class
-    suppression_hint = _autonomy_provider_suppression_hint(provider=provider_name, reason=suppression_reason)
-
-    return {
-        "provider": provider_name,
-        "state": state,
-        "cooldown_remaining_s": round(cooldown_remaining_s, 3),
-        "last_error_class": last_error_class,
-        "suppression_reason": suppression_reason,
-        "suppression_backoff_s": round(suppression_backoff_s, 3),
-        "suppression_hint": suppression_hint,
-    }
-
-
 async def _run_engine_with_timeout(
     *,
     engine: AgentEngine,
@@ -1021,14 +839,14 @@ class _CronAPI:
     def list_jobs(self, *, session_id: str) -> list[dict[str, Any]]:
         return self.service.list_jobs(session_id=session_id)
 
-    def remove_job(self, job_id: str) -> bool:
-        return self.service.remove_job(job_id)
+    def remove_job(self, job_id: str, *, session_id: str | None = None) -> bool:
+        return self.service.remove_job(job_id, session_id=session_id)
 
-    def enable_job(self, job_id: str, *, enabled: bool) -> bool:
-        return self.service.enable_job(job_id, enabled=enabled)
+    def enable_job(self, job_id: str, *, enabled: bool, session_id: str | None = None) -> bool:
+        return self.service.enable_job(job_id, enabled=enabled, session_id=session_id)
 
-    async def run_job(self, job_id: str, *, force: bool = True) -> str | None:
-        return await self.service.run_job(job_id, force=force)
+    async def run_job(self, job_id: str, *, force: bool = True, session_id: str | None = None) -> str | None:
+        return await self.service.run_job(job_id, force=force, session_id=session_id)
 
 
 class _MessageAPI:
@@ -1182,6 +1000,8 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     cron = CronService(
         store_path=Path(config.state_path) / "cron_jobs.json",
         default_timezone=config.scheduler.timezone,
+        max_concurrent_jobs=config.scheduler.cron_max_concurrent_jobs,
+        completed_job_retention_seconds=config.scheduler.cron_completed_job_retention_seconds,
     )
     heartbeat_interval = int(config.gateway.heartbeat.interval_s or 1800)
     scheduler_interval = int(getattr(config.scheduler, "heartbeat_interval_seconds", heartbeat_interval) or heartbeat_interval)
@@ -2796,6 +2616,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
             return normalized
         return fallback
+
+    control_handlers = GatewayControlHandlers(
+        auth_guard=auth_guard,
+        diagnostics_require_auth=cfg.gateway.diagnostics.require_auth,
+        runtime=runtime,
+        heartbeat_enabled=bool(cfg.gateway.heartbeat.enabled),
+        memory_snapshot_create_fn=memory_snapshot_create,
+        memory_snapshot_rollback_fn=memory_snapshot_rollback,
+        submit_heartbeat_wake=_submit_heartbeat_wake,
+        submit_proactive_wake=_submit_proactive_wake,
+        self_evolution_runner_state=self_evolution_runner_state,
+    )
+    webhook_handlers = GatewayWebhookHandlers(
+        config=cfg,
+        runtime=runtime,
+        telegram_max_body_bytes=TELEGRAM_WEBHOOK_MAX_BODY_BYTES,
+        whatsapp_max_body_bytes=WHATSAPP_WEBHOOK_MAX_BODY_BYTES,
+    )
 
     async def _send_channel_recovery_notice(payload: dict[str, Any]) -> None:
         normalized_channel = str(payload.get("channel", "") or "").strip()
@@ -4575,152 +4413,42 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return _control_plane_payload()
 
     def _dashboard_preview(value: Any, *, max_chars: int = 140) -> str:
-        text = " ".join(str(value or "").strip().split())
-        if len(text) <= max_chars:
-            return text
-        return f"{text[: max(1, max_chars - 3)]}..."
+        return _dashboard_preview_text(value, max_chars=max_chars)
 
     def _recent_dashboard_sessions(*, limit: int = 8) -> dict[str, Any]:
-        sessions = runtime.engine.sessions
-        paths = sorted(
-            sessions.root.glob("*.jsonl"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
+        return _recent_dashboard_sessions_payload(
+            sessions=runtime.engine.sessions,
+            subagents=runtime.engine.subagents,
+            limit=limit,
         )
-        rows: list[dict[str, Any]] = []
-        for path in paths[: max(1, int(limit or 1))]:
-            session_id = sessions._restore_session_id(path.stem)
-            history = sessions.read(session_id, limit=1)
-            last_message = history[-1] if history else {}
-            session_runs = runtime.engine.subagents.list_runs(session_id=session_id)
-            active_runs = runtime.engine.subagents.list_runs(session_id=session_id, active_only=True)
-            subagent_statuses: dict[str, int] = {}
-            for run in session_runs:
-                subagent_statuses[run.status] = subagent_statuses.get(run.status, 0) + 1
-            rows.append(
-                {
-                    "session_id": session_id,
-                    "last_role": str(last_message.get("role", "") or ""),
-                    "last_preview": _dashboard_preview(last_message.get("content", "")),
-                    "active_subagents": len(active_runs),
-                    "subagent_statuses": dict(sorted(subagent_statuses.items())),
-                    "updated_at": dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).isoformat(),
-                }
-            )
-        return {
-            "count": len(paths),
-            "items": rows,
-        }
 
     def _dashboard_channels_summary() -> dict[str, Any]:
-        snapshot = runtime.channels.status()
-        items: list[dict[str, Any]] = []
-        for name, payload in sorted(snapshot.items()):
-            row = dict(payload) if isinstance(payload, dict) else {"status": payload}
-            state_label = str(
-                row.get("status")
-                or row.get("worker_state")
-                or row.get("mode")
-                or ("enabled" if bool(row.get("enabled", False)) else "disabled")
-            )
-            items.append(
-                {
-                    "name": name,
-                    "enabled": bool(row.get("enabled", False)),
-                    "state": state_label,
-                    "summary": _dashboard_preview(row, max_chars=180),
-                }
-            )
-        return {
-            "count": len(items),
-            "items": items,
-        }
+        return _dashboard_channels_summary_payload(runtime.channels.status())
 
     def _dashboard_cron_summary(*, limit: int = 8) -> dict[str, Any]:
-        jobs = runtime.cron.list_jobs()[: max(1, int(limit or 1))]
-        return {
-            "status": runtime.cron.status(),
-            "jobs": jobs,
-        }
+        return _dashboard_cron_summary_payload(cron=runtime.cron, limit=limit)
 
     def _dashboard_self_evolution_summary() -> dict[str, Any]:
-        evo = runtime.self_evolution
-        if evo is None:
-            return {"enabled": False, "status": {}, "runner": {}}
-        return {
-            "enabled": bool(evo.enabled),
-            "status": evo.status(),
-            "runner": dict(self_evolution_runner_state),
-        }
+        return _dashboard_self_evolution_summary_payload(
+            evolution=runtime.self_evolution,
+            runner_state=self_evolution_runner_state,
+        )
 
     def _dashboard_memory_summary() -> dict[str, Any]:
-        monitor_payload: dict[str, Any]
-        if runtime.memory_monitor is None:
-            monitor_payload = {"enabled": False}
-        else:
-            try:
-                monitor_payload = dict(runtime.memory_monitor.telemetry())
-            except Exception:
-                monitor_payload = {"enabled": False, "error": "memory_monitor_unavailable"}
-            monitor_payload["enabled"] = True
-
-        analysis_payload: dict[str, Any] = {}
-        analysis_stats = getattr(runtime.engine.memory, "analysis_stats", None)
-        if callable(analysis_stats):
-            try:
-                raw_analysis = analysis_stats()
-            except Exception:
-                raw_analysis = {}
-            if isinstance(raw_analysis, dict):
-                analysis_payload = raw_analysis
-
-        profile_payload = memory_profile_snapshot(runtime.config)
-        suggest_payload = memory_suggest_snapshot(runtime.config, refresh=False)
-        versions_payload = memory_version_snapshot(runtime.config)
-        quality_payload: dict[str, Any] = {}
-        quality_state_snapshot = getattr(runtime.engine.memory, "quality_state_snapshot", None)
-        if callable(quality_state_snapshot):
-            try:
-                raw_quality = quality_state_snapshot()
-            except Exception:
-                raw_quality = {}
-            if isinstance(raw_quality, dict):
-                quality_payload = raw_quality
-
-        return {
-            "monitor": monitor_payload,
-            "analysis": analysis_payload,
-            "profile": profile_payload,
-            "suggestions": suggest_payload,
-            "versions": versions_payload,
-            "quality": quality_payload,
-        }
+        return _dashboard_memory_summary_payload(
+            memory_monitor=runtime.memory_monitor,
+            memory_store=runtime.engine.memory,
+            config=runtime.config,
+            memory_profile_snapshot_fn=memory_profile_snapshot,
+            memory_suggest_snapshot_fn=memory_suggest_snapshot,
+            memory_version_snapshot_fn=memory_version_snapshot,
+        )
 
     def _dashboard_telegram_summary() -> dict[str, Any]:
-        channel = runtime.channels.get_channel("telegram")
-        operator_status = getattr(channel, "operator_status", None)
-        if channel is None or not callable(operator_status):
-            return {"available": False}
-        try:
-            payload = operator_status()
-        except Exception as exc:
-            return {"last_error": str(exc), "available": False}
-        if isinstance(payload, dict):
-            return {"available": True, **payload}
-        return {"available": True}
+        return _operator_channel_summary(runtime.channels.get_channel("telegram"))
 
     def _dashboard_discord_summary() -> dict[str, Any]:
-        channel = runtime.channels.get_channel("discord")
-        operator_status = getattr(channel, "operator_status", None)
-        if channel is None or not callable(operator_status):
-            return {"available": False}
-        try:
-            payload = operator_status()
-        except Exception as exc:
-            return {"last_error": str(exc), "available": False}
-        if isinstance(payload, dict):
-            return {"available": True, **payload}
-        return {"available": True}
+        return _operator_channel_summary(runtime.channels.get_channel("discord"))
 
     def _dashboard_state_payload() -> dict[str, Any]:
         generated_at = _utc_now_iso()
@@ -4728,35 +4456,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         provider_telemetry = _provider_telemetry_snapshot(runtime.engine.provider)
         provider_autonomy = _provider_autonomy_snapshot(provider=runtime.engine.provider)
         skills = runtime.skills_loader.diagnostics_report()
-        return {
-            "contract_version": GATEWAY_CONTRACT_VERSION,
-            "generated_at": generated_at,
-            "control_plane": control_plane.dict(),
-            "queue": runtime.bus.stats(),
-            "sessions": _recent_dashboard_sessions(),
-            "channels": _dashboard_channels_summary(),
-            "channels_dispatcher": runtime.channels.dispatcher_diagnostics(),
-            "channels_delivery": runtime.channels.delivery_diagnostics(),
-            "channels_inbound": runtime.channels.inbound_diagnostics(),
-            "channels_recovery": runtime.channels.recovery_diagnostics(),
-            "discord": _dashboard_discord_summary(),
-            "telegram": _dashboard_telegram_summary(),
-            "cron": _dashboard_cron_summary(),
-            "heartbeat": runtime.heartbeat.status(),
-            "subagents": runtime.engine.subagents.status(),
-            "supervisor": runtime.supervisor.status() if runtime.supervisor is not None else {},
-            "skills": skills,
-            "workspace": runtime.workspace.runtime_health(),
-            "handoff": build_dashboard_handoff(runtime.config),
-            "onboarding": runtime.workspace.onboarding_status(),
-            "bootstrap": runtime.workspace.bootstrap_status(),
-            "memory": _dashboard_memory_summary(),
-            "provider": {
-                "telemetry": provider_telemetry,
-                "autonomy": provider_autonomy,
-            },
-            "self_evolution": _dashboard_self_evolution_summary(),
-        }
+        return _dashboard_state_payload_builder(
+            contract_version=GATEWAY_CONTRACT_VERSION,
+            generated_at=generated_at,
+            control_plane=control_plane,
+            control_plane_to_dict=_control_plane_to_dict,
+            queue_payload=runtime.bus.stats(),
+            sessions_payload=_recent_dashboard_sessions(),
+            channels_payload=_dashboard_channels_summary(),
+            channels_dispatcher_payload=runtime.channels.dispatcher_diagnostics(),
+            channels_delivery_payload=runtime.channels.delivery_diagnostics(),
+            channels_inbound_payload=runtime.channels.inbound_diagnostics(),
+            channels_recovery_payload=runtime.channels.recovery_diagnostics(),
+            discord_payload=_dashboard_discord_summary(),
+            telegram_payload=_dashboard_telegram_summary(),
+            cron_payload=_dashboard_cron_summary(),
+            heartbeat_payload=runtime.heartbeat.status(),
+            subagents_payload=runtime.engine.subagents.status(),
+            supervisor_payload=runtime.supervisor.status() if runtime.supervisor is not None else {},
+            skills_payload=skills,
+            workspace_payload=runtime.workspace.runtime_health(),
+            handoff_payload=build_dashboard_handoff(runtime.config),
+            onboarding_payload=runtime.workspace.onboarding_status(),
+            bootstrap_payload=runtime.workspace.bootstrap_status(),
+            memory_payload=_dashboard_memory_summary(),
+            provider_telemetry_payload=provider_telemetry,
+            provider_autonomy_payload=provider_autonomy,
+            self_evolution_payload=_dashboard_self_evolution_summary(),
+        )
 
     async def _dashboard_state_handler(request: Request) -> dict[str, Any]:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
@@ -4798,207 +4525,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "turn_metrics": turn_metrics_snapshot,
             "skills": runtime.skills_loader.diagnostics_report(),
         }
-        memory_payload: dict[str, Any]
         memory_store = getattr(runtime.engine, "memory", None)
-        memory_diagnostics = getattr(memory_store, "diagnostics", None)
-        if callable(memory_diagnostics):
-            try:
-                raw_memory_payload = memory_diagnostics()
-            except Exception as exc:
-                memory_payload = {
-                    "available": True,
-                    "error": str(exc),
-                }
-            else:
-                if isinstance(raw_memory_payload, dict):
-                    memory_payload = dict(raw_memory_payload)
-                else:
-                    memory_payload = {
-                        "available": True,
-                        "error": "invalid_memory_diagnostics_payload",
-                    }
-                memory_payload.setdefault("available", True)
-        else:
-            memory_payload = {
-                "available": False,
-            }
-        engine_payload["memory"] = memory_payload
-        memory_analysis_payload: dict[str, Any] = {
-            "available": False,
-        }
-        memory_analysis_stats = getattr(memory_store, "analysis_stats", None)
-        if callable(memory_analysis_stats):
-            try:
-                raw_memory_analysis_payload = memory_analysis_stats()
-            except Exception as exc:
-                memory_analysis_payload = {
-                    "available": True,
-                    "error": str(exc),
-                }
-            else:
-                if isinstance(raw_memory_analysis_payload, dict):
-                    memory_analysis_payload = dict(raw_memory_analysis_payload)
-                else:
-                    memory_analysis_payload = {
-                        "available": True,
-                        "error": "invalid_memory_analysis_payload",
-                    }
-                memory_analysis_payload.setdefault("available", True)
-        engine_payload["memory_analysis"] = memory_analysis_payload
-
-        memory_quality_payload: dict[str, Any] = {
-            "available": False,
-            "updated": False,
-            "report": {},
-            "state": {},
-            "tuning": {},
-            "error": {
-                "type": "not_supported",
-                "message": "memory_quality_methods_unavailable",
-            },
-        }
-        quality_update = getattr(memory_store, "update_quality_state", None)
-        quality_snapshot = getattr(memory_store, "quality_state_snapshot", None)
-        if callable(quality_update) and callable(quality_snapshot):
-            retrieval_metrics = {
-                "attempts": int(retrieval_metrics_snapshot.get("retrieval_attempts", 0) or 0),
-                "hits": int(retrieval_metrics_snapshot.get("retrieval_hits", 0) or 0),
-                "rewrites": int(retrieval_metrics_snapshot.get("retrieval_rewrites", 0) or 0),
-            }
-            turn_metrics = {
-                "successes": int(turn_metrics_snapshot.get("turns_success", 0) or 0),
-                "errors": int(turn_metrics_snapshot.get("turns_provider_errors", 0) or 0)
-                + int(turn_metrics_snapshot.get("turns_cancelled", 0) or 0),
-            }
-            semantic_raw, reasoning_layer_metrics = await _collect_memory_analysis_metrics()
-            semantic_metrics = {
-                "enabled": bool(semantic_raw.get("enabled", False)),
-                "coverage_ratio": float(semantic_raw.get("coverage_ratio", 0.0) or 0.0),
-            }
-
-            fingerprint_payload = {
-                "retrieval": retrieval_metrics,
-                "turn": turn_metrics,
-                "semantic": semantic_metrics,
-                "reasoning_layers": reasoning_layer_metrics,
-            }
-            try:
-                fingerprint = json.dumps(fingerprint_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-            except Exception:
-                fingerprint = repr(fingerprint_payload)
-
-            cached_payload = memory_quality_cache.get("payload")
-            if memory_quality_cache.get("fingerprint") == fingerprint and isinstance(cached_payload, dict):
-                memory_quality_payload = dict(cached_payload)
-                try:
-                    snapshot = quality_snapshot()
-                    if isinstance(snapshot, dict):
-                        tuning_snapshot = snapshot.get("tuning", {})
-                        tuning_payload = dict(tuning_snapshot) if isinstance(tuning_snapshot, dict) else {}
-                        state_payload = memory_quality_payload.get("state", {})
-                        if isinstance(state_payload, dict):
-                            state_payload = dict(state_payload)
-                        else:
-                            state_payload = {}
-                        state_payload["tuning"] = tuning_payload
-                        memory_quality_payload["state"] = state_payload
-                        memory_quality_payload["tuning"] = tuning_payload
-                        report_payload = memory_quality_payload.get("report", {})
-                        if isinstance(report_payload, dict):
-                            report_payload = dict(report_payload)
-                            report_payload["tuning"] = dict(tuning_payload)
-                            memory_quality_payload["report"] = report_payload
-                except Exception:
-                    pass
-            else:
-                try:
-                    def _call_quality_update_diagnostics() -> Any:
-                        kwargs = {
-                            "retrieval_metrics": retrieval_metrics,
-                            "turn_stability_metrics": turn_metrics,
-                            "semantic_metrics": semantic_metrics,
-                            "sampled_at": generated_at,
-                        }
-                        if reasoning_layer_metrics:
-                            try:
-                                return quality_update(
-                                    **kwargs,
-                                    reasoning_layer_metrics=reasoning_layer_metrics,
-                                )
-                            except TypeError:
-                                return quality_update(**kwargs)
-                        return quality_update(**kwargs)
-
-                    report = _call_quality_update_diagnostics()
-                    snapshot = quality_snapshot()
-                    memory_quality_payload = {
-                        "available": True,
-                        "updated": True,
-                        "report": dict(report) if isinstance(report, dict) else {},
-                        "state": dict(snapshot) if isinstance(snapshot, dict) else {},
-                        "tuning": (snapshot.get("tuning", {}) if isinstance(snapshot, dict) else {}),
-                        "error": None,
-                    }
-                    if isinstance(memory_quality_payload["report"], dict):
-                        memory_quality_payload["report"].setdefault("tuning", dict(memory_quality_payload.get("tuning", {})))
-                except Exception as exc:
-                    state_payload: dict[str, Any] = {}
-                    try:
-                        snapshot = quality_snapshot()
-                        if isinstance(snapshot, dict):
-                            state_payload = dict(snapshot)
-                    except Exception:
-                        state_payload = {}
-                    memory_quality_payload = {
-                        "available": True,
-                        "updated": False,
-                        "report": {},
-                        "state": state_payload,
-                        "tuning": (state_payload.get("tuning", {}) if isinstance(state_payload, dict) else {}),
-                        "error": {
-                            "type": exc.__class__.__name__,
-                            "message": str(exc),
-                        },
-                    }
-                memory_quality_cache["fingerprint"] = fingerprint
-                memory_quality_cache["payload"] = dict(memory_quality_payload)
-
-        engine_payload["memory_quality"] = memory_quality_payload
-        memory_integration_payload: dict[str, Any] = {"available": False}
-        memory_integration_snapshot = getattr(memory_store, "integration_policies_snapshot", None)
-        if callable(memory_integration_snapshot):
-            try:
-                try:
-                    raw_memory_integration_payload = memory_integration_snapshot(session_id="")
-                except TypeError:
-                    raw_memory_integration_payload = memory_integration_snapshot()
-            except Exception as exc:
-                memory_integration_payload = {
-                    "available": True,
-                    "error": str(exc),
-                }
-            else:
-                if isinstance(raw_memory_integration_payload, dict):
-                    memory_integration_payload = dict(raw_memory_integration_payload)
-                else:
-                    memory_integration_payload = {
-                        "available": True,
-                        "error": "invalid_memory_integration_payload",
-                    }
-                memory_integration_payload.setdefault("available", True)
-        engine_payload["memory_integration"] = memory_integration_payload
+        engine_payload.update(_engine_memory_payloads(memory_store=memory_store))
+        engine_payload["memory_quality"] = await _engine_memory_quality_payload(
+            memory_store=memory_store,
+            retrieval_metrics_snapshot=retrieval_metrics_snapshot,
+            turn_metrics_snapshot=turn_metrics_snapshot,
+            generated_at=generated_at,
+            memory_quality_cache=memory_quality_cache,
+            collect_memory_analysis_metrics=_collect_memory_analysis_metrics,
+        )
+        engine_payload["memory_integration"] = _engine_memory_integration_payload(memory_store=memory_store)
         if cfg.gateway.diagnostics.include_provider_telemetry:
             engine_payload["provider"] = _provider_telemetry_snapshot(runtime.engine.provider)
-        monitor_payload: dict[str, Any]
-        if runtime.memory_monitor is None:
-            monitor_payload = {"enabled": False, "runner": dict(proactive_runner_state)}
-        else:
-            try:
-                monitor_payload = dict(runtime.memory_monitor.telemetry())
-            except Exception:
-                monitor_payload = {}
-            monitor_payload["enabled"] = True
-            monitor_payload["runner"] = dict(proactive_runner_state)
+        monitor_payload = _memory_monitor_payload(
+            memory_monitor=runtime.memory_monitor,
+            proactive_runner_state=proactive_runner_state,
+        )
         cron_payload = dict(runtime.cron.status())
         cron_payload["wake_policy"] = dict(cron_wake_state)
         subagent_payload = dict(runtime.engine.subagents.status())
@@ -5044,416 +4587,197 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def api_diagnostics(request: Request) -> DiagnosticsResponse:
         return await _diagnostics_handler(request)
 
-    async def _channels_replay_handler(request: Request, payload: ChannelReplayRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        summary = await runtime.channels.operator_replay_dead_letters(
-            limit=max(1, min(int(payload.limit or 25), 200)),
-            channel=str(payload.channel or "").strip(),
-            reason=str(payload.reason or "").strip(),
-            session_id=str(payload.session_id or "").strip(),
-            reasons=[str(item or "").strip() for item in list(payload.reasons or []) if str(item or "").strip()],
-        )
-        return {"ok": True, "summary": summary}
-
-    async def _channels_recover_handler(request: Request, payload: ChannelRecoverRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        summary = await runtime.channels.operator_recover_channels(
-            channel=str(payload.channel or "").strip(),
-            force=bool(payload.force),
-        )
-        return {"ok": True, "summary": summary}
-
-    async def _channels_inbound_replay_handler(request: Request, payload: ChannelInboundReplayRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        summary = await runtime.channels.operator_replay_inbound(
-            limit=max(1, min(int(payload.limit or 100), 500)),
-            channel=str(payload.channel or "").strip(),
-            session_id=str(payload.session_id or "").strip(),
-            force=bool(payload.force),
-        )
-        return {"ok": True, "summary": summary}
-
-    async def _telegram_refresh_handler(request: Request, payload: TelegramRefreshRequest) -> dict[str, Any]:
-        del payload
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_refresh = getattr(channel, "operator_refresh_transport", None)
-        if not callable(operator_refresh):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_refresh()
-        return {"ok": True, "summary": summary}
-
-    async def _telegram_pairing_approve_handler(
-        request: Request, payload: TelegramPairingApproveRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_approve = getattr(channel, "operator_approve_pairing", None)
-        if not callable(operator_approve):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_approve(str(payload.code or ""))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _telegram_pairing_reject_handler(
-        request: Request, payload: TelegramPairingRejectRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_reject = getattr(channel, "operator_reject_pairing", None)
-        if not callable(operator_reject):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_reject(str(payload.code or ""))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _telegram_pairing_revoke_handler(
-        request: Request, payload: TelegramPairingRevokeRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_revoke = getattr(channel, "operator_revoke_pairing", None)
-        if not callable(operator_revoke):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_revoke(str(payload.entry or ""))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _telegram_offset_commit_handler(
-        request: Request, payload: TelegramOffsetCommitRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_commit = getattr(channel, "operator_force_commit_offset", None)
-        if not callable(operator_commit):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_commit(int(payload.update_id or 0))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _telegram_offset_sync_handler(
-        request: Request, payload: TelegramOffsetSyncRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_sync = getattr(channel, "operator_sync_next_offset", None)
-        if not callable(operator_sync):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_sync(int(payload.next_offset or 0), allow_reset=bool(payload.allow_reset))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _telegram_offset_reset_handler(
-        request: Request, payload: TelegramOffsetResetRequest
-    ) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        if not bool(payload.confirm):
-            raise HTTPException(status_code=400, detail="confirmation_required")
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:telegram")
-        operator_sync = getattr(channel, "operator_sync_next_offset", None)
-        if not callable(operator_sync):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:telegram")
-        summary = await operator_sync(0, allow_reset=True)
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _supervisor_recover_handler(request: Request, payload: SupervisorRecoverRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        if runtime.supervisor is None:
-            raise HTTPException(status_code=404, detail="supervisor_not_available")
-        summary = await runtime.supervisor.operator_recover_components(
-            component=str(payload.component or "").strip(),
-            force=bool(payload.force),
-            reason=str(payload.reason or "operator_recover").strip() or "operator_recover",
-        )
-        return {"ok": True, "summary": summary}
-
-    async def _provider_recover_handler(request: Request, payload: ProviderRecoverRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        provider = runtime.engine.provider
-        operator_clear = getattr(provider, "operator_clear_suppression", None)
-        if not callable(operator_clear):
-            raise HTTPException(status_code=400, detail="provider_operator_action_not_supported")
-        summary = operator_clear(role=str(payload.role or "").strip(), model=str(payload.model or "").strip())
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _autonomy_wake_handler(request: Request, payload: AutonomyWakeRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        normalized_kind = str(payload.kind or "proactive").strip().lower() or "proactive"
-        if normalized_kind == "proactive":
-            result = await _submit_proactive_wake()
-        elif normalized_kind == "heartbeat":
-            result = await _submit_heartbeat_wake()
-        else:
-            raise HTTPException(status_code=400, detail=f"unsupported_autonomy_wake_kind:{normalized_kind}")
-        return {"ok": True, "summary": {"kind": normalized_kind, "result": result}}
-
-    async def _memory_suggest_refresh_handler(request: Request, payload: MemorySuggestRefreshRequest) -> dict[str, Any]:
-        del payload
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        monitor = runtime.memory_monitor or MemoryMonitor(runtime.engine.memory)
-        source = "scan"
-        try:
-            suggestions = await monitor.scan()
-        except Exception:
-            suggestions = monitor.pending()
-            source = "pending_fallback"
-        rows = [item.to_payload() for item in suggestions]
-        rows.sort(key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
-        summary = {
-            "ok": True,
-            "refresh": True,
-            "source": source,
-            "count": len(rows),
-            "suggestions": rows,
-            "pending_path": str(monitor.suggestions_path),
-        }
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _memory_snapshot_create_handler(request: Request, payload: MemorySnapshotCreateRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        summary = memory_snapshot_create(runtime.config, tag=str(payload.tag or ""))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _memory_snapshot_rollback_handler(request: Request, payload: MemorySnapshotRollbackRequest) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        if not bool(payload.confirm):
-            raise HTTPException(status_code=400, detail="confirmation_required")
-        summary = memory_snapshot_rollback(runtime.config, version_id=str(payload.version_id or ""))
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
-    async def _discord_refresh_handler(request: Request, payload: DiscordRefreshRequest) -> dict[str, Any]:
-        del payload
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        channel = runtime.channels.get_channel("discord")
-        if channel is None:
-            raise HTTPException(status_code=404, detail="channel_not_available:discord")
-        operator_refresh = getattr(channel, "operator_refresh_transport", None)
-        if not callable(operator_refresh):
-            raise HTTPException(status_code=400, detail="channel_operator_action_not_supported:discord")
-        summary = await operator_refresh()
-        return {"ok": bool(summary.get("ok", False)), "summary": summary}
-
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
-        return await _channels_replay_handler(request, payload or ChannelReplayRequest())
+        return await control_handlers.channels_replay(request, payload or ChannelReplayRequest())
 
     @app.post("/api/channels/replay")
     async def api_channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
-        return await _channels_replay_handler(request, payload or ChannelReplayRequest())
+        return await control_handlers.channels_replay(request, payload or ChannelReplayRequest())
 
     @app.post("/v1/control/channels/recover")
     async def channels_recover(request: Request, payload: ChannelRecoverRequest | None = None) -> dict[str, Any]:
-        return await _channels_recover_handler(request, payload or ChannelRecoverRequest())
+        return await control_handlers.channels_recover(request, payload or ChannelRecoverRequest())
 
     @app.post("/api/channels/recover")
     async def api_channels_recover(request: Request, payload: ChannelRecoverRequest | None = None) -> dict[str, Any]:
-        return await _channels_recover_handler(request, payload or ChannelRecoverRequest())
+        return await control_handlers.channels_recover(request, payload or ChannelRecoverRequest())
 
     @app.post("/v1/control/channels/inbound-replay")
     async def channels_inbound_replay(
         request: Request, payload: ChannelInboundReplayRequest | None = None
     ) -> dict[str, Any]:
-        return await _channels_inbound_replay_handler(request, payload or ChannelInboundReplayRequest())
+        return await control_handlers.channels_inbound_replay(request, payload or ChannelInboundReplayRequest())
 
     @app.post("/api/channels/inbound-replay")
     async def api_channels_inbound_replay(
         request: Request, payload: ChannelInboundReplayRequest | None = None
     ) -> dict[str, Any]:
-        return await _channels_inbound_replay_handler(request, payload or ChannelInboundReplayRequest())
+        return await control_handlers.channels_inbound_replay(request, payload or ChannelInboundReplayRequest())
 
     @app.post("/v1/control/channels/telegram/refresh")
     async def telegram_refresh(request: Request, payload: TelegramRefreshRequest | None = None) -> dict[str, Any]:
-        return await _telegram_refresh_handler(request, payload or TelegramRefreshRequest())
+        return await control_handlers.telegram_refresh(request, payload or TelegramRefreshRequest())
 
     @app.post("/api/channels/telegram/refresh")
     async def api_telegram_refresh(request: Request, payload: TelegramRefreshRequest | None = None) -> dict[str, Any]:
-        return await _telegram_refresh_handler(request, payload or TelegramRefreshRequest())
+        return await control_handlers.telegram_refresh(request, payload or TelegramRefreshRequest())
 
     @app.post("/v1/control/channels/telegram/pairing/approve")
     async def telegram_pairing_approve(
         request: Request, payload: TelegramPairingApproveRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_approve_handler(request, payload or TelegramPairingApproveRequest())
+        return await control_handlers.telegram_pairing_approve(request, payload or TelegramPairingApproveRequest())
 
     @app.post("/api/channels/telegram/pairing/approve")
     async def api_telegram_pairing_approve(
         request: Request, payload: TelegramPairingApproveRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_approve_handler(request, payload or TelegramPairingApproveRequest())
+        return await control_handlers.telegram_pairing_approve(request, payload or TelegramPairingApproveRequest())
 
     @app.post("/v1/control/channels/telegram/pairing/reject")
     async def telegram_pairing_reject(
         request: Request, payload: TelegramPairingRejectRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_reject_handler(request, payload or TelegramPairingRejectRequest())
+        return await control_handlers.telegram_pairing_reject(request, payload or TelegramPairingRejectRequest())
 
     @app.post("/api/channels/telegram/pairing/reject")
     async def api_telegram_pairing_reject(
         request: Request, payload: TelegramPairingRejectRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_reject_handler(request, payload or TelegramPairingRejectRequest())
+        return await control_handlers.telegram_pairing_reject(request, payload or TelegramPairingRejectRequest())
 
     @app.post("/v1/control/channels/telegram/pairing/revoke")
     async def telegram_pairing_revoke(
         request: Request, payload: TelegramPairingRevokeRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_revoke_handler(request, payload or TelegramPairingRevokeRequest())
+        return await control_handlers.telegram_pairing_revoke(request, payload or TelegramPairingRevokeRequest())
 
     @app.post("/api/channels/telegram/pairing/revoke")
     async def api_telegram_pairing_revoke(
         request: Request, payload: TelegramPairingRevokeRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_pairing_revoke_handler(request, payload or TelegramPairingRevokeRequest())
+        return await control_handlers.telegram_pairing_revoke(request, payload or TelegramPairingRevokeRequest())
 
     @app.post("/v1/control/channels/telegram/offset/commit")
     async def telegram_offset_commit(
         request: Request, payload: TelegramOffsetCommitRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_commit_handler(request, payload or TelegramOffsetCommitRequest())
+        return await control_handlers.telegram_offset_commit(request, payload or TelegramOffsetCommitRequest())
 
     @app.post("/api/channels/telegram/offset/commit")
     async def api_telegram_offset_commit(
         request: Request, payload: TelegramOffsetCommitRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_commit_handler(request, payload or TelegramOffsetCommitRequest())
+        return await control_handlers.telegram_offset_commit(request, payload or TelegramOffsetCommitRequest())
 
     @app.post("/v1/control/channels/telegram/offset/sync")
     async def telegram_offset_sync(
         request: Request, payload: TelegramOffsetSyncRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_sync_handler(request, payload or TelegramOffsetSyncRequest())
+        return await control_handlers.telegram_offset_sync(request, payload or TelegramOffsetSyncRequest())
 
     @app.post("/api/channels/telegram/offset/sync")
     async def api_telegram_offset_sync(
         request: Request, payload: TelegramOffsetSyncRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_sync_handler(request, payload or TelegramOffsetSyncRequest())
+        return await control_handlers.telegram_offset_sync(request, payload or TelegramOffsetSyncRequest())
 
     @app.post("/v1/control/channels/telegram/offset/reset")
     async def telegram_offset_reset(
         request: Request, payload: TelegramOffsetResetRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_reset_handler(request, payload or TelegramOffsetResetRequest())
+        return await control_handlers.telegram_offset_reset(request, payload or TelegramOffsetResetRequest())
 
     @app.post("/api/channels/telegram/offset/reset")
     async def api_telegram_offset_reset(
         request: Request, payload: TelegramOffsetResetRequest | None = None
     ) -> dict[str, Any]:
-        return await _telegram_offset_reset_handler(request, payload or TelegramOffsetResetRequest())
+        return await control_handlers.telegram_offset_reset(request, payload or TelegramOffsetResetRequest())
 
     @app.post("/v1/control/provider/recover")
     async def provider_recover(request: Request, payload: ProviderRecoverRequest | None = None) -> dict[str, Any]:
-        return await _provider_recover_handler(request, payload or ProviderRecoverRequest())
+        return await control_handlers.provider_recover(request, payload or ProviderRecoverRequest())
 
     @app.post("/api/provider/recover")
     async def api_provider_recover(request: Request, payload: ProviderRecoverRequest | None = None) -> dict[str, Any]:
-        return await _provider_recover_handler(request, payload or ProviderRecoverRequest())
+        return await control_handlers.provider_recover(request, payload or ProviderRecoverRequest())
 
     @app.post("/v1/control/autonomy/wake")
     async def autonomy_wake(request: Request, payload: AutonomyWakeRequest | None = None) -> dict[str, Any]:
-        return await _autonomy_wake_handler(request, payload or AutonomyWakeRequest())
+        return await control_handlers.autonomy_wake(request, payload or AutonomyWakeRequest())
 
     @app.post("/api/autonomy/wake")
     async def api_autonomy_wake(request: Request, payload: AutonomyWakeRequest | None = None) -> dict[str, Any]:
-        return await _autonomy_wake_handler(request, payload or AutonomyWakeRequest())
+        return await control_handlers.autonomy_wake(request, payload or AutonomyWakeRequest())
 
     @app.post("/v1/control/memory/suggest/refresh")
     async def memory_suggest_refresh(
         request: Request, payload: MemorySuggestRefreshRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_suggest_refresh_handler(request, payload or MemorySuggestRefreshRequest())
+        return await control_handlers.memory_suggest_refresh(request, payload or MemorySuggestRefreshRequest())
 
     @app.post("/api/memory/suggest/refresh")
     async def api_memory_suggest_refresh(
         request: Request, payload: MemorySuggestRefreshRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_suggest_refresh_handler(request, payload or MemorySuggestRefreshRequest())
+        return await control_handlers.memory_suggest_refresh(request, payload or MemorySuggestRefreshRequest())
 
     @app.post("/v1/control/memory/snapshot/create")
     async def memory_snapshot_create_route(
         request: Request, payload: MemorySnapshotCreateRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_snapshot_create_handler(request, payload or MemorySnapshotCreateRequest())
+        return await control_handlers.memory_snapshot_create(request, payload or MemorySnapshotCreateRequest())
 
     @app.post("/api/memory/snapshot/create")
     async def api_memory_snapshot_create(
         request: Request, payload: MemorySnapshotCreateRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_snapshot_create_handler(request, payload or MemorySnapshotCreateRequest())
+        return await control_handlers.memory_snapshot_create(request, payload or MemorySnapshotCreateRequest())
 
     @app.post("/v1/control/memory/snapshot/rollback")
     async def memory_snapshot_rollback_route(
         request: Request, payload: MemorySnapshotRollbackRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_snapshot_rollback_handler(request, payload or MemorySnapshotRollbackRequest())
+        return await control_handlers.memory_snapshot_rollback(request, payload or MemorySnapshotRollbackRequest())
 
     @app.post("/api/memory/snapshot/rollback")
     async def api_memory_snapshot_rollback(
         request: Request, payload: MemorySnapshotRollbackRequest | None = None
     ) -> dict[str, Any]:
-        return await _memory_snapshot_rollback_handler(request, payload or MemorySnapshotRollbackRequest())
+        return await control_handlers.memory_snapshot_rollback(request, payload or MemorySnapshotRollbackRequest())
 
     @app.post("/v1/control/channels/discord/refresh")
     async def discord_refresh(
         request: Request, payload: DiscordRefreshRequest | None = None
     ) -> dict[str, Any]:
-        return await _discord_refresh_handler(request, payload or DiscordRefreshRequest())
+        return await control_handlers.discord_refresh(request, payload or DiscordRefreshRequest())
 
     @app.post("/api/channels/discord/refresh")
     async def api_discord_refresh(
         request: Request, payload: DiscordRefreshRequest | None = None
     ) -> dict[str, Any]:
-        return await _discord_refresh_handler(request, payload or DiscordRefreshRequest())
+        return await control_handlers.discord_refresh(request, payload or DiscordRefreshRequest())
 
     @app.post("/v1/control/supervisor/recover")
     async def supervisor_recover(request: Request, payload: SupervisorRecoverRequest | None = None) -> dict[str, Any]:
-        return await _supervisor_recover_handler(request, payload or SupervisorRecoverRequest())
+        return await control_handlers.supervisor_recover(request, payload or SupervisorRecoverRequest())
 
     @app.post("/api/supervisor/recover")
     async def api_supervisor_recover(request: Request, payload: SupervisorRecoverRequest | None = None) -> dict[str, Any]:
-        return await _supervisor_recover_handler(request, payload or SupervisorRecoverRequest())
+        return await control_handlers.supervisor_recover(request, payload or SupervisorRecoverRequest())
 
     @app.post("/v1/control/heartbeat/trigger")
     async def trigger_heartbeat(request: Request) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        if not cfg.gateway.heartbeat.enabled:
-            raise HTTPException(status_code=409, detail="heartbeat_disabled")
-        decision = await runtime.heartbeat.trigger_now(_submit_heartbeat_wake)
-        return {
-            "ok": True,
-            "decision": {
-                "action": decision.action,
-                "reason": decision.reason,
-                "text": decision.text,
-            },
-        }
+        return await control_handlers.heartbeat_trigger(request)
 
     @app.get("/v1/self-evolution/status")
     async def self_evolution_status(request: Request) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        evo = runtime.self_evolution
-        if evo is None:
-            return {"enabled": False, "status": {}, "runner": {}, "recent": []}
-        recent = evo.log.recent(10)
-        return {"enabled": evo.enabled, "status": evo.status(), "runner": dict(self_evolution_runner_state), "recent": recent}
+        return await control_handlers.self_evolution_status(request)
 
     @app.post("/v1/self-evolution/trigger")
     async def self_evolution_trigger(request: Request) -> dict[str, Any]:
-        auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
-        evo = runtime.self_evolution
-        if evo is None:
-            raise HTTPException(status_code=404, detail="self_evolution_not_configured")
-        status = await evo.run_once(force=True)
-        return {"ok": True, "status": status, "runner": dict(self_evolution_runner_state)}
+        return await control_handlers.self_evolution_trigger(request)
 
     async def _chat_handler(req: ChatRequest, request: Request) -> ChatResponse:
         auth_guard.check_http(request=request, scope="control", diagnostics_auth=cfg.gateway.diagnostics.require_auth)
@@ -5507,95 +4831,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "query_param": auth_guard.query_param,
         }
 
-    async def _telegram_webhook(request: Request) -> dict[str, Any]:
-        if not cfg.channels.telegram.enabled:
-            raise HTTPException(status_code=409, detail="telegram_channel_disabled")
-
-        channel = runtime.channels.get_channel("telegram")
-        if channel is None:
-            raise HTTPException(status_code=409, detail="telegram_channel_unavailable")
-
-        if not bool(getattr(channel, "webhook_mode_active", False)):
-            raise HTTPException(status_code=409, detail="telegram_webhook_mode_inactive")
-
-        expected_secret = str(getattr(channel, "webhook_secret", "") or "").strip()
-        if expected_secret:
-            supplied_secret = str(request.headers.get("X-Telegram-Bot-Api-Secret-Token", "") or "")
-            if not supplied_secret or not hmac.compare_digest(supplied_secret, expected_secret):
-                raise HTTPException(status_code=401, detail="telegram_webhook_secret_invalid")
-
-        try:
-            raw_body = await asyncio.wait_for(request.body(), timeout=5.0)
-        except asyncio.TimeoutError as exc:
-            raise HTTPException(status_code=408, detail="telegram_webhook_payload_timeout") from exc
-        if len(raw_body) > TELEGRAM_WEBHOOK_MAX_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="telegram_webhook_payload_too_large")
-        try:
-            payload = json.loads(raw_body)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="telegram_webhook_payload_invalid") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="telegram_webhook_payload_invalid")
-
-        handler = getattr(channel, "handle_webhook_update", None)
-        if not callable(handler):
-            raise HTTPException(status_code=409, detail="telegram_webhook_handler_unavailable")
-
-        processed = bool(await handler(payload))
-        if (not processed) and bool(getattr(cfg.channels.telegram, "webhook_fail_fast_on_error", False)):
-            raise HTTPException(status_code=503, detail="telegram_webhook_processing_failed")
-        return {"ok": True, "processed": processed}
-
-    app.add_api_route(telegram_webhook_path, _telegram_webhook, methods=["POST"])
-
-    async def _whatsapp_webhook(request: Request) -> dict[str, Any]:
-        if not cfg.channels.whatsapp.enabled:
-            raise HTTPException(status_code=409, detail="whatsapp_channel_disabled")
-
-        channel = runtime.channels.get_channel("whatsapp")
-        if channel is None:
-            raise HTTPException(status_code=409, detail="whatsapp_channel_unavailable")
-
-        expected_secret = str(
-            getattr(cfg.channels.whatsapp, "webhook_secret", "")
-            or getattr(channel, "webhook_secret", "")
-            or ""
-        ).strip()
-        if not expected_secret:
-            raise HTTPException(status_code=409, detail="whatsapp_webhook_secret_missing")
-        auth_header = str(request.headers.get("Authorization", "") or "")
-        bearer = ""
-        if auth_header.lower().startswith("bearer "):
-            bearer = auth_header[7:].strip()
-        supplied_secret = str(request.headers.get("X-Webhook-Secret", "") or "").strip()
-        if not supplied_secret:
-            supplied_secret = bearer
-        if not supplied_secret or not hmac.compare_digest(
-            supplied_secret, expected_secret
-        ):
-            raise HTTPException(status_code=401, detail="whatsapp_webhook_secret_invalid")
-
-        try:
-            raw_body = await asyncio.wait_for(request.body(), timeout=5.0)
-        except asyncio.TimeoutError as exc:
-            raise HTTPException(status_code=408, detail="whatsapp_webhook_payload_timeout") from exc
-        if len(raw_body) > WHATSAPP_WEBHOOK_MAX_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="whatsapp_webhook_payload_too_large")
-        try:
-            payload = json.loads(raw_body)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="whatsapp_webhook_payload_invalid") from exc
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="whatsapp_webhook_payload_invalid")
-
-        handler = getattr(channel, "receive_hook", None)
-        if not callable(handler):
-            raise HTTPException(status_code=409, detail="whatsapp_webhook_handler_unavailable")
-
-        processed = bool(await handler(payload))
-        return {"ok": True, "processed": processed}
-
-    app.add_api_route(whatsapp_webhook_path, _whatsapp_webhook, methods=["POST"])
+    app.add_api_route(telegram_webhook_path, webhook_handlers.telegram, methods=["POST"])
+    app.add_api_route(whatsapp_webhook_path, webhook_handlers.whatsapp, methods=["POST"])
 
     @app.post("/v1/cron/add")
     async def cron_add(req: CronAddRequest, request: Request) -> dict[str, Any]:
@@ -5811,7 +5048,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                             )
                             continue
                         if normalized_method == "status":
-                            status_payload = _control_plane_payload().dict()
+                            status_payload = _control_plane_to_dict(_control_plane_payload())
                             await _send_ws(
                                 {
                                     "type": "res",
@@ -5966,7 +5203,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def root() -> HTMLResponse:
         control_plane = _control_plane_payload()
         return HTMLResponse(
-            content=_render_root_dashboard_html(control_plane=control_plane),
+            content=_render_root_dashboard_html(
+                control_plane=control_plane,
+                dashboard_asset_root=_DASHBOARD_ASSET_ROOT,
+                dashboard_bootstrap_token=_DASHBOARD_BOOTSTRAP_TOKEN,
+            ),
             status_code=200,
         )
 

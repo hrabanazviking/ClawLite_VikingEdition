@@ -59,7 +59,7 @@ class JobsTool(Tool):
             job_id = str(arguments.get("job_id", "")).strip()
             if not job_id:
                 return "error: job_id is required"
-            job = self._queue.status(job_id)
+            job = self._queue.status(job_id, session_id=ctx.session_id)
             if job is None:
                 return f"error: job not found: {job_id}"
             return json.dumps({
@@ -73,13 +73,15 @@ class JobsTool(Tool):
             job_id = str(arguments.get("job_id", "")).strip()
             if not job_id:
                 return "error: job_id is required"
-            ok = self._queue.cancel(job_id)
+            ok = self._queue.cancel(job_id, session_id=ctx.session_id)
             return json.dumps({"ok": ok, "job_id": job_id})
 
         if action == "list":
-            session_f = arguments.get("session_filter") or None
+            session_f = str(arguments.get("session_filter", "") or "").strip() or None
+            if session_f is not None and session_f != ctx.session_id:
+                return "error: session_filter override is not allowed"
             status_f = arguments.get("status_filter") or None
-            jobs = self._queue.list_jobs(session_id=session_f, status=status_f)
+            jobs = self._queue.list_jobs(session_id=session_f or ctx.session_id, status=status_f)
             rows = [{"job_id": j.id, "kind": j.kind, "status": j.status,
                      "priority": j.priority, "created_at": j.created_at} for j in jobs[:20]]
             return json.dumps({"jobs": rows, "total": len(jobs)})

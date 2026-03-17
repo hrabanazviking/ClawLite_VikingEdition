@@ -43,7 +43,10 @@ source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -e .
 
-# Optional: install Chromium if you plan to use the browser tool
+# Or install optional integrations up front
+python3 -m pip install -e ".[browser,telegram,media]"
+
+# Optional browser runtime download
 python3 -m playwright install chromium
 
 # 2. Configure (interactive wizard — sets provider, gateway, optional Telegram)
@@ -55,7 +58,7 @@ clawlite gateway
 
 Open **http://127.0.0.1:8787** → live dashboard with chat, automation, memory, and tools.
 
-If you pass `--config path.yaml`, YAML configs work out of the box. Browser automation needs the extra Playwright browser download shown above.
+If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, and `.[media]` for TTS/PDF helpers.
 
 ```bash
 # Or talk to the agent straight from the terminal

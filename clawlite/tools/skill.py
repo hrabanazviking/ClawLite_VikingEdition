@@ -18,9 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
-
-import httpx
+from urllib.parse import quote_plus, urlencode
 
 from clawlite.core.skills import SkillsLoader
 from clawlite.tools.base import Tool, ToolContext
@@ -206,45 +204,148 @@ class SkillTool(Tool):
         }
         return mapping.get(int(code), "unknown")
 
-    async def _run_weather(self, arguments: dict[str, Any]) -> str:
+    @staticmethod
+    def _web_fetch_error_message(payload: dict[str, Any], default: str) -> str:
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(error, dict):
+            message = str(error.get("message", "") or "").strip()
+            if message:
+                return message
+            code = str(error.get("code", "") or "").strip()
+            if code:
+                return code
+        return default
+
+    @staticmethod
+    def _web_fetch_result_text(payload: dict[str, Any]) -> str:
+        result = payload.get("result", {}) if isinstance(payload, dict) else {}
+        if not isinstance(result, dict):
+            return ""
+        return str(result.get("text", "") or "").strip()
+
+    async def _fetch_web_payload(
+        self,
+        *,
+        url: str,
+        ctx: ToolContext,
+        max_chars: int,
+        mode: str = "auto",
+        unavailable_reason: str = "weather_fetch_unavailable",
+        failure_reason: str = "weather_fetch_failed",
+    ) -> dict[str, Any]:
+        if self.registry.get("web_fetch") is None:
+            raise RuntimeError(unavailable_reason)
+
+        tool_arguments: dict[str, Any] = {"url": url, "max_chars": max_chars}
+        if mode != "auto":
+            tool_arguments["mode"] = mode
+
+        try:
+            raw = await self.registry.execute(
+                "web_fetch",
+                tool_arguments,
+                session_id=ctx.session_id,
+                channel=ctx.channel,
+                user_id=ctx.user_id,
+            )
+        except RuntimeError as exc:
+            message = str(exc or "").strip() or failure_reason
+            if message.startswith("tool_blocked_by_safety_policy:web_fetch:"):
+                raise RuntimeError(message) from exc
+            raise RuntimeError(f"{failure_reason}:{message}") from exc
+
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{failure_reason}:invalid_payload") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"{failure_reason}:invalid_payload")
+        return decoded
+
+    @classmethod
+    def _web_fetch_json_payload(cls, payload: dict[str, Any], *, failure_reason: str) -> dict[str, Any]:
+        text = cls._web_fetch_result_text(payload)
+        if not text:
+            raise RuntimeError(f"{failure_reason}:empty_payload")
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{failure_reason}:invalid_payload") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"{failure_reason}:invalid_payload")
+        return decoded
+
+    async def _run_weather(self, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
         location = str(arguments.get("location") or arguments.get("input") or "").strip()
         if not location:
             location = "Sao Paulo"
-        url = f"https://wttr.in/{quote_plus(location)}?format=3"
+
+        wttr_url = f"https://wttr.in/{quote_plus(location)}?format=3"
         try:
-            async with httpx.AsyncClient(timeout=12) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-            return response.text.strip()
-        except Exception:
-            async with httpx.AsyncClient(timeout=12) as client:
-                geocode = await client.get(
-                    "https://geocoding-api.open-meteo.com/v1/search",
-                    params={"name": location, "count": 1, "language": "en", "format": "json"},
+            wttr_payload = await self._fetch_web_payload(
+                url=wttr_url,
+                ctx=ctx,
+                max_chars=256,
+                failure_reason="weather_fetch_failed",
+            )
+        except RuntimeError as exc:
+            reason = str(exc or "").strip() or "weather_fetch_failed"
+            if reason == "weather_fetch_unavailable" or reason.startswith("tool_blocked_by_safety_policy:web_fetch:"):
+                return f"skill_blocked:{spec_name}:{reason}"
+            wttr_payload = {"ok": False, "error": {"message": reason}}
+
+        if wttr_payload.get("ok"):
+            wttr_text = self._web_fetch_result_text(wttr_payload)
+            if wttr_text:
+                return wttr_text
+
+        geocode_url = "https://geocoding-api.open-meteo.com/v1/search?" + urlencode(
+            {"name": location, "count": 1, "language": "en", "format": "json"}
+        )
+        try:
+            geocode_fetch = await self._fetch_web_payload(
+                url=geocode_url,
+                ctx=ctx,
+                max_chars=4096,
+                mode="json",
+                failure_reason="weather_geocode_failed",
+            )
+            if not geocode_fetch.get("ok"):
+                raise RuntimeError(
+                    f"weather_geocode_failed:{self._web_fetch_error_message(geocode_fetch, 'geocode_failed')}"
                 )
-                geocode.raise_for_status()
-                geocode_payload = geocode.json()
-                results = geocode_payload.get("results", []) if isinstance(geocode_payload, dict) else []
-                if not isinstance(results, list) or not results:
-                    raise RuntimeError(f"weather_location_not_found:{location}")
-                first = results[0] if isinstance(results[0], dict) else {}
-                latitude = first.get("latitude")
-                longitude = first.get("longitude")
-                if latitude is None or longitude is None:
-                    raise RuntimeError(f"weather_location_not_found:{location}")
-                resolved_name = str(first.get("name", location) or location).strip()
-                country = str(first.get("country", "") or "").strip()
-                forecast = await client.get(
-                    "https://api.open-meteo.com/v1/forecast",
-                    params={
-                        "latitude": latitude,
-                        "longitude": longitude,
-                        "current_weather": "true",
-                        "timezone": "auto",
-                    },
+            geocode_payload = self._web_fetch_json_payload(geocode_fetch, failure_reason="weather_geocode_failed")
+            results = geocode_payload.get("results", []) if isinstance(geocode_payload, dict) else []
+            if not isinstance(results, list) or not results:
+                raise RuntimeError(f"weather_location_not_found:{location}")
+            first = results[0] if isinstance(results[0], dict) else {}
+            latitude = first.get("latitude")
+            longitude = first.get("longitude")
+            if latitude is None or longitude is None:
+                raise RuntimeError(f"weather_location_not_found:{location}")
+            resolved_name = str(first.get("name", location) or location).strip()
+            country = str(first.get("country", "") or "").strip()
+
+            forecast_url = "https://api.open-meteo.com/v1/forecast?" + urlencode(
+                {
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "current_weather": "true",
+                    "timezone": "auto",
+                }
+            )
+            forecast_fetch = await self._fetch_web_payload(
+                url=forecast_url,
+                ctx=ctx,
+                max_chars=4096,
+                mode="json",
+                failure_reason="weather_forecast_failed",
+            )
+            if not forecast_fetch.get("ok"):
+                raise RuntimeError(
+                    f"weather_forecast_failed:{self._web_fetch_error_message(forecast_fetch, 'forecast_failed')}"
                 )
-                forecast.raise_for_status()
-            forecast_payload = forecast.json()
+            forecast_payload = self._web_fetch_json_payload(forecast_fetch, failure_reason="weather_forecast_failed")
             current = forecast_payload.get("current_weather", {}) if isinstance(forecast_payload, dict) else {}
             if not isinstance(current, dict) or not current:
                 raise RuntimeError("weather_current_unavailable")
@@ -254,6 +355,9 @@ class SkillTool(Tool):
                 f"{self._weather_code_description(int(current.get('weathercode', 0) or 0))}, "
                 f"wind {current.get('windspeed')} km/h"
             )
+        except (KeyError, RuntimeError, ValueError) as exc:
+            reason = str(exc or "").strip() or "weather_fetch_failed"
+            return f"skill_blocked:{spec_name}:{reason}"
 
     @staticmethod
     def _script_tool_arguments(script_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -786,7 +890,7 @@ class SkillTool(Tool):
 
     async def _dispatch_script(self, script_name: str, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
         if script_name == "weather":
-            return await self._run_weather(arguments)
+            return await self._run_weather(arguments, ctx, spec_name=spec_name)
         if script_name == "summarize":
             return await self._run_summarize(arguments, ctx, spec_name=spec_name, timeout=self._timeout_value(arguments))
         if script_name == "healthcheck":

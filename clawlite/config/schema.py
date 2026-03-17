@@ -703,6 +703,8 @@ class AgentsConfig(Base):
 class SchedulerConfig(Base):
     heartbeat_interval_seconds: int = 1800
     timezone: str = "UTC"
+    cron_max_concurrent_jobs: int = 2
+    cron_completed_job_retention_seconds: int = 604800
 
 
 # ---------------------------------------------------------------------------

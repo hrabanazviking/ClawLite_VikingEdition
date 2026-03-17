@@ -1095,6 +1095,30 @@ def test_build_runtime_heartbeat_interval_accepts_120_from_scheduler(tmp_path: P
     assert runtime.heartbeat.interval_seconds == 120
 
 
+def test_build_runtime_passes_cron_concurrency_limit(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999, cron_max_concurrent_jobs=5),
+        channels={},
+    )
+    runtime = build_runtime(cfg)
+
+    assert runtime.cron.status()["concurrency_limit"] == 5
+
+
+def test_build_runtime_passes_cron_completed_job_retention(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999, cron_completed_job_retention_seconds=123),
+        channels={},
+    )
+    runtime = build_runtime(cfg)
+
+    assert runtime.cron.status()["completed_job_retention_seconds"] == 123
+
+
 def test_build_runtime_registers_openclaw_compatibility_alias_tools(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

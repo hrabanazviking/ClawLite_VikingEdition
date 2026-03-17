@@ -277,6 +277,8 @@ Call an MCP tool:
 
 Control a headless Chromium browser via Playwright. Actions: `navigate`, `click`, `fill`, `screenshot`, `evaluate`, `close`.
 
+Install with `pip install -e ".[browser]"`, then run `python -m playwright install chromium` once.
+
 ```json
 {"name":"browser","arguments":{"action":"navigate","url":"https://example.com"}}
 ```
@@ -285,6 +287,8 @@ Control a headless Chromium browser via Playwright. Actions: `navigate`, `click`
 
 Convert text to speech using edge-tts. Returns path to an MP3 file.
 
+Install with `pip install -e ".[media]"`.
+
 ```json
 {"name":"tts","arguments":{"text":"Hello world","voice":"en-US-AriaNeural","rate":"+0%"}}
 ```
@@ -292,6 +296,8 @@ Convert text to speech using edge-tts. Returns path to an MP3 file.
 ## pdf_read
 
 Extract text from a PDF file (local path or HTTPS URL). Supports page ranges.
+
+Install with `pip install -e ".[media]"`.
 
 ```json
 {"name":"pdf_read","arguments":{"path":"/workspace/doc.pdf","pages":"1-5"}}

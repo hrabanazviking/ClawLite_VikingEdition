@@ -79,3 +79,33 @@ async def test_status_unknown_job(tool_and_queue):
 
     result = await t.run({"action": "status", "job_id": "nonexistent"}, ctx)
     assert "error" in result.lower() or "not found" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_jobs_tool_hides_foreign_session_jobs(tool_and_queue):
+    t, q = tool_and_queue
+    from clawlite.tools.base import ToolContext
+    ctx = ToolContext(session_id="s1", channel="cli", user_id="u1")
+
+    foreign = q.submit("agent_run", {"x": 1}, session_id="s2")
+
+    status_result = await t.run({"action": "status", "job_id": foreign.id}, ctx)
+    assert "not found" in status_result.lower()
+
+    cancel_result = json.loads(await t.run({"action": "cancel", "job_id": foreign.id}, ctx))
+    assert cancel_result["ok"] is False
+
+    listed = json.loads(await t.run({"action": "list"}, ctx))
+    assert listed["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_jobs_tool_rejects_foreign_session_filter(tool_and_queue):
+    t, q = tool_and_queue
+    from clawlite.tools.base import ToolContext
+    ctx = ToolContext(session_id="s1", channel="cli", user_id="u1")
+
+    q.submit("agent_run", {"x": 1}, session_id="s1")
+
+    result = await t.run({"action": "list", "session_filter": "s2"}, ctx)
+    assert "session_filter override is not allowed" in result

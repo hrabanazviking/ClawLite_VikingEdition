@@ -44,6 +44,19 @@ def test_telegram_allow_from_blocks_not_listed() -> None:
     assert not channel._is_allowed_sender("777", "guest")
 
 
+def test_telegram_missing_dependency_reports_extra(monkeypatch) -> None:
+    async def _scenario() -> None:
+        monkeypatch.setitem(sys.modules, "telegram", None)
+        channel = TelegramChannel(config={"token": "x:token"})
+        try:
+            await channel._ensure_bot()
+            raise AssertionError("expected missing telegram dependency")
+        except RuntimeError as exc:
+            assert 'clawlite[telegram]' in str(exc)
+
+    asyncio.run(_scenario())
+
+
 def test_telegram_dm_policy_disabled_blocks_private_message() -> None:
     async def _scenario() -> None:
         emitted: list[tuple[str, str, str, dict]] = []
