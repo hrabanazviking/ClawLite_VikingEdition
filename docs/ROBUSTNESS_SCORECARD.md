@@ -293,9 +293,9 @@ Acceptance:
 
 ## Remaining Execution Order
 
-1. Start phase 7 work: advanced memory behaviors and self-improvement loops
+1. Release polish: changelog, tag cut, and GitHub release notes
 2. Add heavier operational smokes when CI can host them safely, especially container-backed local-provider and browser-runtime checks
-3. Keep `docs/STATUS.md`, this scorecard, and README status lines synced with each green slice
+3. Start the next roadmap after release prep, not before
 
 ## Done Definition
 

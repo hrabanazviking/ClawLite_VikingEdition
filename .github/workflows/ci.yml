@@ -120,6 +120,11 @@ jobs:
         run: |
           python -m pytest -q --tb=short tests/tools/test_browser_tool.py
 
+      - name: Smoke - self-evolution isolated branch
+        run: |
+          python -m pytest -q --tb=short \
+            tests/runtime/test_self_evolution.py::test_self_evolution_end_to_end_smoke_uses_isolated_branch
+
   autonomy-contract:
     name: Autonomy control contracts
     runs-on: ubuntu-latest

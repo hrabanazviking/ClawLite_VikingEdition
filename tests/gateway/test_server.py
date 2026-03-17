@@ -47,6 +47,23 @@ class FakeProvider:
         return LLMResult(text="pong", model="fake/test", tool_calls=[], metadata={})
 
 
+class SelfEvolutionProposalProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def get_default_model(self) -> str:
+        return "fake/self-evolution"
+
+    async def complete(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return LLMResult(
+            text="DESCRIPTION: implement target\n```python\ndef target():\n    return 42\n```\n",
+            model="fake/self-evolution",
+            tool_calls=[],
+            metadata={},
+        )
+
+
 class AutonomyIdleProvider:
     def get_default_model(self) -> str:
         return "fake/autonomy"
@@ -1118,6 +1135,87 @@ def test_build_runtime_passes_cron_completed_job_retention(tmp_path: Path) -> No
     runtime = build_runtime(cfg)
 
     assert runtime.cron.status()["completed_job_retention_seconds"] == 123
+
+
+def test_build_runtime_self_evolution_uses_provider_direct_completion(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    provider = SelfEvolutionProposalProvider()
+    with patch.object(gateway_runtime_builder, "build_provider", return_value=provider):
+        with patch.object(
+            gateway_runtime_builder,
+            "probe_local_provider_runtime",
+            return_value={"checked": False, "ok": True},
+        ):
+            runtime = build_runtime(cfg)
+
+    runtime.engine.run = AsyncMock(side_effect=AssertionError("engine.run_should_not_be_used"))
+    result = asyncio.run(runtime.self_evolution._run_llm("patch this gap"))
+
+    assert result.startswith("DESCRIPTION: implement target")
+    assert len(provider.calls) == 1
+    kwargs = provider.calls[0]
+    assert kwargs["tools"] == []
+    assert kwargs["temperature"] == 0.0
+    assert kwargs["reasoning_effort"] == "low"
+    assert kwargs["max_tokens"] == min(int(runtime.engine.max_tokens), 1200)
+    messages = kwargs["messages"]
+    assert isinstance(messages, list) and len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "user", "content": "patch this gap"}
+
+
+def test_build_runtime_self_evolution_notify_routes_operator_notice(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    provider = SelfEvolutionProposalProvider()
+    with patch.object(gateway_runtime_builder, "build_provider", return_value=provider):
+        with patch.object(
+            gateway_runtime_builder,
+            "probe_local_provider_runtime",
+            return_value={"checked": False, "ok": True},
+        ):
+            runtime = build_runtime(cfg)
+
+    history_path = Path(runtime.engine.memory.history_path)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        json.dumps({"source": "session:telegram:chat42", "created_at": "2026-03-17T00:00:00+00:00"}) + "\n",
+        encoding="utf-8",
+    )
+    runtime.channels.send = AsyncMock(return_value="msg-1")
+
+    asyncio.run(
+        runtime.self_evolution._notify_operator(
+            "self-evolution finished a safe validation pass",
+            status="committed",
+            summary="self-evolution operator notice",
+        )
+    )
+
+    runtime.channels.send.assert_awaited_once()
+    send_kwargs = runtime.channels.send.await_args.kwargs
+    assert send_kwargs["channel"] == "telegram"
+    assert send_kwargs["target"] == "chat42"
+    assert send_kwargs["text"] == "self-evolution finished a safe validation pass"
+    assert send_kwargs["metadata"]["source"] == "self_evolution"
+    assert send_kwargs["metadata"]["autonomy_notice"] is True
+    assert send_kwargs["metadata"]["autonomy_action"] == "self_evolution"
+    assert send_kwargs["metadata"]["autonomy_status"] == "committed"
+    recent = runtime.autonomy_log.snapshot(limit=5)["recent"]
+    assert any(
+        str(row.get("action", "")) == "self_evolution_notice"
+        and str(row.get("status", "")) == "sent"
+        for row in recent
+    )
 
 
 def test_build_runtime_registers_openclaw_compatibility_alias_tools(tmp_path: Path) -> None:

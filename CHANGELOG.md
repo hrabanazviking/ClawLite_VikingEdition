@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 7 — Advanced memory and self-improvement (`main`, 2026-03-17)
+- `self_evolution` now uses provider-direct proposal instead of the full agent/tool loop
+- unsafe proposals are rejected before apply via file/path/header/diff-size policy
+- successful runs now commit only inside isolated git worktree branches, leaving the live checkout untouched
+- operator notices are routed through the real autonomy notice path and surfaced in diagnostics with `last_branch`
+- added end-to-end smoke coverage for isolated self-evolution runs plus CI/smoke-script wiring
+
 ### Robustness Milestone — Phases 1–5 (2026-03-15)
 
 #### Phase 5 — Runtime recovery and operational autonomy (`e8ddaf1`)

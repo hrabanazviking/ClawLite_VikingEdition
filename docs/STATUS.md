@@ -4,7 +4,9 @@ Last updated: 2026-03-17
 
 ## Summary
 
-ClawLite is a **local-first autonomous agent runtime** in active hardening. Robustness phases 1–6 and the main maintainability plan are complete in the current working tree; remaining work is phase 7 (`advanced memory + self-improvement`), release polish, and heavier operational smoke coverage.
+ClawLite is a **local-first autonomous agent runtime** in active hardening. Robustness phases 1–7 and the main maintainability plan are complete in the current working tree; remaining work is release polish, packaging/tagging, and heavier operational smoke coverage.
+
+Phase 7 is complete on `main`: `self_evolution` validates fixes fail-closed, proposes patches through the provider directly instead of the full agent loop, rejects unsafe proposals before apply, routes operator notices through the real gateway notice path, and commits only inside isolated git worktree branches. It remains disabled by default.
 
 > **🤖 AI-built · Solo dev** — Every commit is written by Claude (AI), with the author supervising direction. No team.
 
@@ -12,9 +14,9 @@ ClawLite is a **local-first autonomous agent runtime** in active hardening. Robu
 
 - Latest tag: `v0.5.0-beta.2`
 - `main` is ahead of that tag — hardening, packaging extras, CI stabilization, and large module extractions landed after the tag
-- Full suite: `python -m pytest tests/ -q --tb=short` → **1488 passed, 1 skipped**
-- Focused runtime slice: `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py` → **165 passed**
-- CI: pytest on Python 3.10 and 3.12, Ruff lint, autonomy contracts, and smoke coverage for YAML CLI config, local-provider probes, quickstart wizard, cron, and browser bootstrap hints
+- Full suite: `python -m pytest tests/ -q --tb=short` → **1500 passed, 1 skipped**
+- Focused runtime slice: `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → **179 passed**
+- CI: pytest on Python 3.10 and 3.12, Ruff lint, autonomy contracts, and smoke coverage for YAML CLI config, local-provider probes, quickstart wizard, cron, browser bootstrap hints, and isolated self-evolution branch validation
 
 ## Robustness Milestone Progress
 
@@ -26,7 +28,7 @@ ClawLite is a **local-first autonomous agent runtime** in active hardening. Robu
 | 4 — Core + Jobs | `d91a585` | `ContextWindowManager`, `JobQueue` + `JobJournal`, `JobsTool`, `JobsConfig`, loop-detection bus events, subagent `parent_session_id` |
 | 5 — Runtime Recovery | `e8ddaf1` | `JobQueue.worker_status()`, job workers startup + supervisor, `job_workers` lifecycle component, `autonomy_stuck` detection (consecutive errors / no-progress streak) |
 | 6 — Skills + Subagents | `2e0009c` | Skill `fallback_hint` + `version_pin` lifecycle controls; `SubagentManager` orchestration depth guard (`max_orchestration_depth`); `SpawnTool` parent session propagation; CLI `skills pin-version` / `clear-version` |
-| 7 | pending | Advanced memory + self-improvement loop |
+| 7 — Advanced memory + self-improvement | completed | Restricted provider-direct proposal path, pre-apply proposal policy, isolated git worktree branches, real operator notices, disabled by default |
 
 ## What Is Complete
 
@@ -87,8 +89,8 @@ ClawLite is a **local-first autonomous agent runtime** in active hardening. Robu
 ## Validation
 
 ```bash
-python -m pytest tests/ -q --tb=short  # 1488 passed, 1 skipped
-python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py  # 165 passed
+python -m pytest tests/ -q --tb=short  # 1500 passed, 1 skipped
+python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py  # 179 passed
 bash scripts/smoke_test.sh  # 7 ok / 0 failure(s)
 python -m ruff check --select=E,F,W .  # when ruff is installed
 clawlite validate config

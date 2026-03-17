@@ -15,7 +15,7 @@ This plan is intentionally phased. The early work focuses on durability and oper
 
 ## Current Milestone
 
-Phase 1 - dashboard and control-plane parity
+Plan complete on `main`. Next work is release prep and whatever replaces this plan.
 
 Phase 0 established the docs/release hygiene baseline for the rest of this plan.
 
@@ -146,11 +146,20 @@ Work:
 - improve memory recall consistency across scopes and backends
 - extend working memory, episodic memory, consolidation, and decay
 - add safe self-improvement pipeline: analyze, patch, test, validate, commit, notify
+- keep self-improvement on a restricted provider-direct completion path instead of the full agent/tool loop
+- reject unsafe proposals before apply by enforcing file/path/header and diff-size policy
+- keep self-improvement commits isolated in dedicated git worktree branches instead of mutating the live checkout
+- keep `self_evolution` disabled by default until end-to-end validation is strong enough for release
 - keep the whole pipeline fail-closed when tests or policy checks fail
 
 Exit criteria:
 
 - advanced autonomy improves the system without silently damaging it
+
+Status:
+
+- completed on `main` by 2026-03-17
+- `self_evolution` remains disabled by default even though the pipeline now validates through restricted provider-direct proposal, pre-apply policy, isolated git worktree branches, and real operator notices
 
 ## Commit And Release Policy
 
@@ -178,3 +187,4 @@ Minimum validation per slice:
 6. Phase 5 - runtime recovery and autonomy hardening
 7. Phase 6 - skills and subagents
 8. Phase 7 - advanced memory and self-improvement
+9. Release prep and next roadmap

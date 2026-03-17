@@ -37,6 +37,12 @@ from clawlite.runtime import (
 from clawlite.gateway.control_handlers import GatewayControlHandlers
 from clawlite.gateway.status_handlers import GatewayStatusHandlers
 from clawlite.gateway.request_handlers import GatewayRequestHandlers
+from clawlite.gateway.autonomy_notice import (
+    default_heartbeat_route as _default_heartbeat_route_helper,
+    latest_memory_route as _latest_memory_route_helper,
+    latest_route_from_history_tail as _latest_route_from_history_tail_helper,
+    send_autonomy_notice as _send_autonomy_notice_helper,
+)
 from clawlite.gateway.background_runners import (
     run_proactive_monitor_loop as _run_proactive_monitor_loop_helper,
     run_self_evolution_loop as _run_self_evolution_loop_helper,
@@ -685,7 +691,7 @@ async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
 
 
 def _default_heartbeat_route() -> tuple[str, str]:
-    return "cli", "profile"
+    return _default_heartbeat_route_helper()
 
 
 _LATEST_MEMORY_ROUTE_CACHE: dict[tuple[int, str], tuple[float, tuple[str, str]]] = {}
@@ -697,80 +703,20 @@ def _latest_route_from_history_tail(
     tail_bytes: int = LATEST_MEMORY_ROUTE_TAIL_BYTES,
     preferred_channel: str = "",
 ) -> tuple[str, str]:
-    history_path = getattr(memory_store, "history_path", None)
-    if history_path is None:
-        return _default_heartbeat_route()
-    try:
-        path = Path(history_path)
-    except Exception:
-        return _default_heartbeat_route()
-    if not path.exists() or not path.is_file():
-        return _default_heartbeat_route()
-
-    try:
-        with path.open("rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            start = max(0, size - max(512, int(tail_bytes)))
-            fh.seek(start)
-            chunk = fh.read()
-    except Exception:
-        return _default_heartbeat_route()
-
-    if not chunk:
-        return _default_heartbeat_route()
-    raw_text = chunk.decode("utf-8", errors="ignore")
-    lines = raw_text.splitlines()
-    latest_route: tuple[str, str] | None = None
-    preferred = str(preferred_channel or "").strip().lower()
-    for raw_line in reversed(lines):
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        source = str(payload.get("source", "") or "").strip()
-        if not source:
-            continue
-        route = MemoryMonitor._delivery_route_from_source(source)
-        if latest_route is None:
-            latest_route = route
-        if preferred and route[0] == preferred:
-            return route
-    return latest_route or _default_heartbeat_route()
+    return _latest_route_from_history_tail_helper(
+        memory_store,
+        tail_bytes=tail_bytes,
+        preferred_channel=preferred_channel,
+    )
 
 
 async def _latest_memory_route(memory_store: Any, *, preferred_channel: str = "") -> tuple[str, str]:
-    channel, target = _default_heartbeat_route()
-    if memory_store is None:
-        return channel, target
-
-    normalized_preference = str(preferred_channel or "").strip().lower()
-    cache_key = (id(memory_store), normalized_preference)
-    now = time.monotonic()
-    cached = _LATEST_MEMORY_ROUTE_CACHE.get(cache_key)
-    if cached is not None:
-        cached_at, cached_route = cached
-        if (now - cached_at) <= LATEST_MEMORY_ROUTE_CACHE_TTL_S:
-            return cached_route
-
-    try:
-        resolved_route = await asyncio.to_thread(
-            _latest_route_from_history_tail,
-            memory_store,
-            preferred_channel=normalized_preference,
-        )
-    except Exception:
-        return channel, target
-
-    if not isinstance(resolved_route, tuple) or len(resolved_route) != 2:
-        resolved_route = (channel, target)
-    _LATEST_MEMORY_ROUTE_CACHE[cache_key] = (now, resolved_route)
-    return resolved_route
+    return await _latest_memory_route_helper(
+        memory_store,
+        preferred_channel=preferred_channel,
+        cache=_LATEST_MEMORY_ROUTE_CACHE,
+        cache_ttl_s=LATEST_MEMORY_ROUTE_CACHE_TTL_S,
+    )
 
 
 async def _run_proactive_monitor(runtime: RuntimeContainer) -> dict[str, Any]:
@@ -1530,58 +1476,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         summary: str = "",
         event_at: str = "",
     ) -> bool:
-        notice_text = str(text or "").strip()
-        if not notice_text:
-            return False
-        memory_store = getattr(runtime.engine, "memory", None)
-        channel_name, target = await _latest_memory_route(memory_store, preferred_channel="telegram")
-        if not channel_name or not target:
-            return False
-
-        payload_metadata = dict(metadata or {})
-        payload_metadata.setdefault("source", source)
-        payload_metadata["autonomy_notice"] = True
-        payload_metadata.setdefault("autonomy_action", action)
-        payload_metadata.setdefault("autonomy_status", status)
-
-        event_metadata = {
-            "channel": channel_name,
-            "target": target,
-            "notice_status": status,
-            **payload_metadata,
-        }
-        try:
-            await runtime.channels.send(
-                channel=channel_name,
-                target=target,
-                text=notice_text,
-                metadata=payload_metadata,
-            )
-        except Exception as exc:
-            event_metadata["error"] = str(exc)
-            _record_autonomy_event(
-                source,
-                f"{action}_notice",
-                "failed",
-                summary=summary or f"notice failed for {action}",
-                metadata=event_metadata,
-                event_at=event_at,
-            )
-            bind_event("autonomy.notice", source=source, action=action).warning(
-                "autonomy notice failed channel={} target={} error={}",
-                channel_name,
-                target,
-                exc,
-            )
-            return False
-
-        _record_autonomy_event(
-            source,
-            f"{action}_notice",
-            "sent",
-            summary=summary or f"notice sent for {action}",
-            metadata=event_metadata,
+        return await _send_autonomy_notice_helper(
+            source=source,
+            action=action,
+            status=status,
+            text=text,
+            memory_store=getattr(runtime.engine, "memory", None),
+            channels=runtime.channels,
+            autonomy_log=runtime.autonomy_log,
+            metadata=metadata,
+            summary=summary,
             event_at=event_at,
+            preferred_channel="telegram",
+            cache=_LATEST_MEMORY_ROUTE_CACHE,
+            cache_ttl_s=LATEST_MEMORY_ROUTE_CACHE_TTL_S,
         )
         return True
     memory_quality_cache = _build_memory_quality_cache()

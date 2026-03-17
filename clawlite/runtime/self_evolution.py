@@ -19,9 +19,11 @@ Safety limits
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +83,26 @@ class EvolutionRecord:
     error: str = ""
     ruff_ok: bool = False
     pytest_ok: bool = False
+    branch_name: str = ""
+
+
+@dataclass
+class _GitSandbox:
+    branch_name: str
+    project_root: Path
+    source_root: Path
+
+
+@dataclass
+class PatchPreview:
+    path: Path
+    lines: list[str]
+    patch_lines: list[str]
+    block_start: int
+    block_end: int
+    changed_lines: int
+    original_header: str
+    replacement_header: str
 
 
 # ── gap scanner ───────────────────────────────────────────────────────────────
@@ -263,7 +285,7 @@ class FixProposer:
             "Rules:\n"
             "- Keep the same indentation and surrounding code structure.\n"
             "- Do NOT change imports, class definitions, or unrelated code.\n"
-            "- The fix must be compatible with Python 3.10+ and pydantic 1.x.\n"
+            "- The fix must be compatible with Python 3.10+ and pydantic v2.\n"
             "- Do NOT add docstrings or comments beyond what is necessary.\n"
             "- Output only DESCRIPTION + code block, nothing else."
         )
@@ -296,26 +318,47 @@ class PatchApplicator:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
-    def apply(self, proposal: FixProposal) -> tuple[bool, str]:
-        """
-        Apply a FixProposal by finding the original function/block and replacing it.
-        Returns (ok, error_message).
-        """
+    def preview(self, proposal: FixProposal) -> tuple[PatchPreview | None, str]:
         if not proposal.files_touched:
-            return False, "no files in proposal"
+            return None, "no_files_in_proposal"
+        if len(proposal.files_touched) > MAX_FILES_PER_RUN:
+            return None, f"proposal_files_limit_exceeded:{len(proposal.files_touched)}>{MAX_FILES_PER_RUN}"
+
+        expected_file = Path(str(proposal.gap.file or "").strip()).as_posix()
+        touched = [Path(str(item or "").strip()) for item in proposal.files_touched]
+        if len({path.as_posix() for path in touched}) != 1:
+            return None, "proposal_multiple_targets_not_allowed"
+
+        target_rel = touched[0]
+        if not target_rel.parts or target_rel.is_absolute() or ".." in target_rel.parts:
+            return None, f"proposal_path_invalid:{target_rel}"
+        if target_rel.suffix != ".py":
+            return None, f"proposal_path_invalid:{target_rel}"
+        if target_rel.as_posix() != expected_file:
+            return None, f"proposal_file_mismatch:{target_rel.as_posix()}!={expected_file}"
 
         gap = proposal.gap
-        path = self.root / gap.file
+        path = self.root / target_rel
+        try:
+            resolved = path.resolve()
+        except Exception:
+            return None, f"proposal_path_invalid:{target_rel}"
+        if self.root != resolved and self.root not in resolved.parents:
+            return None, f"proposal_path_invalid:{target_rel}"
         if not path.exists():
-            return False, f"file not found: {gap.file}"
+            return None, f"file_not_found:{gap.file}"
 
         try:
             original = path.read_text(encoding="utf-8")
         except OSError as exc:
-            return False, f"read error: {exc}"
+            return None, f"read_error:{exc}"
 
         lines = original.splitlines(keepends=True)
-        patch_lines = proposal.patch_unified.splitlines(keepends=True)
+        patch_lines = self._normalized_patch_lines(proposal.patch_unified)
+        if not patch_lines or not "".join(patch_lines).strip():
+            return None, "proposal_patch_empty"
+        if any("```" in line for line in patch_lines):
+            return None, "proposal_patch_contains_fence"
 
         # Find the function/block at the gap line and replace it
         # Strategy: find the nearest `def ` or class header above the gap line,
@@ -323,16 +366,50 @@ class PatchApplicator:
         gap_idx = max(0, gap.line - 1)
         block_start = self._find_block_start(lines, gap_idx)
         block_end = self._find_block_end(lines, block_start)
+        original_header = self._header_signature(lines[block_start] if block_start < len(lines) else "")
+        replacement_header = self._header_signature(self._first_meaningful_line(patch_lines))
+        if original_header == "":
+            return None, "proposal_target_missing_header"
+        if replacement_header == "":
+            return None, "proposal_patch_missing_header"
+        if original_header != replacement_header:
+            return None, f"proposal_header_mismatch:{original_header}->{replacement_header}"
 
-        delta = abs(len(patch_lines) - (block_end - block_start))
-        if delta > MAX_LINES_DELTA:
-            return False, f"patch too large: delta={delta} > {MAX_LINES_DELTA}"
+        changed_lines = self._changed_line_count(lines[block_start:block_end], patch_lines)
+        if changed_lines > MAX_LINES_DELTA:
+            return None, f"proposal_diff_too_large:{changed_lines}>{MAX_LINES_DELTA}"
 
-        new_lines = lines[:block_start] + patch_lines + lines[block_end:]
+        return PatchPreview(
+            path=path,
+            lines=lines,
+            patch_lines=patch_lines,
+            block_start=block_start,
+            block_end=block_end,
+            changed_lines=changed_lines,
+            original_header=original_header,
+            replacement_header=replacement_header,
+        ), ""
+
+    def apply(self, proposal: FixProposal, *, preview: PatchPreview | None = None) -> tuple[bool, str]:
+        """
+        Apply a FixProposal by finding the original function/block and replacing it.
+        Returns (ok, error_message).
+        """
+        resolved_preview = preview
+        if resolved_preview is None:
+            resolved_preview, error = self.preview(proposal)
+            if resolved_preview is None:
+                return False, error
+
+        new_lines = (
+            resolved_preview.lines[:resolved_preview.block_start]
+            + resolved_preview.patch_lines
+            + resolved_preview.lines[resolved_preview.block_end:]
+        )
         new_text = "".join(new_lines)
 
         try:
-            path.write_text(new_text, encoding="utf-8")
+            resolved_preview.path.write_text(new_text, encoding="utf-8")
         except OSError as exc:
             return False, f"write error: {exc}"
 
@@ -353,15 +430,59 @@ class PatchApplicator:
         if start >= len(lines):
             return start
         base_indent = len(lines[start]) - len(lines[start].lstrip())
+        next_block_decorator_start: int | None = None
         for i in range(start + 1, len(lines)):
             line = lines[i]
             stripped = line.lstrip()
             if not stripped or stripped.startswith("#"):
                 continue
             indent = len(line) - len(line.lstrip())
+            if indent <= base_indent and stripped.startswith("@"):
+                if next_block_decorator_start is None:
+                    next_block_decorator_start = i
+                continue
             if indent <= base_indent and stripped.startswith(("def ", "async def ", "class ")):
-                return i
+                return next_block_decorator_start if next_block_decorator_start is not None else i
+            if indent <= base_indent:
+                next_block_decorator_start = None
         return len(lines)
+
+    @staticmethod
+    def _first_meaningful_line(lines: list[str]) -> str:
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                continue
+            return line
+        return ""
+
+    @staticmethod
+    def _header_signature(line: str) -> str:
+        stripped = str(line or "").lstrip()
+        match = re.match(r"(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b", stripped)
+        if match is None:
+            return ""
+        return f"{match.group(1)}:{match.group(2)}"
+
+    @staticmethod
+    def _changed_line_count(original: list[str], replacement: list[str]) -> int:
+        changed = 0
+        for row in difflib.ndiff(
+            [line.rstrip("\n") for line in original],
+            [line.rstrip("\n") for line in replacement],
+        ):
+            if row.startswith("- ") or row.startswith("+ "):
+                changed += 1
+        return changed
+
+    @staticmethod
+    def _normalized_patch_lines(patch_unified: str) -> list[str]:
+        patch_lines = str(patch_unified or "").splitlines(keepends=True)
+        if patch_lines and not patch_lines[-1].endswith("\n"):
+            patch_lines[-1] = f"{patch_lines[-1]}\n"
+        return patch_lines
 
 
 # ── validator ─────────────────────────────────────────────────────────────────
@@ -457,6 +578,13 @@ def _commit(root: Path, files: list[str], message: str) -> tuple[bool, str]:
     return True, sha if rc == 0 else ""
 
 
+def _git_is_dirty(root: Path) -> tuple[bool, str]:
+    rc, out = _git(["status", "--porcelain"], cwd=str(root))
+    if rc != 0:
+        return True, f"git_status_failed:{out}"
+    return bool(str(out or "").strip()), str(out or "").strip()
+
+
 # ── evolution log ─────────────────────────────────────────────────────────────
 
 class EvolutionLog:
@@ -509,6 +637,10 @@ class SelfEvolutionEngine:
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.source_root = Path(source_root).resolve() if source_root else self.project_root / "clawlite"
+        try:
+            self._source_relpath = self.source_root.relative_to(self.project_root)
+        except ValueError as exc:
+            raise ValueError("source_root must be inside project_root for isolated self-evolution runs") from exc
         self._run_llm = run_llm
         self._notify = notify
         self.cooldown_s = max(60.0, float(cooldown_s))
@@ -527,17 +659,59 @@ class SelfEvolutionEngine:
         self._committed_count = 0
         self._last_outcome = ""
         self._last_error = ""
+        self._last_branch = ""
 
     @staticmethod
     def _utc_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    async def _notify_operator(self, text: str) -> None:
+    def _create_git_sandbox(self, run_id: str) -> tuple[_GitSandbox | None, str]:
+        dirty, detail = _git_is_dirty(self.project_root)
+        if dirty:
+            if detail.startswith("git_status_failed:"):
+                return None, detail
+            return None, "git_worktree_dirty"
+
+        branch_name = f"self-evolution/{run_id}"
+        worktree_dir = Path(tempfile.mkdtemp(prefix=f"clawlite-{run_id}-", dir=str(self.project_root.parent)))
+        rc, out = _git(
+            ["worktree", "add", "--quiet", "-b", branch_name, str(worktree_dir), "HEAD"],
+            cwd=str(self.project_root),
+        )
+        if rc != 0:
+            shutil.rmtree(worktree_dir, ignore_errors=True)
+            return None, f"git_worktree_add_failed:{out}"
+
+        source_root = worktree_dir / self._source_relpath
+        return _GitSandbox(branch_name=branch_name, project_root=worktree_dir, source_root=source_root), ""
+
+    def _cleanup_git_sandbox(self, sandbox: _GitSandbox, *, keep_branch: bool) -> None:
+        _git(["worktree", "remove", "--force", str(sandbox.project_root)], cwd=str(self.project_root))
+        if not keep_branch:
+            _git(["branch", "-D", sandbox.branch_name], cwd=str(self.project_root))
+        shutil.rmtree(sandbox.project_root, ignore_errors=True)
+
+    async def _notify_operator(
+        self,
+        text: str,
+        *,
+        status: str = "info",
+        summary: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         if self._notify is None:
             bind_event("self_evolution").info("operator notice: {}", text)
             return
         try:
-            await self._notify("self_evolution", {"text": text})
+            await self._notify(
+                "self_evolution",
+                {
+                    "text": text,
+                    "status": str(status or "info").strip() or "info",
+                    "summary": str(summary or "").strip(),
+                    "metadata": dict(metadata or {}),
+                },
+            )
         except Exception as exc:
             bind_event("self_evolution").warning("notify failed: {}", exc)
 
@@ -556,18 +730,36 @@ class SelfEvolutionEngine:
             return await self._do_run()
 
     async def _do_run(self) -> dict[str, Any]:
-        run_id = f"evo-{int(time.time())}"
+        run_id = f"evo-{int(time.time() * 1000)}"
         record = EvolutionRecord(run_id=run_id, started_at=self._utc_iso())
         self._last_run_at = time.monotonic()
         self._run_count += 1
+        backups: dict[str, str] = {}
+        sandbox: _GitSandbox | None = None
+        keep_branch = False
 
         try:
+            sandbox, sandbox_error = await asyncio.to_thread(self._create_git_sandbox, run_id)
+            if sandbox is None:
+                record.outcome = "error"
+                record.error = sandbox_error or "git_worktree_setup_failed"
+                record.finished_at = self._utc_iso()
+                self._last_outcome = "error"
+                self._last_error = record.error
+                self.log.append(record)
+                return self.status()
+
+            record.branch_name = sandbox.branch_name
+            scanner = SourceScanner(sandbox.source_root)
+            validator = Validator(sandbox.project_root, python_executable=self._validator.python_executable)
+            applicator = PatchApplicator(sandbox.source_root)
+
             # 1. Scan for gaps
-            code_gaps = self._scanner.scan(max_gaps=20)
-            roadmap_path = self.project_root / "ROADMAP.md"
-            roadmap_gaps = self._scanner.scan_roadmap(roadmap_path, max_items=5)
-            catalog_path = self.project_root / "memory" / "gap-catalog.json"
-            ref_gaps = self._scanner.scan_reference_gaps(catalog_path, max_items=5)
+            code_gaps = scanner.scan(max_gaps=20)
+            roadmap_path = sandbox.project_root / "ROADMAP.md"
+            roadmap_gaps = scanner.scan_roadmap(roadmap_path, max_items=5)
+            catalog_path = sandbox.project_root / "memory" / "gap-catalog.json"
+            ref_gaps = scanner.scan_reference_gaps(catalog_path, max_items=5)
             all_gaps = code_gaps + roadmap_gaps + ref_gaps
             record.gaps_found = len(all_gaps)
 
@@ -580,6 +772,8 @@ class SelfEvolutionEngine:
                 record.outcome = "no_gaps"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "no_gaps"
+                self._last_error = ""
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
@@ -589,6 +783,7 @@ class SelfEvolutionEngine:
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "error"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
@@ -603,10 +798,12 @@ class SelfEvolutionEngine:
                 record.outcome = "no_gaps"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "no_gaps"
+                self._last_error = ""
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
-            context = self._scanner.read_context(target_gap, context_lines=40)
+            context = scanner.read_context(target_gap, context_lines=40)
 
             # 3. Propose fix
             proposer = FixProposer(self._run_llm)
@@ -617,61 +814,83 @@ class SelfEvolutionEngine:
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "error"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
             record.fix_description = proposal.description
             record.files_changed = list(proposal.files_touched)
 
+            preview, preview_error = await asyncio.to_thread(applicator.preview, proposal)
+            if preview is None:
+                record.outcome = "error"
+                record.error = f"proposal_policy_failed:{preview_error}"
+                record.finished_at = self._utc_iso()
+                self._last_outcome = "error"
+                self._last_error = record.error
+                self._last_branch = ""
+                self.log.append(record)
+                return self.status()
+
             # 4. Backup original files
-            backups: dict[str, str] = {}
             for rel in proposal.files_touched:
-                p = self.source_root / rel
+                p = sandbox.source_root / rel
                 if p.exists():
                     backups[rel] = p.read_text(encoding="utf-8", errors="replace")
 
             # 5. Apply patch
-            ok, err = await asyncio.to_thread(self._applicator.apply, proposal)
+            ok, err = await asyncio.to_thread(applicator.apply, proposal, preview=preview)
             if not ok:
                 record.outcome = "error"
                 record.error = f"apply_failed: {err}"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "error"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
             # 6. Validate
-            ruff_ok, ruff_out = await asyncio.to_thread(self._validator.run_ruff)
+            ruff_ok, ruff_out = await asyncio.to_thread(validator.run_ruff)
             record.ruff_ok = ruff_ok
 
             if not ruff_ok:
                 bind_event("self_evolution").warning("ruff failed run={} output={}", run_id, ruff_out[:400])
-                await self._restore_backups(backups)
+                await self._restore_backups(backups, project_root=sandbox.project_root, source_root=sandbox.source_root)
                 record.outcome = "validation_failed"
                 record.error = f"ruff: {ruff_out[:300]}"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "validation_failed"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
-            pytest_ok, pytest_out = await asyncio.to_thread(self._validator.run_pytest)
+            pytest_ok, pytest_out = await asyncio.to_thread(validator.run_pytest)
             record.pytest_ok = pytest_ok
 
             if not pytest_ok:
                 bind_event("self_evolution").warning("pytest failed run={} output={}", run_id, pytest_out[-400:])
-                await self._restore_backups(backups)
+                await self._restore_backups(backups, project_root=sandbox.project_root, source_root=sandbox.source_root)
                 record.outcome = "validation_failed"
                 record.error = f"pytest: {pytest_out[-300:]}"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "validation_failed"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 await self._notify_operator(
                     f"[self-evolution] Proposed fix for `{target_gap.file}:{target_gap.line}` "
                     f"({target_gap.kind}) — tests FAILED, rolled back.\n"
-                    f"Description: {proposal.description}"
+                    f"Description: {proposal.description}",
+                    status="validation_failed",
+                    summary=f"self-evolution rollback for {target_gap.file}:{target_gap.line}",
+                    metadata={
+                        "gap_file": target_gap.file,
+                        "gap_line": int(target_gap.line),
+                        "gap_kind": target_gap.kind,
+                        "run_id": run_id,
+                    },
                 )
                 return self.status()
 
@@ -682,16 +901,19 @@ class SelfEvolutionEngine:
                 f"Run: {run_id}\n\n"
                 f"Co-Authored-By: SelfEvolutionEngine <noreply@clawlite>"
             )
+            repo_files_touched = [str(self._source_relpath / Path(rel)) for rel in proposal.files_touched]
             committed, sha = await asyncio.to_thread(
-                _commit, self.project_root, proposal.files_touched, commit_msg
+                _commit, sandbox.project_root, repo_files_touched, commit_msg
             )
 
             if not committed:
+                await self._restore_backups(backups, project_root=sandbox.project_root, source_root=sandbox.source_root)
                 record.outcome = "error"
                 record.error = f"commit_failed: {sha}"
                 record.finished_at = self._utc_iso()
                 self._last_outcome = "error"
                 self._last_error = record.error
+                self._last_branch = ""
                 self.log.append(record)
                 return self.status()
 
@@ -700,7 +922,9 @@ class SelfEvolutionEngine:
             record.finished_at = self._utc_iso()
             self._last_outcome = "committed"
             self._last_error = ""
+            self._last_branch = sandbox.branch_name
             self._committed_count += 1
+            keep_branch = True
             self.log.append(record)
 
             bind_event("self_evolution").info(
@@ -710,27 +934,50 @@ class SelfEvolutionEngine:
 
             # 8. Notify operator (no approval required)
             await self._notify_operator(
-                f"[self-evolution] Auto-fixed `{target_gap.file}:{target_gap.line}` "
+                f"[self-evolution] Prepared isolated fix `{target_gap.file}:{target_gap.line}` "
                 f"({target_gap.kind})\n"
                 f"Description: {proposal.description}\n"
-                f"Commit: {sha}  •  ruff ✓  pytest ✓"
+                f"Branch: {sandbox.branch_name}\n"
+                f"Commit: {sha}  •  ruff ✓  pytest ✓",
+                status="committed",
+                summary=f"self-evolution committed fix for {target_gap.file}:{target_gap.line}",
+                metadata={
+                    "gap_file": target_gap.file,
+                    "gap_line": int(target_gap.line),
+                    "gap_kind": target_gap.kind,
+                    "run_id": run_id,
+                    "branch_name": sandbox.branch_name,
+                    "commit_sha": sha,
+                },
             )
 
         except Exception as exc:
+            if backups and sandbox is not None:
+                await self._restore_backups(backups, project_root=sandbox.project_root, source_root=sandbox.source_root)
             record.outcome = "error"
             record.error = str(exc)
             record.finished_at = self._utc_iso()
             self._last_outcome = "error"
             self._last_error = str(exc)
+            self._last_branch = ""
             self.log.append(record)
             bind_event("self_evolution").error("run failed run={} error={}", run_id, exc)
+        finally:
+            if sandbox is not None:
+                await asyncio.to_thread(self._cleanup_git_sandbox, sandbox, keep_branch=keep_branch)
 
         return self.status()
 
-    async def _restore_backups(self, backups: dict[str, str]) -> None:
+    async def _restore_backups(
+        self,
+        backups: dict[str, str],
+        *,
+        project_root: Path,
+        source_root: Path,
+    ) -> None:
         restored: list[str] = []
         for rel, content in backups.items():
-            path = self.source_root / rel
+            path = source_root / rel
             try:
                 await asyncio.to_thread(path.write_text, content, "utf-8")
                 restored.append(str(path))
@@ -744,7 +991,7 @@ class SelfEvolutionEngine:
                 result = await asyncio.to_thread(
                     subprocess.run,
                     ["git", "checkout", "HEAD", "--"] + restored,
-                    cwd=str(self.project_root),
+                    cwd=str(project_root),
                     capture_output=True,
                     text=True,
                 )
@@ -766,6 +1013,7 @@ class SelfEvolutionEngine:
             "committed_count": self._committed_count,
             "last_outcome": self._last_outcome,
             "last_error": self._last_error,
+            "last_branch": self._last_branch,
             "cooldown_remaining_s": round(cooldown_remaining, 1),
             "locked": self._lock.locked(),
         }

@@ -54,8 +54,10 @@ if "${PYTHON_BIN}" -m pytest -q --tb=line \
   tests/cli/test_onboarding.py::test_run_onboarding_wizard_quickstart_uses_guided_defaults \
   tests/scheduler/test_cron.py::test_cron_service_add_and_run \
   tests/scheduler/test_cron.py::test_cron_loop_survives_callback_failure_and_tracks_job_health \
-  tests/tools/test_browser_tool.py 2>/dev/null | grep -q "passed"; then
-  _ok "Provider + wizard + cron + browser smoke tests"
+  tests/tools/test_browser_tool.py \
+  tests/runtime/test_self_evolution.py::test_self_evolution_end_to_end_smoke_uses_isolated_branch \
+  2>/dev/null | grep -q "passed"; then
+  _ok "Provider + wizard + cron + browser + self-evolution smoke tests"
 else
   _fail "targeted smoke pytest failed"
 fi

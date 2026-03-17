@@ -696,10 +696,10 @@ Purpose: operational visibility for whether inbound dispatch is still draining t
 
 `self_evolution` is additive and reports the self-improvement engine plus its background loop runner:
 
-- engine status: `enabled`, `run_count`, `committed_count`, `last_outcome`, `last_error`, `cooldown_remaining_s`, `locked`
+- engine status: `enabled`, `run_count`, `committed_count`, `last_outcome`, `last_error`, `last_branch`, `cooldown_remaining_s`, `locked`
 - runner status: nested `runner` map with `enabled`, `running`, `cooldown_seconds`, `ticks`, `success_count`, `error_count`, `last_result`, `last_error`, `last_run_iso`
 
-Purpose: operational visibility for whether the self-evolution worker is actually alive, not just configured.
+Purpose: operational visibility for whether the self-evolution worker is actually alive, not just configured, and which isolated branch the latest successful run produced.
 
 `subagents` is additive and reports persisted subagent manager/runtime telemetry:
 

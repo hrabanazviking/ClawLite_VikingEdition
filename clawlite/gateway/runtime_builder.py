@@ -23,6 +23,7 @@ from clawlite.runtime import (
     AutonomyWakeCoordinator,
     RuntimeSupervisor,
 )
+from clawlite.gateway.autonomy_notice import send_autonomy_notice
 from clawlite.scheduler.cron import CronService
 from clawlite.scheduler.heartbeat import HeartbeatService
 from clawlite.session.store import SessionStore
@@ -488,13 +489,58 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     from clawlite.runtime.self_evolution import SelfEvolutionEngine
 
     async def _evo_run_llm(prompt: str) -> str:
-        result = await engine.run(session_id="self_evolution:system", user_text=prompt)
-        return result.text
+        provider = engine.provider
+        complete_fn = provider.complete
+        complete_spec = engine._callable_parameter_spec(complete_fn)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are ClawLite's restricted self-evolution patch assistant. "
+                    "Never call tools or make unrelated changes. "
+                    "Reply only in the exact patch format requested by the user prompt."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        kwargs: dict[str, Any] = {"messages": messages, "tools": []}
+        if complete_spec is not None and ("max_tokens" in complete_spec.names or complete_spec.accepts_kwargs):
+            kwargs["max_tokens"] = min(int(engine.max_tokens), 1200)
+        if complete_spec is not None and ("temperature" in complete_spec.names or complete_spec.accepts_kwargs):
+            kwargs["temperature"] = 0.0
+        if complete_spec is not None and ("reasoning_effort" in complete_spec.names or complete_spec.accepts_kwargs):
+            kwargs["reasoning_effort"] = "low"
+        result = await complete_fn(**kwargs)
+        normalized = engine._normalize_provider_result(result)
+        return str(normalized.text or "")
+
+    async def _evo_notify(source: str, payload: dict[str, Any]) -> bool:
+        notice_text = str(payload.get("text", "") or "").strip()
+        if not notice_text:
+            return False
+        action = str(payload.get("action", "") or source or "self_evolution").strip() or "self_evolution"
+        status = str(payload.get("status", "") or "info").strip() or "info"
+        summary = str(payload.get("summary", "") or f"{action} operator notice").strip()
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return await send_autonomy_notice(
+            source=source,
+            action=action,
+            status=status,
+            text=notice_text,
+            memory_store=getattr(engine, "memory", None),
+            channels=channels,
+            autonomy_log=autonomy_log,
+            metadata=metadata,
+            summary=summary,
+        )
 
     project_root = Path(__file__).resolve().parent.parent.parent
     self_evolution = SelfEvolutionEngine(
         project_root=project_root,
         run_llm=_evo_run_llm,
+        notify=_evo_notify,
         cooldown_s=float(config.gateway.autonomy.self_evolution_cooldown_s),
         enabled=bool(config.gateway.autonomy.self_evolution_enabled),
         log_path=Path(config.state_path) / "evolution-log.json",
