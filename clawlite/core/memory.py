@@ -3503,6 +3503,10 @@ class MemoryStore:
             serialize_hit=self._serialize_hit,
             encrypt_text_for_category=self._encrypt_text_for_category,
         )
+        stored_payload = next(
+            (dict(row) for row in updated_rows if str(row.get("id", "")).strip() == str(record.id or "").strip()),
+            {},
+        )
         self._write_category_items(category, updated_rows)
         self._update_category_summary_file(category)
         category_path = self._category_file_path(category)

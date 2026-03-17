@@ -1,9 +1,10 @@
 from __future__ import annotations
+
 import io
+
 import pytest
 
-PIL = pytest.importorskip("PIL", reason="Pillow not installed")
-Image = PIL.Image
+Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
 
 
 def _make_fake_png(color: tuple, width: int = 720, height: int = 400) -> bytes:
