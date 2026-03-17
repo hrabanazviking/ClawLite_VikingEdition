@@ -774,7 +774,7 @@ class SelfEvolutionEngine:
         reject_prefix = f"self_evolution:reject:{run_id}"
         return {
             "approval_required": True,
-            "approval_command": f"clawlite self-evolution status",
+            "approval_command": "clawlite self-evolution status",
             "_telegram_inline_keyboard": [
                 [
                     {"text": "Approve", "callback_data": callback_prefix},
