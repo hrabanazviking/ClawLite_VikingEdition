@@ -25,10 +25,10 @@
 ## ⚡ Why ClawLite?
 
 - **Truly local-first** — runs entirely on your machine; no vendor lock-in, no cloud accounts required
-- **Production channels out of the box** — Telegram, Discord (slash commands, voice, polls), Email, WhatsApp, Slack
+- **Real channel adapters out of the box** — Telegram, Discord, Email, WhatsApp, and Slack outbound
 - **Persistent, searchable memory** — hybrid BM25 + vector search, temporal decay, consolidation loop
 - **Self-healing runtime** — heartbeat supervisor, dead-letter replay, automatic provider failover
-- **Batteries included** — 25+ skills, 21+ tools, streaming responses, operator dashboard
+- **Batteries included** — 25+ skills, built-in tools, streaming responses, operator dashboard
 
 ---
 
@@ -64,6 +64,16 @@ If you pass `--config path.yaml`, YAML configs work out of the box. Optional run
 # Or talk to the agent straight from the terminal
 clawlite run "hello — what can you do?"
 ```
+
+---
+
+## 📈 Current Status
+
+- `main` is in active hardening; robustness phases 1-6 are already landed and phase 7 is still open.
+- Local-provider startup, cron/jobs boundaries, browser lifecycle, skill networking policy, and Telegram runtime internals were hardened on `main`.
+- Packaging is now split into extras: base install stays leaner, while `.[browser]`, `.[telegram]`, and `.[media]` enable optional runtimes.
+- Latest validation on `main`: `python -m pytest tests -q --tb=short --ignore=tests/scripts/test_assemble_gif.py` → `1400 passed, 1 skipped`.
+- Tracking docs: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md).
 
 ---
 
@@ -166,7 +176,7 @@ Heartbeat supervisor · persistent cron engine · autonomy wake coordinator · d
 **🖥️ Operator Dashboard** — `http://localhost:8787`
 Live chat · sessions view · automation controls (cron, recovery, channels) · memory health · tools catalog · WebSocket frame preview
 
-**🧰 Tools (22+)**
+**🧰 Built-In Tools**
 
 | Category | Tools |
 |----------|-------|
@@ -189,7 +199,7 @@ Skill lifecycle: `enable` / `disable` · `pin` / `unpin` · `pin-version` / `cle
 | Channel | Inbound | Outbound | Status | Highlights |
 |---------|---------|---------|--------|------------|
 | **Telegram** | ✅ | ✅ | ✅ Complete | Polling + webhook, reactions, topics, reply keyboards, streaming |
-| **Discord** | ✅ | ✅ | ✅ Complete | Gateway WS, slash commands, buttons, voice messages, webhooks, polls, streaming |
+| **Discord** | ✅ | ✅ | 🟡 Usable | Gateway WS, slash commands, buttons, voice messages, webhooks, polls, streaming |
 | **Email** | ✅ | ✅ | 🟡 Usable | IMAP inbound + SMTP outbound |
 | **WhatsApp** | ✅ | ✅ | 🟡 Usable | Webhook inbound + outbound bridge |
 | **Slack** | ❌ | ✅ | 📤 Send-only | Outbound delivery |
@@ -273,9 +283,12 @@ ClawLite has four main layers:
 ## 🛠️ Development
 
 ```bash
-# Install and run tests
-pip install -e .
-python -m pytest tests/ -q --tb=short -k "not slow"
+# Install package + contributor tools
+pip install -e ".[all]"
+python -m pip install pytest ruff
+
+# Run the main test suite
+python -m pytest tests/ -q --tb=short
 
 # Lint
 python -m ruff check --select=E,F,W .
@@ -335,6 +348,7 @@ clawlite supervisor recover --component heartbeat
 | [`docs/API.md`](docs/API.md) | Gateway HTTP + WebSocket API reference |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Operational commands and diagnostics |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operator validation and incident flow |
+| [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md) | Current score by area plus `P0/P1/P2` backlog |
 | [`docs/providers.md`](docs/providers.md) | Provider catalog and auth |
 | [`docs/channels.md`](docs/channels.md) | Channel behavior and caveats |
 | [`docs/tools.md`](docs/tools.md) | Tool catalog and aliases |
