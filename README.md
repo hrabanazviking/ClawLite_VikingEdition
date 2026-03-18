@@ -120,6 +120,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`.
 - Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks.
+- Managed skills now expose richer local lifecycle state in the CLI, including aggregate `status_counts` plus resolved marketplace state after `install`, `update`, `sync`, and `remove`.
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
 - OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.

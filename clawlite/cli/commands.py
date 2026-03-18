@@ -1692,6 +1692,22 @@ def _managed_skill_payload(row: Any) -> dict[str, Any]:
     }
 
 
+def _managed_skill_rows(loader: SkillsLoader, *, status: str = "") -> list[Any]:
+    rows = [row for row in loader.discover(include_unavailable=True) if row.source == "marketplace"]
+    wanted_status = str(status or "").strip().lower()
+    if wanted_status:
+        rows = [row for row in rows if _managed_skill_status(row) == wanted_status]
+    return rows
+
+
+def _managed_skill_status_counts(rows: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = _managed_skill_status(row)
+        counts[status] = counts.get(status, 0) + 1
+    return {key: counts[key] for key in sorted(counts)}
+
+
 def _resolve_managed_skill(loader: SkillsLoader, raw_name: str) -> tuple[Any | None, str, Path]:
     needle = str(raw_name or "").strip().lower()
     managed_root = _skills_managed_root(loader)
@@ -1780,9 +1796,13 @@ def cmd_skills_install(args: argparse.Namespace) -> int:
     payload["action"] = "install"
     payload["slug"] = args.slug
     if rc == 0:
-        resolved_row, _slug, _target = _resolve_managed_skill(loader, args.slug)
+        refreshed_loader = _skills_loader_for_args(args)
+        resolved_row, _slug, _target = _resolve_managed_skill(refreshed_loader, args.slug)
         if resolved_row is not None:
             payload["resolved"] = _managed_skill_payload(resolved_row)
+        rows = _managed_skill_rows(refreshed_loader)
+        payload["managed_count"] = len(rows)
+        payload["status_counts"] = _managed_skill_status_counts(rows)
     _print_json(payload)
     return rc
 
@@ -1798,9 +1818,13 @@ def cmd_skills_update(args: argparse.Namespace) -> int:
         payload["name"] = row.name
         payload["skill_key"] = row.skill_key or row.name
     if rc == 0:
-        resolved_row, _final_slug, _target = _resolve_managed_skill(loader, resolved_slug)
+        refreshed_loader = _skills_loader_for_args(args)
+        resolved_row, _final_slug, _target = _resolve_managed_skill(refreshed_loader, resolved_slug)
         if resolved_row is not None:
             payload["resolved"] = _managed_skill_payload(resolved_row)
+        rows = _managed_skill_rows(refreshed_loader)
+        payload["managed_count"] = len(rows)
+        payload["status_counts"] = _managed_skill_status_counts(rows)
     _print_json(payload)
     return rc
 
@@ -1809,6 +1833,12 @@ def cmd_skills_sync(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
     rc, payload = _run_clawhub_command(loader, "update", "--all")
     payload["action"] = "sync"
+    if rc == 0:
+        refreshed_loader = _skills_loader_for_args(args)
+        rows = _managed_skill_rows(refreshed_loader)
+        payload["managed_count"] = len(rows)
+        payload["status_counts"] = _managed_skill_status_counts(rows)
+        payload["skills"] = [_managed_skill_payload(row) for row in rows]
     _print_json(payload)
     return rc
 
@@ -1825,10 +1855,9 @@ def cmd_skills_search(args: argparse.Namespace) -> int:
 
 def cmd_skills_managed(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
-    rows = [row for row in loader.discover(include_unavailable=True) if row.source == "marketplace"]
     wanted_status = str(getattr(args, "status", "") or "").strip().lower()
-    if wanted_status:
-        rows = [row for row in rows if _managed_skill_status(row) == wanted_status]
+    all_rows = _managed_skill_rows(loader)
+    rows = _managed_skill_rows(loader, status=wanted_status)
     managed_root = _skills_managed_root(loader)
     _print_json(
         {
@@ -1837,7 +1866,9 @@ def cmd_skills_managed(args: argparse.Namespace) -> int:
             "managed_root": str(managed_root),
             "skills_root": str(managed_root / "skills"),
             "count": len(rows),
+            "total_count": len(all_rows),
             "status_filter": wanted_status,
+            "status_counts": _managed_skill_status_counts(all_rows),
             "skills": [_managed_skill_payload(row) for row in rows],
         }
     )
@@ -1857,7 +1888,10 @@ def cmd_skills_remove(args: argparse.Namespace) -> int:
             }
         )
         return 1
+    removed_payload = _managed_skill_payload(row)
     shutil.rmtree(target)
+    refreshed_loader = _skills_loader_for_args(args)
+    remaining_rows = _managed_skill_rows(refreshed_loader)
     _print_json(
         {
             "ok": True,
@@ -1865,8 +1899,11 @@ def cmd_skills_remove(args: argparse.Namespace) -> int:
             "name": row.name,
             "skill_key": row.skill_key or row.name,
             "slug": slug,
+            "removed": removed_payload,
             "removed_path": str(target),
             "managed_root": str(managed_root),
+            "managed_count": len(remaining_rows),
+            "status_counts": _managed_skill_status_counts(remaining_rows),
         }
     )
     return 0

@@ -357,6 +357,8 @@ def test_cli_skills_install_update_and_sync_use_marketplace_root(tmp_path: Path,
     assert install_payload["skills_root"].endswith(".clawlite/marketplace/skills")
     assert install_payload["resolved"]["status"] == "ready"
     assert install_payload["resolved"]["slug"] == "jira-helper"
+    assert install_payload["managed_count"] == 1
+    assert install_payload["status_counts"] == {"ready": 1}
 
     rc_update = main(["skills", "update", "Jira Helper"])
     assert rc_update == 0
@@ -366,12 +368,17 @@ def test_cli_skills_install_update_and_sync_use_marketplace_root(tmp_path: Path,
     assert update_payload["slug"] == "jira-helper"
     assert update_payload["name"] == "Jira Helper"
     assert update_payload["resolved"]["status"] == "ready"
+    assert update_payload["managed_count"] == 1
+    assert update_payload["status_counts"] == {"ready": 1}
 
     rc_sync = main(["skills", "sync"])
     assert rc_sync == 0
     sync_payload = json.loads(capsys.readouterr().out)
     assert sync_payload["ok"] is True
     assert sync_payload["action"] == "sync"
+    assert sync_payload["managed_count"] == 1
+    assert sync_payload["status_counts"] == {"ready": 1}
+    assert sync_payload["skills"][0]["slug"] == "jira-helper"
 
     assert calls[0][-2:] == ["--workdir", str(tmp_path / ".clawlite" / "marketplace")]
     assert calls[1][3:5] == ["update", "jira-helper"]
@@ -419,6 +426,8 @@ def test_cli_skills_managed_lists_marketplace_entries(tmp_path: Path, capsys, mo
     assert payload["ok"] is True
     assert payload["action"] == "managed"
     assert payload["count"] == 1
+    assert payload["total_count"] == 1
+    assert payload["status_counts"] == {"ready": 1}
     assert payload["skills"][0]["slug"] == "market-echo"
     assert payload["skills"][0]["name"] == "market-echo"
     assert payload["skills"][0]["description"] == "marketplace skill"
@@ -458,7 +467,9 @@ def test_cli_skills_managed_filters_by_status_and_includes_hint(tmp_path: Path, 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["count"] == 1
+    assert payload["total_count"] == 2
     assert payload["status_filter"] == "missing_requirements"
+    assert payload["status_counts"] == {"missing_requirements": 1, "ready": 1}
     assert payload["skills"][0]["name"] == "market-broken"
     assert "BROKEN_TOKEN" in payload["skills"][0]["hint"]
 
@@ -476,6 +487,9 @@ def test_cli_skills_remove_resolves_marketplace_skill_by_name(tmp_path: Path, ca
     assert payload["action"] == "remove"
     assert payload["slug"] == "managed-folder"
     assert payload["name"] == "Managed Skill"
+    assert payload["removed"]["slug"] == "managed-folder"
+    assert payload["managed_count"] == 0
+    assert payload["status_counts"] == {}
     assert not skill_dir.exists()
 
 

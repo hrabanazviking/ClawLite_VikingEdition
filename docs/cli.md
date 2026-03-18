@@ -217,7 +217,7 @@ Notes:
 | `skills search <query>` | Searches ClawHub for managed skills | `clawlite skills search "discord moderation"` |
 | `skills install <slug>` | Installs a managed skill into `~/.clawlite/marketplace` | `clawlite skills install jira-helper` |
 | `skills update <name>` | Updates one managed skill by folder slug or skill name via ClawHub | `clawlite skills update jira-helper` |
-| `skills managed` | Lists managed marketplace skills discovered locally, with optional status filter | `clawlite skills managed --status missing_requirements` |
+| `skills managed` | Lists managed marketplace skills discovered locally, with optional status filter and aggregate `status_counts` | `clawlite skills managed --status missing_requirements` |
 | `skills sync` | Updates all managed marketplace skills via ClawHub | `clawlite skills sync` |
 | `skills remove <name>` | Removes one managed marketplace skill | `clawlite skills remove jira-helper` |
 
@@ -229,7 +229,7 @@ Skill discovery includes:
 
 The local skill state is stored in `~/.clawlite/state/skills-state.json`.
 
-`skills managed` includes the managed folder `slug`, resolved runtime `status`, and a hint when the skill is blocked or missing requirements. `skills update` resolves either the slug or the discovered skill name before invoking ClawHub, and successful `install`/`update` calls now echo the resolved local marketplace row. `skills doctor` focuses on broken or blocked skills by default and includes remediation hints for missing env vars, binaries, config keys, invalid contracts, and `skills.allowBundled` policy blocks.
+`skills managed` includes the managed folder `slug`, resolved runtime `status`, and a hint when the skill is blocked or missing requirements, plus global `status_counts` for the full managed inventory. `skills update` resolves either the slug or the discovered skill name before invoking ClawHub, and successful `install`/`update`/`sync` calls now echo the resolved local marketplace state. `skills doctor` focuses on broken or blocked skills by default and includes remediation hints for missing env vars, binaries, config keys, invalid contracts, and `skills.allowBundled` policy blocks.
 
 ## Tools Commands
 
