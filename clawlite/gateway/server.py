@@ -3240,6 +3240,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         status: str = "pending",
         session_id: str = "",
         channel: str = "",
+        tool: str = "",
+        rule: str = "",
         include_grants: bool = False,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -3248,6 +3250,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             status=status,
             session_id=session_id,
             channel=channel,
+            tool=tool,
+            rule=rule,
             include_grants=include_grants,
             limit=limit,
         )
@@ -3258,6 +3262,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         status: str = "pending",
         session_id: str = "",
         channel: str = "",
+        tool: str = "",
+        rule: str = "",
         include_grants: bool = False,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -3266,6 +3272,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             status=status,
             session_id=session_id,
             channel=channel,
+            tool=tool,
+            rule=rule,
             include_grants=include_grants,
             limit=limit,
         )

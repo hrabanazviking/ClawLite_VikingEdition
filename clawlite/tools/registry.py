@@ -680,12 +680,16 @@ class ToolRegistry:
         status: str = "pending",
         session_id: str = "",
         channel: str = "",
+        tool: str = "",
+        rule: str = "",
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         self._prune_approval_state()
         normalized_status = str(status or "pending").strip().lower() or "pending"
         normalized_session = str(session_id or "").strip()
         normalized_channel = str(channel or "").strip().lower()
+        normalized_tool = str(tool or "").strip().lower()
+        normalized_rule = str(rule or "").strip().lower()
         max_rows = max(1, int(limit or 1))
         now = time.monotonic()
         rows: list[dict[str, Any]] = []
@@ -700,6 +704,12 @@ class ToolRegistry:
             if normalized_session and str(payload.get("session_id", "") or "").strip() != normalized_session:
                 continue
             if normalized_channel and str(payload.get("channel", "") or "").strip().lower() != normalized_channel:
+                continue
+            if normalized_tool and str(payload.get("tool", "") or "").strip().lower() != normalized_tool:
+                continue
+            if normalized_rule and normalized_rule not in {
+                str(item or "").strip().lower() for item in payload.get("matched_approval_specifiers", []) or []
+            }:
                 continue
 
             created_at = float(payload.get("created_at_monotonic", 0.0) or 0.0)

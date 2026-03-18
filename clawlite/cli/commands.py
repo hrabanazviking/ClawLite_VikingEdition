@@ -1066,6 +1066,8 @@ def cmd_tools_approvals(args: argparse.Namespace) -> int:
         status=str(args.status or "pending"),
         session_id=str(args.session_id or ""),
         channel=str(args.channel or ""),
+        tool=str(args.tool or ""),
+        rule=str(args.rule or ""),
         include_grants=bool(args.include_grants),
         limit=max(1, int(args.limit or 1)),
     )
@@ -1573,6 +1575,7 @@ def cmd_skills_doctor(args: argparse.Namespace) -> int:
     rows = list(diagnostics.get("skills", []) or [])
     wanted_status = str(getattr(args, "status", "") or "").strip().lower()
     wanted_source = str(getattr(args, "source", "") or "").strip().lower()
+    query = str(getattr(args, "query", "") or "").strip().lower()
     doctor_rows: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {
         "ready": 0,
@@ -1610,6 +1613,22 @@ def cmd_skills_doctor(args: argparse.Namespace) -> int:
             continue
         if wanted_source and source_name != wanted_source:
             continue
+        if query:
+            haystack = " ".join(
+                [
+                    str(doctor_row.get("name", "") or ""),
+                    str(doctor_row.get("skill_key", "") or ""),
+                    str(doctor_row.get("primary_env", "") or ""),
+                    source_name,
+                    " ".join(str(item or "") for item in doctor_row.get("missing", []) or []),
+                    " ".join(str(item or "") for item in doctor_row.get("contract_issues", []) or []),
+                    " ".join(str(item or "") for item in doctor_row.get("runtime_requirements", []) or []),
+                    str(doctor_row.get("hint", "") or ""),
+                    str(doctor_row.get("fallback_hint", "") or ""),
+                ]
+            ).lower()
+            if query not in haystack:
+                continue
         if bool(args.all) or wanted_status or wanted_source or status not in {"ready", "disabled"}:
             doctor_rows.append(doctor_row)
 
@@ -1622,6 +1641,7 @@ def cmd_skills_doctor(args: argparse.Namespace) -> int:
         "status_counts": status_counts,
         "status_filter": wanted_status,
         "source_filter": wanted_source,
+        "query": query,
         "count": len(doctor_rows),
         "recommendations": recommendations,
         "skills": doctor_rows,
@@ -1880,8 +1900,19 @@ def cmd_skills_search(args: argparse.Namespace) -> int:
 def cmd_skills_managed(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
     wanted_status = str(getattr(args, "status", "") or "").strip().lower()
+    query = str(getattr(args, "query", "") or "").strip().lower()
     all_rows = _managed_skill_rows(loader)
     rows = _managed_skill_rows(loader, status=wanted_status)
+    if query:
+        rows = [
+            row
+            for row in rows
+            if query in _managed_skill_slug(row).lower()
+            or query in str(getattr(row, "name", "") or "").strip().lower()
+            or query in str(getattr(row, "skill_key", "") or "").strip().lower()
+            or query in str(getattr(row, "description", "") or "").strip().lower()
+            or query in _managed_skill_hint(row).lower()
+        ]
     managed_root = _skills_managed_root(loader)
     _print_json(
         {
@@ -1892,6 +1923,7 @@ def cmd_skills_managed(args: argparse.Namespace) -> int:
             "count": len(rows),
             "total_count": len(all_rows),
             "status_filter": wanted_status,
+            "query": query,
             "status_counts": _managed_skill_status_counts(all_rows),
             "skills": [_managed_skill_payload(row) for row in rows],
         }
@@ -2055,6 +2087,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_tools_approvals.add_argument("--status", choices=["pending", "approved", "rejected", "all"], default="pending")
     p_tools_approvals.add_argument("--session-id", default="", help="Optional session filter")
     p_tools_approvals.add_argument("--channel", default="", help="Optional channel filter")
+    p_tools_approvals.add_argument("--tool", default="", help="Optional tool filter")
+    p_tools_approvals.add_argument("--rule", default="", help="Optional approval rule filter")
     p_tools_approvals.add_argument("--include-grants", action="store_true", help="Include active approval grants in the response")
     p_tools_approvals.add_argument("--limit", type=int, default=50)
     p_tools_approvals.set_defaults(handler=cmd_tools_approvals)
@@ -2426,6 +2460,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional source filter for the doctor output",
     )
+    p_skills_doctor.add_argument("--query", default="", help="Optional case-insensitive search filter")
     p_skills_doctor.set_defaults(handler=cmd_skills_doctor)
 
     p_skills_enable = skills_sub.add_parser("enable", help="Enable one skill in the local state")
@@ -2473,6 +2508,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional managed-skill status filter",
     )
+    p_skills_managed.add_argument("--query", default="", help="Optional case-insensitive search filter")
     p_skills_managed.set_defaults(handler=cmd_skills_managed)
 
     p_skills_sync = skills_sub.add_parser("sync", help="Update managed marketplace skills with ClawHub")

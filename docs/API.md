@@ -1069,6 +1069,8 @@ Query params:
 - `status`: `pending`, `approved`, `rejected`, or `all`
 - `session_id`: optional session filter
 - `channel`: optional channel filter
+- `tool`: optional exact tool filter
+- `rule`: optional exact matched approval rule filter
 - `include_grants=true`: also returns active temporary approval grants
 - `limit`: max rows to return
 

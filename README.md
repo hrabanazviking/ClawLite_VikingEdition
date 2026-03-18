@@ -129,7 +129,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Tool safety now also derives host-aware rules for `web_fetch` and `browser:navigate`, so operator policy can target specific destinations such as `web_fetch:host:example-com` instead of only whole-tool approvals.
 - Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`. Approval snapshots now include structured context such as exec binary/env keys/cwd and browser or web host targets.
-- Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks, with optional `--status` / `--source` filters for operator triage.
+- Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks, with optional `--status` / `--source` / `--query` filters for operator triage.
 - Managed skills now expose richer local lifecycle state in the CLI, including aggregate `status_counts` plus resolved marketplace state after `install`, `update`, `sync`, and `remove`. `skills search` also includes matching locally managed skills for quick operator triage.
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
@@ -507,6 +507,7 @@ clawlite skills show <name>            # show skill detail
 clawlite skills check                  # diagnostics (missing deps, fallback hints)
 clawlite skills doctor                 # actionable remediation hints for broken skills
 clawlite skills doctor --status missing_requirements --source builtin
+clawlite skills doctor --query github
 clawlite skills enable/disable <name>  # toggle skill
 clawlite skills pin/unpin <name>       # always-include / unpin
 clawlite skills pin-version <name> <version>  # lock to specific version
@@ -514,11 +515,11 @@ clawlite skills clear-version <name>   # remove version pin
 clawlite skills install <slug>         # install managed skill into ~/.clawlite/marketplace
 clawlite skills update <name>          # update one managed marketplace skill
 clawlite skills search <query>         # search ClawHub for managed skills
-clawlite skills managed [--status ready|missing_requirements|policy_blocked]
+clawlite skills managed [--status ready|missing_requirements|policy_blocked] [--query discord]
 clawlite skills sync                   # update managed marketplace skills via ClawHub
 clawlite skills remove <name>          # remove managed marketplace skill
 clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"evaluate"}'
-clawlite tools approvals --include-grants
+clawlite tools approvals --include-grants --tool browser --rule browser:evaluate
 clawlite tools approve <request_id> --actor ops --note "approved after review"
 clawlite tools reject <request_id> --actor ops --note "needs a safer path"
 clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate

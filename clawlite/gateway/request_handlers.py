@@ -65,6 +65,8 @@ class GatewayRequestHandlers:
         status: str = "pending",
         session_id: str = "",
         channel: str = "",
+        tool: str = "",
+        rule: str = "",
         include_grants: bool = False,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -77,6 +79,8 @@ class GatewayRequestHandlers:
                 "status": str(status or "pending").strip().lower() or "pending",
                 "session_id": str(session_id or "").strip(),
                 "channel": str(channel or "").strip().lower(),
+                "tool": str(tool or "").strip().lower(),
+                "rule": str(rule or "").strip().lower(),
                 "include_grants": bool(include_grants),
                 "count": 0,
                 "requests": [],
@@ -87,6 +91,8 @@ class GatewayRequestHandlers:
             status=str(status or "pending").strip().lower() or "pending",
             session_id=str(session_id or "").strip(),
             channel=str(channel or "").strip().lower(),
+            tool=str(tool or "").strip().lower(),
+            rule=str(rule or "").strip().lower(),
             limit=max(1, int(limit or 1)),
         )
         grants: list[dict[str, Any]] = []
@@ -103,6 +109,8 @@ class GatewayRequestHandlers:
             "status": str(status or "pending").strip().lower() or "pending",
             "session_id": str(session_id or "").strip(),
             "channel": str(channel or "").strip().lower(),
+            "tool": str(tool or "").strip().lower(),
+            "rule": str(rule or "").strip().lower(),
             "include_grants": bool(include_grants),
             "count": len(requests),
             "requests": requests,

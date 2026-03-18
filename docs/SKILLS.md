@@ -61,11 +61,13 @@ clawlite skills list --all
 clawlite skills show cron
 clawlite skills doctor
 clawlite skills doctor --status missing_requirements --source builtin
+clawlite skills doctor --query github
 clawlite skills search "discord"
 clawlite skills install jira-helper
 clawlite skills update jira-helper
 clawlite skills managed
 clawlite skills managed --status missing_requirements
+clawlite skills managed --query jira
 clawlite skills sync
 clawlite skills remove jira-helper
 ```
@@ -73,8 +75,8 @@ clawlite skills remove jira-helper
 `skills list --all` includes unavailable skills in the current environment and shows missing requirements.
 `skills show` and `skills check` also surface the resolved `skill_key` and `primary_env` used for `skills.entries`.
 `skills search` now includes `local_matches`, so operators can compare ClawHub search hits against already managed marketplace skills without a second command.
-`skills doctor` turns that deterministic diagnostics data into remediation hints, grouped around the actual blocker: missing env vars, binaries, config keys, bundled-skill policy, or invalid `SKILL.md` contract. It also supports `--status` and `--source` when you only want one operational slice, for example builtin skills that are blocked by missing secrets.
-`skills managed` shows only the marketplace-local skills currently discovered under `~/.clawlite/marketplace/skills`, including the managed folder `slug`, resolved runtime `status`, description, and remediation hint when a managed skill is blocked or missing requirements. It also supports `--status` for filtering to one lifecycle state such as `ready`, `missing_requirements`, or `policy_blocked`, while still returning global `status_counts` for the full managed inventory.
+`skills doctor` turns that deterministic diagnostics data into remediation hints, grouped around the actual blocker: missing env vars, binaries, config keys, bundled-skill policy, or invalid `SKILL.md` contract. It also supports `--status`, `--source`, and `--query` when you only want one operational slice, for example builtin skills that are blocked by missing secrets.
+`skills managed` shows only the marketplace-local skills currently discovered under `~/.clawlite/marketplace/skills`, including the managed folder `slug`, resolved runtime `status`, description, and remediation hint when a managed skill is blocked or missing requirements. It also supports `--status` and `--query` for filtering to one lifecycle slice such as `ready`, `missing_requirements`, or `jira`, while still returning global `status_counts` for the full managed inventory.
 
 Managed installs use the marketplace root: `~/.clawlite/marketplace/skills`.
 `skills update <name>` resolves either the managed folder slug or the discovered skill name before calling `clawhub update <slug>`. Successful `install`, `update`, and `sync` responses now echo the resolved local marketplace state (`managed_count`, `status_counts`, and resolved rows) so operators can see post-action readiness immediately. `skills remove` also returns the removed row plus the remaining managed inventory summary.

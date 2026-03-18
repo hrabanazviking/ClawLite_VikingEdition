@@ -3239,17 +3239,37 @@ def test_gateway_tools_approvals_endpoints_return_requests_and_grants(tmp_path: 
         "notified_count": 1,
     }
     registry._approval_request_order.append("req-1")
+    registry._approval_requests["req-2"] = {
+        "request_id": "req-2",
+        "tool": "exec",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "matched_approval_specifiers": ["exec:env-key:git-ssh-command"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"command":"git status"}',
+        "approval_context": {"tool": "exec", "command_binary": "git"},
+        "notified_count": 0,
+    }
+    registry._approval_request_order.append("req-2")
     registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
 
     with TestClient(app) as client:
-        v1_response = client.get("/v1/tools/approvals?session_id=telegram:1&channel=telegram&include_grants=true")
-        api_response = client.get("/api/tools/approvals?session_id=telegram:1&channel=telegram&include_grants=true")
+        v1_response = client.get(
+            "/v1/tools/approvals?session_id=telegram:1&channel=telegram&tool=browser&rule=browser:evaluate&include_grants=true"
+        )
+        api_response = client.get(
+            "/api/tools/approvals?session_id=telegram:1&channel=telegram&tool=browser&rule=browser:evaluate&include_grants=true"
+        )
 
     for response in (v1_response, api_response):
         assert response.status_code == 200
         payload = response.json()
         assert payload["ok"] is True
         assert payload["count"] == 1
+        assert payload["tool"] == "browser"
+        assert payload["rule"] == "browser:evaluate"
         assert payload["requests"][0]["request_id"] == "req-1"
         assert payload["requests"][0]["expires_in_s"] > 0.0
         assert payload["grant_count"] == 1

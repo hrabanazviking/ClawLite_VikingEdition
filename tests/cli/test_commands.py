@@ -483,6 +483,30 @@ def test_cli_skills_managed_filters_by_status_and_includes_hint(tmp_path: Path, 
     assert "BROKEN_TOKEN" in payload["skills"][0]["hint"]
 
 
+def test_cli_skills_managed_supports_query_filter(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    discord_skill = tmp_path / ".clawlite" / "marketplace" / "skills" / "discord-helper"
+    discord_skill.mkdir(parents=True, exist_ok=True)
+    (discord_skill / "SKILL.md").write_text(
+        "---\nname: Discord Helper\ndescription: moderation helpers\ncommand: echo hi\n---\nbody\n",
+        encoding="utf-8",
+    )
+    jira_skill = tmp_path / ".clawlite" / "marketplace" / "skills" / "jira-helper"
+    jira_skill.mkdir(parents=True, exist_ok=True)
+    (jira_skill / "SKILL.md").write_text(
+        "---\nname: Jira Helper\ndescription: issue tracking\ncommand: echo hi\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    rc = main(["skills", "managed", "--query", "discord"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["query"] == "discord"
+    assert payload["count"] == 1
+    assert payload["total_count"] == 2
+    assert payload["skills"][0]["slug"] == "discord-helper"
+
+
 def test_cli_skills_remove_resolves_marketplace_skill_by_name(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     skill_dir = tmp_path / ".clawlite" / "marketplace" / "skills" / "managed-folder"
@@ -708,13 +732,28 @@ def test_cli_tools_approvals_uses_gateway_endpoint(tmp_path: Path, capsys, monke
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")
 
-    def _fake_fetch(config, *, gateway_url="", token="", timeout=10.0, status="pending", session_id="", channel="", include_grants=False, limit=50):
+    def _fake_fetch(
+        config,
+        *,
+        gateway_url="",
+        token="",
+        timeout=10.0,
+        status="pending",
+        session_id="",
+        channel="",
+        tool="",
+        rule="",
+        include_grants=False,
+        limit=50,
+    ):
         assert gateway_url == ""
         assert token == ""
         assert timeout == 10.0
         assert status == "pending"
         assert session_id == "telegram:1"
         assert channel == "telegram"
+        assert tool == "browser"
+        assert rule == "browser:evaluate"
         assert include_grants is True
         assert limit == 10
         return {
@@ -737,6 +776,10 @@ def test_cli_tools_approvals_uses_gateway_endpoint(tmp_path: Path, capsys, monke
             "telegram:1",
             "--channel",
             "telegram",
+            "--tool",
+            "browser",
+            "--rule",
+            "browser:evaluate",
             "--include-grants",
             "--limit",
             "10",
@@ -902,6 +945,42 @@ def test_cli_skills_doctor_supports_status_and_source_filters(tmp_path: Path, ca
     assert payload["source_filter"] == "builtin"
     assert payload["count"] == 1
     assert [row["name"] for row in payload["skills"]] == ["github"]
+
+
+def test_cli_skills_doctor_supports_query_filter(tmp_path: Path, capsys, monkeypatch) -> None:
+    builtin_root = tmp_path / "builtin"
+    github_dir = builtin_root / "github"
+    github_dir.mkdir(parents=True, exist_ok=True)
+    (github_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: github\n"
+        "description: GitHub skill\n"
+        "script: github\n"
+        "metadata:\n"
+        "  clawlite:\n"
+        "    primaryEnv: GH_TOKEN\n"
+        "    requires:\n"
+        "      env: [GH_TOKEN]\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    builtin_root.joinpath("jira").mkdir(parents=True, exist_ok=True)
+    (builtin_root / "jira" / "SKILL.md").write_text(
+        "---\nname: jira\ndescription: Jira skill\nscript: jira\n---\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("clawlite.cli.commands.SkillsLoader", lambda state_path=None: SkillsLoader(builtin_root=builtin_root, state_path=state_path))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    rc = main(["--config", str(config_path), "skills", "doctor", "--query", "github"])
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["query"] == "github"
+    assert payload["count"] == 1
+    assert payload["skills"][0]["name"] == "github"
 
 
 def test_cli_status_and_version(tmp_path: Path, capsys) -> None:

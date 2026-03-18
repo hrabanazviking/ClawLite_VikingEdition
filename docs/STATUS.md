@@ -9,7 +9,7 @@ ClawLite is a **local-first autonomous agent runtime** in active hardening. Robu
 Phase 7 is complete on `main`: `self_evolution` validates fixes fail-closed, proposes patches through the provider directly instead of the full agent loop, rejects unsafe proposals before apply, routes operator notices through the real gateway notice path, commits only inside isolated git worktree branches, and now supports configurable branch prefixes plus Telegram/Discord approval callbacks that persist review state. It remains disabled by default.
 
 The current OpenClaw parity track is active on `main`. The latest slice adds structured approval context for approval-gated tool calls, so gateway/CLI/operator reviews now show exec binary/env keys/cwd plus browser or web host targets instead of only raw argument previews.
-That same approval state remains exposed through the gateway/CLI (`tools approvals|approve|reject|revoke-grant`), `exec` approvals understand shell/env/cwd-derived specifiers such as `exec:shell` and `exec:env-key:git-ssh-command`, and skills gained richer local operator visibility through `skills doctor`, `skills managed`, and `skills search local_matches`.
+That same approval state remains exposed through the gateway/CLI (`tools approvals|approve|reject|revoke-grant`) with exact `tool` / `rule` filters, `exec` approvals understand shell/env/cwd-derived specifiers such as `exec:shell` and `exec:env-key:git-ssh-command`, and skills gained richer local operator visibility through `skills doctor`, `skills managed`, and `skills search local_matches`, now including case-insensitive `--query` triage.
 
 > **🤖 AI-built · Solo dev** — Every commit is written by Claude (AI), with the author supervising direction. No team.
 

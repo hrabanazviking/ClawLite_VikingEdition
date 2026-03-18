@@ -632,6 +632,8 @@ def fetch_gateway_tool_approvals(
     status: str = "pending",
     session_id: str = "",
     channel: str = "",
+    tool: str = "",
+    rule: str = "",
     include_grants: bool = False,
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -646,6 +648,8 @@ def fetch_gateway_tool_approvals(
             "status": str(status or "pending").strip().lower() or "pending",
             "session_id": str(session_id or "").strip(),
             "channel": str(channel or "").strip().lower(),
+            "tool": str(tool or "").strip().lower(),
+            "rule": str(rule or "").strip().lower(),
             "include_grants": "true" if include_grants else "false",
             "limit": max(1, int(limit or 1)),
         },
@@ -657,6 +661,8 @@ def fetch_gateway_tool_approvals(
         payload["status"] = str(body.get("status", "pending") or "pending")
         payload["session_id"] = str(body.get("session_id", "") or "")
         payload["channel"] = str(body.get("channel", "") or "")
+        payload["tool"] = str(body.get("tool", "") or "")
+        payload["rule"] = str(body.get("rule", "") or "")
         payload["include_grants"] = bool(body.get("include_grants", False))
         payload["count"] = int(body.get("count", 0) or 0)
         payload["requests"] = list(body.get("requests", []) or [])
