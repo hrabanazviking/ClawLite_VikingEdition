@@ -1546,7 +1546,7 @@ def test_gateway_startup_replays_orphaned_resumable_subagent_after_restart(tmp_p
             "resume_attempts": 0,
             "resume_attempts_max": 2,
             "retry_budget_remaining": 2,
-            "resume_token": "tok-orphaned-1",
+            "resume_token": "resume_orphaned_one",
             "resumable": True,
             "last_status_reason": "orphaned_queue_entry",
             "last_status_at": "2026-03-06T10:00:30+00:00",

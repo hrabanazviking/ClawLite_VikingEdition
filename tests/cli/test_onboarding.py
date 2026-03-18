@@ -51,14 +51,14 @@ def test_apply_provider_selection_xai_updates_dynamic_provider_block() -> None:
     persisted = apply_provider_selection(
         cfg,
         provider="xai",
-        api_key="xai-key-123456",
+        api_key="xai_demo_token",
         base_url="https://api.x.ai/v1",
     )
 
     assert persisted["provider"] == "xai"
     assert persisted["model"] == "xai/grok-4"
     assert cfg.providers.get("xai") is not None
-    assert cfg.providers.get("xai").api_key == "xai-key-123456"
+    assert cfg.providers.get("xai").api_key == "xai_demo_token"
     assert cfg.providers.get("xai").api_base == "https://api.x.ai/v1"
 
 
@@ -263,11 +263,11 @@ def test_probe_provider_cerebras_success(monkeypatch) -> None:
 
         def get(self, url, headers=None):
             assert url == "https://api.cerebras.ai/v1/models"
-            assert str(headers.get("Authorization", "")).startswith("Bearer cerebras-")
+            assert str(headers.get("Authorization", "")).startswith("Bearer cerebras_demo_")
             return _Response()
 
     monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
-    payload = probe_provider("cerebras", api_key="cerebras-123456", base_url="")
+    payload = probe_provider("cerebras", api_key="cerebras_demo_token", base_url="")
     assert payload["ok"] is True
     assert payload["provider"] == "cerebras"
     assert payload["recommended_model"] == "cerebras/zai-glm-4.7"
@@ -279,7 +279,7 @@ def test_apply_provider_selection_aihubmix_uses_default_gateway_base() -> None:
     persisted = apply_provider_selection(
         cfg,
         provider="aihubmix",
-        api_key="ahm-key-123456",
+        api_key="ahm_demo_token",
         base_url="",
     )
 

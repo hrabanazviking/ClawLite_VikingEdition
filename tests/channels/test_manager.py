@@ -689,7 +689,7 @@ def test_channel_manager_dispatch_uses_discord_channel_id_and_reply_metadata() -
 
         discord = mgr._channels["discord"]
         await discord.emit(
-            session_id="discord:746561804100042812",
+            session_id="discord:dm:owner-user",
             user_id="owner-user",
             text="hello",
             metadata={
@@ -718,7 +718,7 @@ def test_channel_manager_dispatch_honors_discord_reply_to_mode_off() -> None:
 
         discord = mgr._channels["discord"]
         await discord.emit(
-            session_id="discord:746561804100042812",
+            session_id="discord:dm:owner-user",
             user_id="owner-user",
             text="hello",
             metadata={
@@ -757,7 +757,7 @@ def test_channel_manager_dispatch_honors_discord_reply_to_mode_first() -> None:
 
         discord = mgr._channels["discord"]
         await discord.emit(
-            session_id="discord:746561804100042812",
+            session_id="discord:dm:owner-user",
             user_id="owner-user",
             text="hello",
             metadata={
@@ -841,7 +841,7 @@ def test_channel_manager_keeps_discord_typing_active_for_full_dispatch() -> None
 
         discord = mgr._channels["discord"]
         await discord.emit(
-            session_id="discord:746561804100042812",
+            session_id="discord:dm:owner-user",
             user_id="owner-user",
             text="hello",
             metadata={"channel": "discord", "channel_id": "112233445566778899"},
