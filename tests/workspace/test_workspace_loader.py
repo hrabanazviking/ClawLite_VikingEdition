@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clawlite.config.loader import load_config, save_config
+from clawlite.config.schema import AppConfig
+from clawlite.workspace.bootstrap import bootstrap_install_workspace
 from clawlite.workspace.loader import WorkspaceLoader
 
 
@@ -192,3 +195,35 @@ def test_workspace_system_context_auto_repairs_missing_runtime_docs(
     assert health["repaired_count"] == 2
     assert health["critical_files"]["SOUL.md"]["repaired"] is True
     assert health["critical_files"]["USER.md"]["repaired"] is True
+
+
+def test_bootstrap_install_workspace_seeds_gateway_auth_token(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_path = tmp_path / "ws"
+    cfg = AppConfig(workspace_path=str(workspace_path))
+    save_config(cfg, config_path)
+
+    summary = bootstrap_install_workspace(config_path=config_path)
+
+    saved = load_config(config_path)
+    assert summary["ok"] is True
+    assert summary["token_seeded"] is True
+    assert summary["gateway_auth_token_configured"] is True
+    assert str(saved.gateway.auth.token or "").strip()
+    assert (workspace_path / "IDENTITY.md").exists()
+    assert (workspace_path / "USER.md").exists()
+
+
+def test_bootstrap_install_workspace_preserves_existing_gateway_auth_token(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    workspace_path = tmp_path / "ws"
+    cfg = AppConfig(workspace_path=str(workspace_path))
+    cfg.gateway.auth.token = "existing-token"
+    save_config(cfg, config_path)
+
+    summary = bootstrap_install_workspace(config_path=config_path)
+
+    saved = load_config(config_path)
+    assert summary["ok"] is True
+    assert summary["token_seeded"] is False
+    assert saved.gateway.auth.token == "existing-token"

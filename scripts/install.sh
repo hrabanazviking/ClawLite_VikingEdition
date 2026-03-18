@@ -183,14 +183,8 @@ def install_from_git() -> None:
 
 def bootstrap_workspace() -> None:
     code = (
-        "import secrets;"
-        "from clawlite.config.loader import load_config,save_config;"
-        "from clawlite.workspace.loader import WorkspaceLoader;"
-        "cfg=load_config();"
-        "WorkspaceLoader(workspace_path=cfg.workspace_path).bootstrap();"
-        "tok=str(cfg.gateway.token or '').strip();"
-        "cfg.gateway.token=tok or secrets.token_urlsafe(24);"
-        "save_config(cfg)"
+        "from clawlite.workspace.bootstrap import bootstrap_install_workspace;"
+        "bootstrap_install_workspace()"
     )
     run([PYBIN, "-c", code], "bootstrap")
 
