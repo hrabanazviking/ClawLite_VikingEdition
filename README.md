@@ -124,6 +124,8 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
 - OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.
+- The onboarding wizard now suggests provider-specific model ids, expected base URLs, and OAuth re-login hints before it probes the selected provider.
+- Wizard coverage now also includes `azure-openai`, `aihubmix`, `siliconflow`, and `cerebras`, matching the current OpenClaw/nanobot parity slice for OpenAI-compatible providers.
 - Runtime scale-out and observability are now in place as opt-in surfaces: Redis bus backend, OTLP telemetry hooks, session TTL, history compaction, `sqlite-vec`, and `memory_compact`.
 - Latest validation on `main`: `python -m pytest tests -q --tb=short` → `1561 passed, 1 skipped`; `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → `190 passed`; `bash scripts/smoke_test.sh` → `7 ok / 0 failure(s)`.
 - Tracking docs: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md).
@@ -281,9 +283,9 @@ Skill lifecycle: `enable` / `disable` · `pin` / `unpin` · `pin-version` / `cle
 ClawLite uses **LiteLLM** under the hood — swap models without changing your app code.
 
 <details>
-<summary><strong>OpenAI-compatible (15+)</strong></summary>
+<summary><strong>OpenAI-compatible (19+)</strong></summary>
 
-OpenAI · Gemini · Groq · DeepSeek · OpenRouter · Together · Hugging Face · xAI · Mistral · Moonshot · NVIDIA · BytePlus / Doubao · Volcengine · KiloCode · `custom/<model>`
+OpenAI · Azure OpenAI · Gemini · Groq · DeepSeek · OpenRouter · AiHubMix · SiliconFlow · Cerebras · Together · Hugging Face · xAI · Mistral · Moonshot · NVIDIA · BytePlus / Doubao · Volcengine · KiloCode · `custom/<model>`
 
 </details>
 
@@ -331,6 +333,32 @@ OpenAI Codex · Gemini OAuth · Qwen OAuth
 ```bash
 clawlite provider login openai-codex
 clawlite provider status codex
+```
+
+If the wizard or `provider status` reports an expired local Codex token, refresh it with `clawlite provider login openai-codex` and rerun the probe.
+
+**Azure OpenAI**
+
+```json
+{
+  "providers": {
+    "azure_openai": {
+      "api_key": "azure-key",
+      "api_base": "https://example-resource.openai.azure.com/openai/v1"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "azure-openai/gpt-4.1-mini"
+    }
+  }
+}
+```
+
+```bash
+clawlite provider set-auth azure-openai --api-key "$AZURE_OPENAI_API_KEY" \
+  --api-base "https://example-resource.openai.azure.com/openai/v1"
+clawlite provider status azure-openai
 ```
 
 **Gemini OAuth**

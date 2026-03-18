@@ -1,6 +1,7 @@
 # Providers
 
 ClawLite can talk to hosted APIs, local runtimes, OAuth-backed free-tier providers, and custom OpenAI-compatible backends. The default model is `gemini/gemini-2.5-flash`.
+The interactive wizard now prints provider-specific suggestions before probing: transport family, recommended model ids, expected base URL, and a login hint for OAuth-backed providers such as `openai-codex`.
 
 ## Fastest Manual Setup
 
@@ -72,9 +73,11 @@ Important behavior:
 | Provider | Aliases | Transport | Default model | Default base URL | Key envs |
 | --- | --- | --- | --- | --- | --- |
 | `openai` | - | OpenAI-compatible | `openai/gpt-4o-mini` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `azure-openai` | `azure_openai`, `azure` | OpenAI-compatible | `azure-openai/gpt-4.1-mini` | your Azure resource `/openai/v1` endpoint | `AZURE_OPENAI_API_KEY`, `AZURE_API_KEY` |
 | `gemini` | `google` | OpenAI-compatible | `gemini/gemini-2.5-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
 | `groq` | - | OpenAI-compatible | `groq/llama-3.1-8b-instant` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
 | `deepseek` | - | OpenAI-compatible | `deepseek/deepseek-chat` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` |
+| `cerebras` | - | OpenAI-compatible | `cerebras/zai-glm-4.7` | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEY` |
 | `xai` | - | OpenAI-compatible | `xai/grok-4` | `https://api.x.ai/v1` | `XAI_API_KEY` |
 | `mistral` | - | OpenAI-compatible | `mistral/mistral-large-latest` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` |
 | `moonshot` | `kimi` | OpenAI-compatible | `moonshot/kimi-k2.5` | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` |
@@ -90,6 +93,8 @@ Important behavior:
 | Provider | Aliases | Transport | Default model | Default base URL | Key envs |
 | --- | --- | --- | --- | --- | --- |
 | `openrouter` | - | OpenAI-compatible gateway | `openrouter/auto` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `aihubmix` | - | OpenAI-compatible gateway | `aihubmix/openai/gpt-4.1-mini` | `https://aihubmix.com/v1` | `AIHUBMIX_API_KEY` |
+| `siliconflow` | - | OpenAI-compatible gateway | `siliconflow/deepseek-ai/DeepSeek-V3` | `https://api.siliconflow.cn/v1` | `SILICONFLOW_API_KEY` |
 | `together` | - | OpenAI-compatible gateway | `together/moonshotai/Kimi-K2.5` | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` |
 | `huggingface` | `hf` | OpenAI-compatible gateway | `huggingface/deepseek-ai/DeepSeek-R1` | `https://router.huggingface.co/v1` | `HUGGINGFACE_HUB_TOKEN`, `HF_TOKEN` |
 | `kilocode` | `kilo` | OpenAI-compatible gateway | `kilocode/anthropic/claude-opus-4.6` | `https://api.kilo.ai/api/gateway/` | `KILOCODE_API_KEY` |
@@ -118,12 +123,17 @@ Important behavior:
 
 The interactive wizard currently offers this subset:
 
+- `openai-codex`
 - `openai`
+- `azure-openai`
 - `anthropic`
 - `gemini`
 - `groq`
 - `deepseek`
 - `openrouter`
+- `aihubmix`
+- `siliconflow`
+- `cerebras`
 - `xai`
 - `mistral`
 - `moonshot`
@@ -138,7 +148,12 @@ The interactive wizard currently offers this subset:
 - `ollama`
 - `vllm`
 
-Runtime support is broader than wizard support. `custom`, `openai-codex`, `gemini-oauth`, `qwen-oauth`, `nvidia`, `byteplus`, `doubao`, and `volcengine` are supported in code but not surfaced by the onboarding wizard.
+Runtime support is broader than wizard support. `custom`, `gemini-oauth`, `qwen-oauth`, `nvidia`, `byteplus`, `doubao`, and `volcengine` are supported in code but not surfaced by the onboarding wizard.
+
+Notes:
+
+- `azure-openai` needs your own resource-scoped base URL, for example `https://<resource>.openai.azure.com/openai/v1`.
+- If `openai-codex` fails with `http_status:401` and an expired token detail, refresh the local OAuth session with `clawlite provider login openai-codex`.
 
 ## Example Configs
 
@@ -159,6 +174,27 @@ Runtime support is broader than wizard support. `custom`, `openai-codex`, `gemin
   "agents": {
     "defaults": {
       "model": "openai/gpt-4o-mini"
+    }
+  }
+}
+```
+
+### Azure OpenAI
+
+```json
+{
+  "provider": {
+    "model": "azure-openai/gpt-4.1-mini"
+  },
+  "providers": {
+    "azure_openai": {
+      "api_key": "azure-key",
+      "api_base": "https://example-resource.openai.azure.com/openai/v1"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "azure-openai/gpt-4.1-mini"
     }
   }
 }

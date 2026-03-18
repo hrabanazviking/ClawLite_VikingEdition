@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.console import Console
+
+from clawlite.cli import onboarding as onboarding_module
 from clawlite.cli.onboarding import apply_provider_selection
 from clawlite.cli.onboarding import build_dashboard_handoff
 from clawlite.cli.onboarding import ensure_gateway_token
@@ -199,6 +202,92 @@ def test_probe_provider_openai_codex_success(monkeypatch) -> None:
     assert payload["transport"] == "oauth_codex_responses"
     assert payload["probe_method"] == "POST"
     assert payload["api_key_masked"].endswith("3456")
+
+
+def test_probe_provider_openai_codex_expired_token_suggests_relogin(monkeypatch) -> None:
+    class _Response:
+        status_code = 401
+        is_success = False
+        text = ""
+
+        @staticmethod
+        def json() -> dict[str, dict[str, str]]:
+            return {"error": {"message": "Provided authentication token is expired. Please try signing in again."}}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            assert url.endswith("/codex/responses")
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    payload = probe_provider(
+        "openai-codex",
+        api_key="",
+        base_url="https://chatgpt.com/backend-api",
+        model="openai-codex/gpt-5.3-codex",
+        oauth_access_token="codex-123456",
+    )
+    assert payload["ok"] is False
+    assert payload["error"] == "http_status:401"
+    assert any("provider login openai-codex" in row for row in payload["hints"])
+
+
+def test_probe_provider_cerebras_success(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        is_success = True
+        text = "ok"
+
+        @staticmethod
+        def json() -> dict[str, list[dict[str, str]]]:
+            return {"data": [{"id": "zai-glm-4.7"}]}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            assert url == "https://api.cerebras.ai/v1/models"
+            assert str(headers.get("Authorization", "")).startswith("Bearer cerebras-")
+            return _Response()
+
+    monkeypatch.setattr("clawlite.cli.onboarding.httpx.Client", _Client)
+    payload = probe_provider("cerebras", api_key="cerebras-123456", base_url="")
+    assert payload["ok"] is True
+    assert payload["provider"] == "cerebras"
+    assert payload["recommended_model"] == "cerebras/zai-glm-4.7"
+    assert payload["default_base_url"] == "https://api.cerebras.ai/v1"
+
+
+def test_apply_provider_selection_aihubmix_uses_default_gateway_base() -> None:
+    cfg = AppConfig.from_dict({})
+    persisted = apply_provider_selection(
+        cfg,
+        provider="aihubmix",
+        api_key="ahm-key-123456",
+        base_url="",
+    )
+
+    assert persisted["provider"] == "aihubmix"
+    assert persisted["model"] == "aihubmix/openai/gpt-4.1-mini"
+    assert persisted["base_url"] == "https://aihubmix.com/v1"
+    assert cfg.providers.get("aihubmix") is not None
+    assert cfg.providers.get("aihubmix").api_base == "https://aihubmix.com/v1"
 
 
 def test_probe_telegram_handles_network_error(monkeypatch) -> None:
@@ -657,3 +746,114 @@ def test_run_onboarding_wizard_quickstart_supports_openai_codex(monkeypatch, tmp
     assert any(item["id"] == "workspace_backup" for item in payload["final"]["guidance"])
     assert cfg.auth.providers.openai_codex.access_token == "codex-token-123456"
     assert payload["persisted"]["telegram"]["enabled"] is False
+
+
+def test_configure_model_uses_provider_specific_default_and_prints_suggestions(monkeypatch) -> None:
+    cfg = AppConfig.from_dict(
+        {
+            "provider": {
+                "model": "gemini/gemini-2.5-flash",
+                "litellm_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            }
+        }
+    )
+    prompt_calls: list[tuple[str, str]] = []
+
+    def _fake_prompt_ask(label: str, *args, **kwargs):
+        prompt_calls.append((label, str(kwargs.get("default", ""))))
+        if label.strip() == "Provider":
+            return "openai-codex"
+        if label.strip() == "Model":
+            assert kwargs.get("default") == "openai-codex/gpt-5.3-codex"
+            return "openai-codex/gpt-5.3-codex"
+        raise AssertionError(f"unexpected prompt: {label}")
+
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding._resolve_codex_auth_interactive",
+        lambda config: {
+            "configured": True,
+            "access_token": "codex-token-123456",
+            "account_id": "org-1234",
+            "source": "file:/tmp/.codex/auth.json",
+            "token_masked": "********3456",
+            "account_id_masked": "****1234",
+        },
+    )
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_provider",
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0, oauth_access_token="", oauth_account_id="": {
+            "ok": True,
+            "status_code": 200,
+            "provider": "openai_codex",
+            "family": "oauth",
+            "recommended_model": "openai-codex/gpt-5.3-codex",
+            "recommended_models": ["openai-codex/gpt-5.3-codex"],
+            "onboarding_hint": "OpenAI Codex uses local OAuth; sign in before validating the provider.",
+            "base_url": base_url,
+            "api_key_masked": "********3456",
+            "error": "",
+            "transport": "oauth_codex_responses",
+            "probe_method": "POST",
+            "hints": [],
+        },
+    )
+
+    console = Console(record=True, width=120)
+    onboarding_module._configure_model(console, cfg, allow_continue_on_probe_failure=True)
+
+    rendered = console.export_text()
+    assert "openai-codex suggestions" in rendered.lower()
+    assert "Suggested models:" in rendered
+    assert "clawlite provider login openai-codex" in rendered
+
+
+def test_configure_model_prompts_for_azure_openai_base_url(monkeypatch) -> None:
+    cfg = AppConfig.from_dict({"provider": {"model": "openai/gpt-4o-mini"}})
+    asked: list[tuple[str, str]] = []
+
+    def _fake_prompt_ask(label: str, *args, **kwargs):
+        asked.append((label, str(kwargs.get("default", ""))))
+        if label.strip() == "Provider":
+            return "azure-openai"
+        if label.strip() == "azure-openai API key":
+            return "azure-key-123456"
+        if label.strip() == "azure-openai base URL":
+            return "https://example-resource.openai.azure.com/openai/v1"
+        if label.strip() == "Model":
+            assert kwargs.get("default") == "azure-openai/gpt-4.1-mini"
+            return "azure-openai/gpt-4.1-mini"
+        raise AssertionError(f"unexpected prompt: {label}")
+
+    monkeypatch.setattr("clawlite.cli.onboarding.Prompt.ask", _fake_prompt_ask)
+    monkeypatch.setattr(
+        "clawlite.cli.onboarding.probe_provider",
+        lambda provider, *, api_key, base_url, model="", timeout_s=8.0, oauth_access_token="", oauth_account_id="": {
+            "ok": True,
+            "status_code": 200,
+            "provider": "azure_openai",
+            "family": "openai_compatible",
+            "recommended_model": "azure-openai/gpt-4.1-mini",
+            "recommended_models": ["azure-openai/gpt-4.1-mini"],
+            "onboarding_hint": "Azure OpenAI uses a resource-scoped /openai/v1 endpoint.",
+            "base_url": base_url,
+            "api_key_masked": "********3456",
+            "error": "",
+            "hints": [],
+        },
+    )
+
+    console = Console(record=True, width=120)
+    provider, api_key, base_url, selected_model, probe, oauth_payload = onboarding_module._configure_model(
+        console,
+        cfg,
+        allow_continue_on_probe_failure=True,
+    )
+
+    assert provider == "azure-openai"
+    assert api_key == "azure-key-123456"
+    assert base_url == "https://example-resource.openai.azure.com/openai/v1"
+    assert selected_model == "azure-openai/gpt-4.1-mini"
+    assert probe["provider"] == "azure_openai"
+    assert oauth_payload == {"access_token": "", "account_id": "", "source": ""}
+    assert any(label.strip() == "azure-openai base URL" for label, _ in asked)

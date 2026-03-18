@@ -49,6 +49,7 @@ SUPPORTED_PROVIDERS: tuple[str, ...] = tuple(
     for provider_id in _ONBOARDING_PROVIDER_IDS
     if _provider_spec(provider_id) is not None
 )
+_PROVIDERS_REQUIRING_BASE_URL_INPUT: set[str] = {"azure_openai"}
 
 DEFAULT_PROVIDER_BASE_URLS: dict[str, str] = {}
 for provider_id in SUPPORTED_PROVIDERS:
@@ -88,6 +89,74 @@ def _provider_profile_payload(provider_name: str) -> dict[str, Any]:
         "recommended_models": list(profile.recommended_models),
         "onboarding_hint": profile.onboarding_hint,
     }
+
+
+def _model_matches_provider(model: str, provider_key: str, spec: Any | None) -> bool:
+    normalized = str(model or "").strip()
+    if not normalized or spec is None:
+        return False
+
+    variants = _provider_name_variants(provider_key, tuple(getattr(spec, "aliases", ()) or ()))
+    lowered = normalized.lower()
+    normalized_lowered = lowered.replace("-", "_")
+
+    if "/" in lowered:
+        prefix = lowered.split("/", 1)[0].strip().replace("-", "_")
+        return prefix in variants
+
+    for keyword in tuple(getattr(spec, "keywords", ()) or ()):
+        keyword_text = str(keyword or "").strip().lower()
+        if not keyword_text:
+            continue
+        if keyword_text in lowered or keyword_text.replace("-", "_") in normalized_lowered:
+            return True
+    return False
+
+
+def _model_default_for_provider(config: AppConfig, provider_key: str, spec: Any | None) -> str:
+    current_model = str(config.provider.model or "").strip()
+    if current_model and _model_matches_provider(current_model, provider_key, spec):
+        return current_model
+    return default_provider_model(provider_key)
+
+
+def _base_url_matches_provider(base_url: str, provider_key: str, spec: Any | None, default_base_url: str) -> bool:
+    candidate = str(base_url or "").strip().lower().rstrip("/")
+    if not candidate or spec is None:
+        return False
+    expected_default = str(default_base_url or "").strip().lower().rstrip("/")
+    if expected_default and candidate == expected_default:
+        return True
+    for keyword in tuple(getattr(spec, "base_url_keywords", ()) or ()):
+        keyword_text = str(keyword or "").strip().lower()
+        if keyword_text and keyword_text in candidate:
+            return True
+    return False
+
+
+def _provider_base_url_prompt_default(config: AppConfig, provider_key: str, default_base_url: str) -> str:
+    current_base = str(config.provider.litellm_base_url or "").strip()
+    spec = _provider_spec(provider_key)
+    if current_base and _base_url_matches_provider(current_base, provider_key, spec, default_base_url):
+        return current_base
+    return str(default_base_url or "").strip()
+
+
+def _render_provider_suggestions(provider_key: str, *, base_url: str = "", oauth_login: str = "") -> Panel:
+    profile = provider_profile(provider_key)
+    family = str(profile.family or "").replace("_", " ")
+    recommended_models = [str(item) for item in tuple(profile.recommended_models)[:3] if str(item or "").strip()]
+    body: list[str] = []
+    body.append(f"[bold]Family:[/] {family or 'custom'}")
+    if recommended_models:
+        body.append(f"[bold]Suggested models:[/] {', '.join(recommended_models)}")
+    if base_url:
+        body.append(f"[bold]Base URL:[/] {base_url}")
+    if oauth_login:
+        body.append(f"[bold]Login:[/] {oauth_login}")
+    body.append(f"[dim]{profile.onboarding_hint}[/]")
+    title = f"{provider_key.replace('_', '-')} suggestions"
+    return Panel.fit("\n".join(body), title=title, border_style="cyan")
 
 
 def _parse_oauth_result(payload: Any) -> tuple[str, str]:
@@ -462,6 +531,35 @@ def probe_provider(
     key_envs = list(spec.key_envs)
     model_check: dict[str, Any] = {"checked": False, "ok": True, "enforced": False}
 
+    if provider_key not in {"ollama", "vllm", "openai_codex"} and not resolved_base:
+        error = "base_url_missing"
+        return {
+            "ok": False,
+            "provider": provider_key,
+            "error": error,
+            "api_key_masked": _mask_secret(api_key),
+            "base_url": "",
+            "transport": transport,
+            "probe_method": probe_method,
+            "error_detail": "",
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
+            **profile_payload,
+            "hints": provider_probe_hints(
+                provider=provider_key,
+                error=error,
+                error_detail="",
+                status_code=0,
+                auth_mode="api_key",
+                transport=transport,
+                endpoint="",
+                default_base_url=default_base_url,
+                key_envs=key_envs,
+                model=selected_model,
+            ),
+        }
+
     if provider_key == "openai_codex":
         endpoint = "/codex/responses"
         probe_method = "POST"
@@ -758,9 +856,13 @@ def probe_telegram(token: str, *, timeout_s: float = 8.0) -> dict[str, Any]:
 _PROVIDER_KEY_URLS: dict[str, str] = {
     "anthropic": "https://console.anthropic.com/settings/keys",
     "openai": "https://platform.openai.com/api-keys",
+    "azure_openai": "https://portal.azure.com",
     "groq": "https://console.groq.com/keys",
     "gemini": "https://aistudio.google.com/app/apikey",
     "openrouter": "https://openrouter.ai/keys",
+    "aihubmix": "https://aihubmix.com",
+    "siliconflow": "https://siliconflow.cn",
+    "cerebras": "https://cloud.cerebras.ai",
     "together": "https://api.together.xyz/settings/api-keys",
     "mistral": "https://console.mistral.ai/api-keys/",
     "deepseek": "https://platform.deepseek.com/api_keys",
@@ -900,11 +1002,21 @@ def _configure_model(
         console.print(f"\n  [dim]Get your API key at:[/] [underline]{key_url}[/]\n")
 
     provider_default_base = DEFAULT_PROVIDER_BASE_URLS.get(provider_key, "")
-    current_base = str(config.provider.litellm_base_url or "").strip()
-    base_url = current_base or provider_default_base
-
-    current_model = str(config.provider.model or "").strip()
-    model_default = current_model or default_provider_model(provider_key)
+    base_url = _provider_base_url_prompt_default(config, provider_key, provider_default_base)
+    model_default = _model_default_for_provider(config, provider_key, provider_spec)
+    oauth_login = f"clawlite provider login {provider_key.replace('_', '-')}" if provider_key in {
+        "openai_codex",
+        "gemini_oauth",
+        "qwen_oauth",
+    } else ""
+    suggestion_base_url = (
+        "your Azure OpenAI `/openai/v1` resource endpoint"
+        if provider_key in _PROVIDERS_REQUIRING_BASE_URL_INPUT
+        else base_url
+    )
+    console.print("")
+    console.print(_render_provider_suggestions(provider_key, base_url=suggestion_base_url, oauth_login=oauth_login))
+    console.print("")
 
     api_key = ""
     oauth_payload: dict[str, Any] = {"access_token": "", "account_id": "", "source": ""}
@@ -926,6 +1038,8 @@ def _configure_model(
         base_url = CODEX_DEFAULT_BASE_URL
     elif provider_key not in {"ollama", "vllm"}:
         api_key = Prompt.ask(f"  {provider} API key", password=True)
+        if provider_key in _PROVIDERS_REQUIRING_BASE_URL_INPUT or not provider_default_base:
+            base_url = Prompt.ask(f"  {provider} base URL", default=base_url)
     else:
         base_url = Prompt.ask(f"  {provider} base URL", default=base_url)
 

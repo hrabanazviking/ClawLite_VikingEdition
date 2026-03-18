@@ -12,11 +12,15 @@ class ProviderProfile:
 
 ONBOARDING_PROVIDER_ORDER: tuple[str, ...] = (
     "openai",
+    "azure-openai",
     "anthropic",
     "gemini",
     "groq",
     "deepseek",
     "openrouter",
+    "aihubmix",
+    "siliconflow",
+    "cerebras",
     "xai",
     "mistral",
     "moonshot",
@@ -143,6 +147,30 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         family="openai_compatible",
         recommended_models=("openai/gpt-4o-mini", "openai/gpt-4.1-mini"),
         onboarding_hint="OpenAI responds via the standard OpenAI-compatible endpoint; validate billing and the active project.",
+    ),
+    "azure_openai": ProviderProfile(
+        family="openai_compatible",
+        recommended_models=("azure-openai/gpt-4.1-mini", "azure-openai/gpt-4o-mini"),
+        onboarding_hint=(
+            "Azure OpenAI now accepts resource-scoped OpenAI v1 base URLs; use your own "
+            "`https://<resource>.openai.azure.com/openai/v1` or "
+            "`https://<resource>.services.ai.azure.com/openai/v1` endpoint."
+        ),
+    ),
+    "aihubmix": ProviderProfile(
+        family="gateway",
+        recommended_models=("aihubmix/openai/gpt-4.1-mini", "aihubmix/anthropic/claude-3-5-sonnet"),
+        onboarding_hint="AiHubMix exposes an OpenAI-compatible multi-model gateway; confirm the upstream model name you want to route.",
+    ),
+    "siliconflow": ProviderProfile(
+        family="gateway",
+        recommended_models=("siliconflow/deepseek-ai/DeepSeek-V3", "siliconflow/zai-org/GLM-4.6"),
+        onboarding_hint="SiliconFlow uses an OpenAI-compatible base URL; copy the full upstream model id from the SiliconFlow model catalog.",
+    ),
+    "cerebras": ProviderProfile(
+        family="openai_compatible",
+        recommended_models=("cerebras/zai-glm-4.7", "cerebras/qwen-3-coder-480b"),
+        onboarding_hint="Cerebras exposes an OpenAI-compatible API; confirm that your account has access to the selected model family.",
     ),
     "openai_codex": ProviderProfile(
         family="oauth",

@@ -1589,6 +1589,38 @@ def provider_live_probe(config: AppConfig, *, timeout: float = 3.0) -> dict[str,
     key_envs = list(getattr(spec, "key_envs", ()) or [])
     model_check: dict[str, Any] = {"checked": False, "ok": True, "enforced": False}
 
+    if provider not in {"ollama", "openai_codex"} and not base_url:
+        return {
+            "ok": False,
+            "provider": provider,
+            "provider_detected": detected,
+            "model": model,
+            "status_code": 0,
+            "error": "base_url_missing",
+            "api_key_masked": str(target.get("api_key_masked", "") or ""),
+            "api_key_source": str(target.get("api_key_source", "") or ""),
+            "base_url": "",
+            "base_url_source": str(target.get("base_url_source", "") or ""),
+            "endpoint": "",
+            "transport": transport,
+            "probe_method": probe_method,
+            "default_base_url": default_base_url,
+            "key_envs": key_envs,
+            "model_check": model_check,
+            **profile_payload,
+            "hints": provider_probe_hints(
+                provider=provider,
+                error="base_url_missing",
+                status_code=0,
+                auth_mode=auth_mode,
+                transport=transport,
+                endpoint="",
+                default_base_url=default_base_url,
+                key_envs=key_envs,
+                model=model,
+            ),
+        }
+
     if provider == "ollama":
         endpoint = "/api/tags"
     elif provider == "openai_codex":

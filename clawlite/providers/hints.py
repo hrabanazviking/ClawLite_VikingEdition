@@ -118,6 +118,8 @@ def provider_probe_hints(
 
     if lowered.startswith("http_status:401") or lowered.startswith("http_status:403"):
         _append_hint(hints, "Authentication was rejected; review the configured key and the associated account.")
+        if provider_name in {"openai_codex", "gemini_oauth", "qwen_oauth"}:
+            _append_hint(hints, f"Run 'clawlite provider login {provider_name.replace('_', '-')}' to refresh the local OAuth session.")
     if lowered.startswith("http_status:404"):
         if transport == "anthropic":
             _append_hint(hints, "The Anthropic-compatible endpoint was not found; review the api_base and provider compatibility.")
@@ -146,9 +148,13 @@ def provider_probe_hints(
 
     provider_base_url_hints: dict[str, str] = {
         "openrouter": "OpenRouter normally responds at https://openrouter.ai/api/v1.",
+        "aihubmix": "AiHubMix normally responds at https://aihubmix.com/v1.",
+        "siliconflow": "SiliconFlow normally responds at https://api.siliconflow.cn/v1.",
         "groq": "Groq normally responds at https://api.groq.com/openai/v1.",
         "gemini": "Gemini OpenAI-compatible normally responds at https://generativelanguage.googleapis.com/v1beta/openai.",
         "anthropic": "Anthropic normally responds at https://api.anthropic.com/v1.",
+        "azure_openai": "Azure OpenAI needs your resource-scoped /openai/v1 endpoint, for example https://<resource>.openai.azure.com/openai/v1.",
+        "cerebras": "Cerebras normally responds at https://api.cerebras.ai/v1.",
         "minimax": "MiniMax Anthropic-compatible usually uses a base URL ending with /anthropic.",
         "xiaomi": "Xiaomi Mimo Anthropic-compatible usually uses a base URL ending with /anthropic.",
         "kimi_coding": "Kimi Coding Anthropic-compatible usually uses a dedicated base under https://api.kimi.com/coding/.",

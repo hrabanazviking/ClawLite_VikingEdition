@@ -119,6 +119,7 @@ Useful flags:
 Notes:
 
 - `provider login` and `provider logout` support `openai-codex`, `gemini-oauth`, and `qwen-oauth`.
+- `provider set-auth` is the easiest way to seed providers that need custom `api_base`, such as `azure-openai`, or newly added gateways such as `aihubmix`, `siliconflow`, and `cerebras`.
 - `--set-model` is a deprecated compatibility flag; Codex login already switches to the default Codex model unless you pass `--keep-model`.
 - `provider status` defaults to `openai-codex` when no provider is supplied.
 - Provider aliases such as `codex`, `google`, `claude`, `hf`, and `kimi` are accepted where supported by the registry.

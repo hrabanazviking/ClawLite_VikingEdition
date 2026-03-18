@@ -60,12 +60,13 @@ Profiles are layered on top of the base file. For example, `clawlite --config ./
 
 ## `providers`
 
-Each key is a provider name. Built-in keys: `openrouter`, `gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `ollama`, `vllm`, `custom`. Any other key is a custom provider.
+Each key is a provider name. Built-in typed keys include `openrouter`, `gemini`, `openai`, `anthropic`, `deepseek`, `groq`, `ollama`, `vllm`, and `custom`. Additional provider blocks such as `azure_openai`, `aihubmix`, `siliconflow`, or `cerebras` are stored in the dynamic provider map automatically.
 
 ```json
 "providers": {
   "gemini":     { "api_key": "AIza..." },
   "openai":     { "api_key": "sk-..." },
+  "azure_openai": { "api_key": "azure-key", "api_base": "https://example-resource.openai.azure.com/openai/v1" },
   "anthropic":  { "api_key": "sk-ant-..." },
   "openrouter": { "api_key": "sk-or-..." },
   "mycompany":  { "api_key": "...", "api_base": "https://api.mycompany.com/v1" }
