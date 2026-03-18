@@ -70,6 +70,8 @@ Config profiles are also supported: `clawlite --config ./config.yaml --profile p
 curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
 ```
 
+If an older `/root/ClawLite` checkout inside Ubuntu has diverged from `origin/main`, the wrapper now preserves it as a timestamped backup and reclones cleanly instead of failing on `git pull --ff-only`.
+
 After that:
 
 ```bash

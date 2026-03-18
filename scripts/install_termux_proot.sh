@@ -43,7 +43,23 @@ echo "[4/5] Syncing ClawLite repository..."
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
   git -C "${INSTALL_DIR}" fetch --depth 1 origin main
   git -C "${INSTALL_DIR}" checkout main
-  git -C "${INSTALL_DIR}" pull --ff-only origin main
+  current_head="$(git -C "${INSTALL_DIR}" rev-parse HEAD)"
+  remote_head="$(git -C "${INSTALL_DIR}" rev-parse origin/main)"
+  if [[ "${current_head}" == "${remote_head}" ]]; then
+    echo "Repository already up to date."
+  elif [[ -n "$(git -C "${INSTALL_DIR}" status --porcelain)" ]]; then
+    backup_dir="${INSTALL_DIR}.backup.$(date +%Y%m%d%H%M%S)"
+    echo "Existing checkout has local changes; preserving it at ${backup_dir}"
+    mv "${INSTALL_DIR}" "${backup_dir}"
+    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
+  elif git -C "${INSTALL_DIR}" merge-base --is-ancestor "${current_head}" "${remote_head}"; then
+    git -C "${INSTALL_DIR}" merge --ff-only origin/main
+  else
+    backup_dir="${INSTALL_DIR}.backup.$(date +%Y%m%d%H%M%S)"
+    echo "Existing checkout diverged from origin/main; preserving it at ${backup_dir}"
+    mv "${INSTALL_DIR}" "${backup_dir}"
+    git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
+  fi
 else
   rm -rf "${INSTALL_DIR}"
   git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}"

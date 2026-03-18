@@ -29,6 +29,7 @@ What it does:
 - installs `ubuntu` with `proot-distro` if needed
 - installs `git`, `curl`, `python3`, `python3-venv`, and `build-essential` inside Ubuntu
 - clones or updates `ClawLite` under `/root/ClawLite`
+- if the existing checkout diverged from `origin/main`, it preserves that tree as `/root/ClawLite.backup.<timestamp>` and reclones cleanly
 - runs `scripts/install.sh` inside Ubuntu
 
 ## 3. Enter Ubuntu and configure
