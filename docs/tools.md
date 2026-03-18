@@ -131,7 +131,18 @@ clawlite tools safety browser --session-id telegram:1 --channel telegram --args-
 
 The preview returns a `decision` of `allow`, `approval`, or `block`.
 
-On live Telegram and Discord turns, approval-gated tool calls now attach native approve/reject controls to the reply. Approving creates a temporary grant scoped to the same session, channel, and matched safety specifier; the operator then retries the original request manually.
+On live Telegram and Discord turns, approval-gated tool calls now attach native approve/reject controls to the reply. Approving creates a temporary grant scoped to the reviewed request fingerprint plus the same session, channel, and matched safety specifier; the operator then retries the original request manually.
+
+The same approval queue is now inspectable over the gateway and CLI:
+
+```bash
+clawlite tools approvals --include-grants
+clawlite tools approve <request_id> --actor ops --note "approved after review"
+clawlite tools reject <request_id> --actor ops --note "use a safer command"
+clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate
+```
+
+`tools approvals` returns live request snapshots (`pending`, `approved`, `rejected`, or `all`) and can include active grants with their remaining TTL plus `scope` / `request_id` metadata. `tools revoke-grant` removes one or more of those temporary grants early, so operators do not have to wait for TTL expiry when they want to close the window immediately. This mirrors the channel-native operator buttons without forcing the review to happen inside Telegram or Discord.
 
 For live catalog inspection through the gateway:
 

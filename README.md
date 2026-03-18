@@ -117,7 +117,9 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Skills now honor OpenClaw-style `skills.entries.<skill>` overrides for `enabled`, `env`, and `apiKey`, including profile overlays such as `config.prod.yaml`.
 - Builtin skills can now be gated with `skills.allowBundled` without blocking workspace or marketplace overrides.
 - Tool safety now supports granular specifiers such as `browser:evaluate`, `run_skill:github`, and `exec:git`, plus approval mode via `approval_specifiers` / `approval_channels`, with `tool:*` wildcards for channel-specific policy.
-- Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary per-session grants so the operator can approve and then retry the request safely.
+- Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
+- Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`.
+- Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks.
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
 - OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.
@@ -464,6 +466,7 @@ clawlite hatch                         # trigger first bootstrap turn
 clawlite skills list [--all]           # list skills
 clawlite skills show <name>            # show skill detail
 clawlite skills check                  # diagnostics (missing deps, fallback hints)
+clawlite skills doctor                 # actionable remediation hints for broken skills
 clawlite skills enable/disable <name>  # toggle skill
 clawlite skills pin/unpin <name>       # always-include / unpin
 clawlite skills pin-version <name> <version>  # lock to specific version
@@ -471,10 +474,14 @@ clawlite skills clear-version <name>   # remove version pin
 clawlite skills install <slug>         # install managed skill into ~/.clawlite/marketplace
 clawlite skills update <name>          # update one managed marketplace skill
 clawlite skills search <query>         # search ClawHub for managed skills
-clawlite skills managed                # inspect locally discovered marketplace skills
+clawlite skills managed [--status ready|missing_requirements|policy_blocked]
 clawlite skills sync                   # update managed marketplace skills via ClawHub
 clawlite skills remove <name>          # remove managed marketplace skill
 clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"evaluate"}'
+clawlite tools approvals --include-grants
+clawlite tools approve <request_id> --actor ops --note "approved after review"
+clawlite tools reject <request_id> --actor ops --note "needs a safer path"
+clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate
 clawlite tools catalog --include-schema
 clawlite tools show bash
 

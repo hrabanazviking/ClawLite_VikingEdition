@@ -59,20 +59,23 @@ When two skills have the same `name`, resolution is deterministic:
 clawlite skills list
 clawlite skills list --all
 clawlite skills show cron
+clawlite skills doctor
 clawlite skills search "discord"
 clawlite skills install jira-helper
 clawlite skills update jira-helper
 clawlite skills managed
+clawlite skills managed --status missing_requirements
 clawlite skills sync
 clawlite skills remove jira-helper
 ```
 
 `skills list --all` includes unavailable skills in the current environment and shows missing requirements.
 `skills show` and `skills check` also surface the resolved `skill_key` and `primary_env` used for `skills.entries`.
-`skills managed` shows only the marketplace-local skills currently discovered under `~/.clawlite/marketplace/skills`, including the managed folder `slug`, resolved runtime `status`, and description.
+`skills doctor` turns that deterministic diagnostics data into remediation hints, grouped around the actual blocker: missing env vars, binaries, config keys, bundled-skill policy, or invalid `SKILL.md` contract.
+`skills managed` shows only the marketplace-local skills currently discovered under `~/.clawlite/marketplace/skills`, including the managed folder `slug`, resolved runtime `status`, description, and remediation hint when a managed skill is blocked or missing requirements. It also supports `--status` for filtering to one lifecycle state such as `ready`, `missing_requirements`, or `policy_blocked`.
 
 Managed installs use the marketplace root: `~/.clawlite/marketplace/skills`.
-`skills update <name>` resolves either the managed folder slug or the discovered skill name before calling `clawhub update <slug>`.
+`skills update <name>` resolves either the managed folder slug or the discovered skill name before calling `clawhub update <slug>`. Successful `install` and `update` responses now echo the resolved local marketplace row so operators can see the post-action status immediately.
 
 ## Real skill execution (tool)
 

@@ -24,6 +24,7 @@ from clawlite.cli.commands import cmd_provider_logout
 from clawlite.cli.commands import main
 from clawlite.cli.ops import provider_live_probe
 from clawlite.channels.telegram_pairing import TelegramPairingStore
+from clawlite.core.skills import SkillsLoader
 from clawlite.workspace.loader import TEMPLATE_FILES
 from clawlite.workspace.loader import WorkspaceLoader
 
@@ -354,6 +355,8 @@ def test_cli_skills_install_update_and_sync_use_marketplace_root(tmp_path: Path,
     assert install_payload["slug"] == "jira-helper"
     assert install_payload["managed_root"].endswith(".clawlite/marketplace")
     assert install_payload["skills_root"].endswith(".clawlite/marketplace/skills")
+    assert install_payload["resolved"]["status"] == "ready"
+    assert install_payload["resolved"]["slug"] == "jira-helper"
 
     rc_update = main(["skills", "update", "Jira Helper"])
     assert rc_update == 0
@@ -362,6 +365,7 @@ def test_cli_skills_install_update_and_sync_use_marketplace_root(tmp_path: Path,
     assert update_payload["action"] == "update"
     assert update_payload["slug"] == "jira-helper"
     assert update_payload["name"] == "Jira Helper"
+    assert update_payload["resolved"]["status"] == "ready"
 
     rc_sync = main(["skills", "sync"])
     assert rc_sync == 0
@@ -419,7 +423,44 @@ def test_cli_skills_managed_lists_marketplace_entries(tmp_path: Path, capsys, mo
     assert payload["skills"][0]["name"] == "market-echo"
     assert payload["skills"][0]["description"] == "marketplace skill"
     assert payload["skills"][0]["status"] == "ready"
+    assert payload["skills"][0]["hint"] == "No action required."
     assert payload["skills_root"].endswith(".clawlite/marketplace/skills")
+
+
+def test_cli_skills_managed_filters_by_status_and_includes_hint(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ready_skill = tmp_path / ".clawlite" / "marketplace" / "skills" / "market-ready"
+    ready_skill.mkdir(parents=True, exist_ok=True)
+    (ready_skill / "SKILL.md").write_text(
+        "---\nname: market-ready\ndescription: ready\ncommand: echo hi\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    broken_skill = tmp_path / ".clawlite" / "marketplace" / "skills" / "market-broken"
+    broken_skill.mkdir(parents=True, exist_ok=True)
+    (broken_skill / "SKILL.md").write_text(
+        "---\n"
+        "name: market-broken\n"
+        "description: broken\n"
+        "metadata:\n"
+        "  clawlite:\n"
+        "    primaryEnv: BROKEN_TOKEN\n"
+        "    requires:\n"
+        "      env: [BROKEN_TOKEN]\n"
+        "---\nbody\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("BROKEN_TOKEN", raising=False)
+
+    rc = main(["skills", "managed", "--status", "missing_requirements"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["count"] == 1
+    assert payload["status_filter"] == "missing_requirements"
+    assert payload["skills"][0]["name"] == "market-broken"
+    assert "BROKEN_TOKEN" in payload["skills"][0]["hint"]
 
 
 def test_cli_skills_remove_resolves_marketplace_skill_by_name(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -522,6 +563,7 @@ def test_cli_tools_safety_preview_reports_approval_mode(tmp_path: Path, capsys) 
     assert payload["decision"] == "approval"
     assert payload["approval_required"] is True
     assert payload["matched_approval_specifiers"] == ["browser:evaluate"]
+    assert len(str(payload["approval_request_id"])) == 16
 
 
 def test_cli_tools_safety_preview_rejects_invalid_json(tmp_path: Path, capsys) -> None:
@@ -636,6 +678,155 @@ def test_cli_tools_show_returns_not_found(tmp_path: Path, capsys, monkeypatch) -
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error"] == "tool_not_found:ghost"
+
+
+def test_cli_tools_approvals_uses_gateway_endpoint(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    def _fake_fetch(config, *, gateway_url="", token="", timeout=10.0, status="pending", session_id="", channel="", include_grants=False, limit=50):
+        assert gateway_url == ""
+        assert token == ""
+        assert timeout == 10.0
+        assert status == "pending"
+        assert session_id == "telegram:1"
+        assert channel == "telegram"
+        assert include_grants is True
+        assert limit == 10
+        return {
+            "ok": True,
+            "count": 1,
+            "requests": [{"request_id": "req-1", "tool": "browser"}],
+            "grant_count": 1,
+            "grants": [{"rule": "browser:evaluate"}],
+        }
+
+    monkeypatch.setattr("clawlite.cli.commands.fetch_gateway_tool_approvals", _fake_fetch)
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "tools",
+            "approvals",
+            "--session-id",
+            "telegram:1",
+            "--channel",
+            "telegram",
+            "--include-grants",
+            "--limit",
+            "10",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["action"] == "tools_approvals"
+    assert payload["count"] == 1
+    assert payload["grant_count"] == 1
+
+
+def test_cli_tools_approve_posts_review(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    def _fake_review(config, *, request_id="", decision="", actor="", note="", gateway_url="", token="", timeout=10.0):
+        assert request_id == "req-1"
+        assert decision == "approved"
+        assert actor == "cli"
+        assert note == "looks good"
+        return {"ok": True, "summary": {"status": "approved", "request_id": request_id}}
+
+    monkeypatch.setattr("clawlite.cli.commands.review_gateway_tool_approval", _fake_review)
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "tools",
+            "approve",
+            "req-1",
+            "--actor",
+            "cli",
+            "--note",
+            "looks good",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["action"] == "tools_approve"
+    assert payload["summary"]["status"] == "approved"
+
+
+def test_cli_tools_revoke_grant_posts_revoke(tmp_path: Path, capsys, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    def _fake_revoke(config, *, session_id="", channel="", rule="", gateway_url="", token="", timeout=10.0):
+        assert session_id == "telegram:1"
+        assert channel == "telegram"
+        assert rule == "browser:evaluate"
+        return {"ok": True, "summary": {"removed_count": 1}}
+
+    monkeypatch.setattr("clawlite.cli.commands.revoke_gateway_tool_grants", _fake_revoke)
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "tools",
+            "revoke-grant",
+            "--session-id",
+            "telegram:1",
+            "--channel",
+            "telegram",
+            "--rule",
+            "browser:evaluate",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["action"] == "tools_revoke_grant"
+    assert payload["summary"]["removed_count"] == 1
+
+
+def test_cli_skills_doctor_reports_actionable_hints(tmp_path: Path, capsys, monkeypatch) -> None:
+    builtin_root = tmp_path / "builtin"
+    missing_dir = builtin_root / "github"
+    missing_dir.mkdir(parents=True, exist_ok=True)
+    (missing_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: github\n"
+        "description: GitHub skill\n"
+        "script: github\n"
+        "metadata:\n"
+        "  clawlite:\n"
+        "    primaryEnv: GH_TOKEN\n"
+        "    requires:\n"
+        "      env: [GH_TOKEN]\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("clawlite.cli.commands.SkillsLoader", lambda state_path=None: SkillsLoader(builtin_root=builtin_root, state_path=state_path))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    rc = main(["--config", str(config_path), "skills", "doctor"])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "skills_doctor"
+    assert payload["ok"] is False
+    assert payload["status_counts"]["missing_requirements"] == 1
+    assert payload["skills"][0]["status"] == "missing_requirements"
+    assert "GH_TOKEN" in payload["skills"][0]["hint"]
 
 
 def test_cli_status_and_version(tmp_path: Path, capsys) -> None:

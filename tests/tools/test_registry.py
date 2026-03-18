@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from clawlite.config.schema import ToolSafetyLayerConfig, ToolSafetyPolicyConfig
 from clawlite.runtime.telemetry import set_test_tracer_factory
@@ -47,7 +48,13 @@ class BrowserLikeTool(Tool):
     description = "browser"
 
     def args_schema(self) -> dict:
-        return {"type": "object", "properties": {"action": {"type": "string"}}}
+        return {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "script": {"type": "string"},
+            },
+        }
 
     async def run(self, arguments: dict, ctx: ToolContext) -> str:
         del arguments, ctx
@@ -510,6 +517,7 @@ def test_tool_registry_safety_decision_reports_approval_requirement() -> None:
     assert payload["decision"] == "approval"
     assert payload["matched_approval_specifiers"] == ["browser:evaluate"]
     assert payload["approval_reason"] == "channel:telegram"
+    assert len(str(payload["approval_request_id"])) == 16
 
 
 def test_tool_registry_execute_requires_approval_when_configured() -> None:
@@ -595,6 +603,71 @@ def test_tool_registry_approval_request_grant_allows_retry() -> None:
     asyncio.run(_scenario())
 
 
+def test_tool_registry_approval_grant_is_bound_to_same_request_payload() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                risky_tools=[],
+                approval_specifiers=["browser:evaluate"],
+                approval_channels=["telegram"],
+                blocked_channels=[],
+                allowed_channels=[],
+                approval_grant_ttl_s=300,
+            )
+        )
+        reg.register(BrowserLikeTool())
+        try:
+            await reg.execute(
+                "browser",
+                {"action": "evaluate", "script": "1 + 1"},
+                session_id="telegram:1",
+                channel="telegram",
+                user_id="7",
+            )
+            raise AssertionError("expected approval requirement")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_requires_approval:browser:telegram"
+
+        pending = reg.consume_pending_approval_requests(session_id="telegram:1", channel="telegram")
+        assert len(pending) == 1
+        approved_request_id = str(pending[0]["request_id"])
+
+        review = reg.review_approval_request(
+            approved_request_id,
+            decision="approved",
+            actor="telegram:7",
+        )
+        assert review["ok"] is True
+
+        same_request = await reg.execute(
+            "browser",
+            {"action": "evaluate", "script": "1 + 1"},
+            session_id="telegram:1",
+            channel="telegram",
+            user_id="7",
+        )
+        assert same_request == "ok"
+
+        try:
+            await reg.execute(
+                "browser",
+                {"action": "evaluate", "script": "2 + 2"},
+                session_id="telegram:1",
+                channel="telegram",
+                user_id="7",
+            )
+            raise AssertionError("expected approval requirement for different payload")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_requires_approval:browser:telegram"
+
+        later_pending = reg.consume_pending_approval_requests(session_id="telegram:1", channel="telegram")
+        assert len(later_pending) == 1
+        assert str(later_pending[0]["request_id"]) != approved_request_id
+
+    asyncio.run(_scenario())
+
+
 def test_tool_registry_consume_pending_approval_requests_is_one_shot() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry(
@@ -616,6 +689,101 @@ def test_tool_registry_consume_pending_approval_requests_is_one_shot() -> None:
         second = reg.consume_pending_approval_requests(session_id="telegram:1", channel="telegram")
         assert len(first) == 1
         assert second == []
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_approval_snapshots_include_requests_and_grants() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                approval_specifiers=["browser:evaluate"],
+                approval_channels=["telegram"],
+                approval_grant_ttl_s=300,
+            )
+        )
+        reg.register(BrowserLikeTool())
+        try:
+            await reg.execute("browser", {"action": "evaluate"}, session_id="telegram:1", channel="telegram", user_id="7")
+            raise AssertionError("expected approval requirement")
+        except RuntimeError:
+            pass
+
+        pending = reg.approval_requests_snapshot(status="pending", session_id="telegram:1", channel="telegram")
+        assert len(pending) == 1
+        assert pending[0]["tool"] == "browser"
+        assert pending[0]["request_age_s"] >= 0.0
+        assert pending[0]["expires_in_s"] > 0.0
+
+        review = reg.review_approval_request(pending[0]["request_id"], decision="approved", actor="cli")
+        assert review["ok"] is True
+
+        approved = reg.approval_requests_snapshot(status="approved", session_id="telegram:1", channel="telegram")
+        assert len(approved) == 1
+        assert approved[0]["status"] == "approved"
+        assert approved[0]["grant_expires_in_s"] > 0.0
+
+        grants = reg.approval_grants_snapshot(session_id="telegram:1", channel="telegram")
+        assert len(grants) == 1
+        assert grants[0]["rule"] == "browser:evaluate"
+        assert grants[0]["scope"] == "exact"
+        assert grants[0]["request_id"] == pending[0]["request_id"]
+        assert grants[0]["expires_in_s"] > 0.0
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_revoke_approval_grants_filters_by_session_channel_and_rule() -> None:
+    reg = ToolRegistry(safety=ToolSafetyPolicyConfig(enabled=True))
+    reg._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+    reg._approval_grants["telegram:2::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+    summary = reg.revoke_approval_grants(session_id="telegram:1", channel="telegram", rule="browser:evaluate")
+
+    assert summary["ok"] is True
+    assert summary["removed_count"] == 1
+    assert summary["removed"][0]["session_id"] == "telegram:1"
+    remaining = reg.approval_grants_snapshot()
+    assert len(remaining) == 1
+    assert remaining[0]["session_id"] == "telegram:2"
+
+
+def test_tool_registry_legacy_approval_grants_remain_visible_and_usable() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry(
+            safety=ToolSafetyPolicyConfig(
+                enabled=True,
+                approval_specifiers=["browser:evaluate"],
+                approval_channels=["telegram"],
+                approval_grant_ttl_s=300,
+            )
+        )
+        reg.register(BrowserLikeTool())
+        reg._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+        payload = reg.safety_decision(
+            "browser",
+            {"action": "evaluate", "script": "legacy"},
+            session_id="telegram:1",
+            channel="telegram",
+        )
+        assert payload["approval_granted"] is True
+        assert payload["approval_request_id"]
+
+        out = await reg.execute(
+            "browser",
+            {"action": "evaluate", "script": "legacy"},
+            session_id="telegram:1",
+            channel="telegram",
+            user_id="7",
+        )
+        assert out == "ok"
+
+        grants = reg.approval_grants_snapshot(session_id="telegram:1", channel="telegram")
+        assert len(grants) == 1
+        assert grants[0]["scope"] == "legacy"
+        assert grants[0]["request_id"] == ""
 
     asyncio.run(_scenario())
 

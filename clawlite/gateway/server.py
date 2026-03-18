@@ -283,6 +283,17 @@ class DiscordRefreshRequest(BaseModel):
     noop: bool = False
 
 
+class ToolApprovalReviewRequest(BaseModel):
+    actor: str = ""
+    note: str = ""
+
+
+class ToolGrantRevokeRequest(BaseModel):
+    session_id: str = ""
+    channel: str = ""
+    rule: str = ""
+
+
 class ControlPlaneResponse(BaseModel):
     ready: bool
     phase: str
@@ -3222,6 +3233,124 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/api/tools/catalog")
     async def api_tools_catalog(request: Request) -> dict[str, Any]:
         return await request_handlers.tools_catalog(request)
+
+    @app.get("/v1/tools/approvals")
+    async def tools_approvals(
+        request: Request,
+        status: str = "pending",
+        session_id: str = "",
+        channel: str = "",
+        include_grants: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approvals(
+            request,
+            status=status,
+            session_id=session_id,
+            channel=channel,
+            include_grants=include_grants,
+            limit=limit,
+        )
+
+    @app.get("/api/tools/approvals")
+    async def api_tools_approvals(
+        request: Request,
+        status: str = "pending",
+        session_id: str = "",
+        channel: str = "",
+        include_grants: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approvals(
+            request,
+            status=status,
+            session_id=session_id,
+            channel=channel,
+            include_grants=include_grants,
+            limit=limit,
+        )
+
+    @app.post("/v1/tools/approvals/{request_id}/approve")
+    async def tools_approval_approve(
+        request_id: str,
+        request: Request,
+        payload: ToolApprovalReviewRequest | None = None,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approval_review(
+            request,
+            request_id=request_id,
+            decision="approved",
+            actor=str((payload or ToolApprovalReviewRequest()).actor or ""),
+            note=str((payload or ToolApprovalReviewRequest()).note or ""),
+        )
+
+    @app.post("/api/tools/approvals/{request_id}/approve")
+    async def api_tools_approval_approve(
+        request_id: str,
+        request: Request,
+        payload: ToolApprovalReviewRequest | None = None,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approval_review(
+            request,
+            request_id=request_id,
+            decision="approved",
+            actor=str((payload or ToolApprovalReviewRequest()).actor or ""),
+            note=str((payload or ToolApprovalReviewRequest()).note or ""),
+        )
+
+    @app.post("/v1/tools/approvals/{request_id}/reject")
+    async def tools_approval_reject(
+        request_id: str,
+        request: Request,
+        payload: ToolApprovalReviewRequest | None = None,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approval_review(
+            request,
+            request_id=request_id,
+            decision="rejected",
+            actor=str((payload or ToolApprovalReviewRequest()).actor or ""),
+            note=str((payload or ToolApprovalReviewRequest()).note or ""),
+        )
+
+    @app.post("/api/tools/approvals/{request_id}/reject")
+    async def api_tools_approval_reject(
+        request_id: str,
+        request: Request,
+        payload: ToolApprovalReviewRequest | None = None,
+    ) -> dict[str, Any]:
+        return await request_handlers.tools_approval_review(
+            request,
+            request_id=request_id,
+            decision="rejected",
+            actor=str((payload or ToolApprovalReviewRequest()).actor or ""),
+            note=str((payload or ToolApprovalReviewRequest()).note or ""),
+        )
+
+    @app.post("/v1/tools/grants/revoke")
+    async def tools_grants_revoke(
+        request: Request,
+        payload: ToolGrantRevokeRequest | None = None,
+    ) -> dict[str, Any]:
+        body = payload or ToolGrantRevokeRequest()
+        return await request_handlers.tools_grants_revoke(
+            request,
+            session_id=str(body.session_id or ""),
+            channel=str(body.channel or ""),
+            rule=str(body.rule or ""),
+        )
+
+    @app.post("/api/tools/grants/revoke")
+    async def api_tools_grants_revoke(
+        request: Request,
+        payload: ToolGrantRevokeRequest | None = None,
+    ) -> dict[str, Any]:
+        body = payload or ToolGrantRevokeRequest()
+        return await request_handlers.tools_grants_revoke(
+            request,
+            session_id=str(body.session_id or ""),
+            channel=str(body.channel or ""),
+            rule=str(body.rule or ""),
+        )
 
     @app.get("/api/token")
     async def api_token(request: Request) -> dict[str, Any]:

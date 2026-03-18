@@ -16,6 +16,7 @@ from clawlite import __version__
 from clawlite.cli.ops import channels_validation
 from clawlite.cli.ops import diagnostics_snapshot
 from clawlite.cli.ops import fetch_gateway_diagnostics
+from clawlite.cli.ops import fetch_gateway_tool_approvals
 from clawlite.cli.ops import memory_eval_snapshot
 from clawlite.cli.ops import memory_branch_checkout
 from clawlite.cli.ops import memory_branch_create
@@ -54,6 +55,8 @@ from clawlite.cli.ops import supervisor_recover
 from clawlite.cli.ops import autonomy_wake
 from clawlite.cli.ops import self_evolution_status
 from clawlite.cli.ops import self_evolution_trigger
+from clawlite.cli.ops import review_gateway_tool_approval
+from clawlite.cli.ops import revoke_gateway_tool_grants
 from clawlite.cli.ops import provider_validation
 from clawlite.cli.ops import provider_login_oauth
 from clawlite.cli.ops import provider_set_auth
@@ -1053,6 +1056,74 @@ def cmd_tools_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tools_approvals(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    payload = fetch_gateway_tool_approvals(
+        config,
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+        status=str(args.status or "pending"),
+        session_id=str(args.session_id or ""),
+        channel=str(args.channel or ""),
+        include_grants=bool(args.include_grants),
+        limit=max(1, int(args.limit or 1)),
+    )
+    payload["action"] = "tools_approvals"
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_tools_approve(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    payload = review_gateway_tool_approval(
+        config,
+        request_id=str(args.request_id or ""),
+        decision="approved",
+        actor=str(args.actor or ""),
+        note=str(args.note or ""),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    payload["action"] = "tools_approve"
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_tools_reject(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    payload = review_gateway_tool_approval(
+        config,
+        request_id=str(args.request_id or ""),
+        decision="rejected",
+        actor=str(args.actor or ""),
+        note=str(args.note or ""),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    payload["action"] = "tools_reject"
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
+def cmd_tools_revoke_grant(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    payload = revoke_gateway_tool_grants(
+        config,
+        session_id=str(args.session_id or ""),
+        channel=str(args.channel or ""),
+        rule=str(args.rule or ""),
+        gateway_url=str(args.gateway_url or ""),
+        token=str(args.token or ""),
+        timeout=float(args.timeout),
+    )
+    payload["action"] = "tools_revoke_grant"
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
+
+
 def cmd_diagnostics(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     config_path = str(args.config) if args.config else str(DEFAULT_CONFIG_PATH)
@@ -1396,6 +1467,30 @@ def cmd_skills_show(args: argparse.Namespace) -> int:
             "available": row.available,
             "enabled": row.enabled,
             "pinned": row.pinned,
+            "status": _skills_doctor_status(
+                {
+                    "name": row.name,
+                    "skill_key": row.skill_key or row.name,
+                    "primary_env": row.primary_env,
+                    "available": row.available,
+                    "enabled": row.enabled,
+                    "missing": row.missing,
+                    "contract_issues": row.contract_issues,
+                    "fallback_hint": row.fallback_hint,
+                }
+            ),
+            "hint": _skills_doctor_hint(
+                {
+                    "name": row.name,
+                    "skill_key": row.skill_key or row.name,
+                    "primary_env": row.primary_env,
+                    "available": row.available,
+                    "enabled": row.enabled,
+                    "missing": row.missing,
+                    "contract_issues": row.contract_issues,
+                    "fallback_hint": row.fallback_hint,
+                }
+            ),
             "version": row.version,
             "version_pin": row.version_pin,
             "fallback_hint": row.fallback_hint,
@@ -1415,6 +1510,114 @@ def cmd_skills_check(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
     _print_json(loader.diagnostics_report())
     return 0
+
+
+def _skills_doctor_status(row: dict[str, Any]) -> str:
+    if not bool(row.get("enabled", True)):
+        return "disabled"
+    if list(row.get("contract_issues", []) or []):
+        return "invalid_contract"
+    missing = list(row.get("missing", []) or [])
+    if "policy:bundled_not_allowed" in missing:
+        return "policy_blocked"
+    if missing:
+        return "missing_requirements"
+    if bool(row.get("available", False)):
+        return "ready"
+    return "unavailable"
+
+
+def _skills_doctor_hint(row: dict[str, Any]) -> str:
+    contract_issues = list(row.get("contract_issues", []) or [])
+    if contract_issues:
+        return "Fix the SKILL.md frontmatter contract so only one valid execution path is declared."
+
+    missing = [str(item or "") for item in list(row.get("missing", []) or []) if str(item or "").strip()]
+    if "policy:bundled_not_allowed" in missing:
+        skill_key = str(row.get("skill_key", "") or row.get("name", "")).strip()
+        return f"Allow the builtin skill via skills.allowBundled or install a workspace/marketplace override for {skill_key}."
+
+    env_items = [item.split(":", 1)[1] for item in missing if item.startswith("env:")]
+    if env_items:
+        primary_env = str(row.get("primary_env", "") or "").strip()
+        if primary_env and primary_env in env_items:
+            skill_key = str(row.get("skill_key", "") or row.get("name", "")).strip()
+            return (
+                f"Export {primary_env} or set skills.entries.{skill_key}.apiKey / env overrides in config."
+            )
+        return f"Set the required environment variables: {', '.join(env_items)}."
+
+    config_items = [item.split(":", 1)[1] for item in missing if item.startswith("config:")]
+    if config_items:
+        return f"Set the required config keys: {', '.join(config_items)}."
+
+    bin_items = [item.split(":", 1)[1] for item in missing if item.startswith("bin:")]
+    any_bin_items = [item.split(":", 1)[1] for item in missing if item.startswith("any_bin:")]
+    if bin_items or any_bin_items:
+        fallback_hint = str(row.get("fallback_hint", "") or "").strip()
+        if fallback_hint:
+            return fallback_hint
+        parts = [*bin_items, *[f"one of {item}" for item in any_bin_items]]
+        return f"Install the required binaries: {', '.join(parts)}."
+
+    os_items = [item.split(":", 1)[1] for item in missing if item.startswith("os:")]
+    if os_items:
+        return f"Run this skill on a supported OS or disable it locally: {', '.join(os_items)}."
+
+    return "No action required."
+
+
+def cmd_skills_doctor(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    diagnostics = loader.diagnostics_report()
+    rows = list(diagnostics.get("skills", []) or [])
+    doctor_rows: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {
+        "ready": 0,
+        "disabled": 0,
+        "missing_requirements": 0,
+        "policy_blocked": 0,
+        "invalid_contract": 0,
+        "unavailable": 0,
+    }
+    recommendations: list[str] = []
+
+    for row in rows:
+        status = _skills_doctor_status(row)
+        status_counts[status] = status_counts.get(status, 0) + 1
+        hint = _skills_doctor_hint(row)
+        if hint != "No action required." and hint not in recommendations:
+            recommendations.append(hint)
+        doctor_row = {
+            "name": row.get("name", ""),
+            "skill_key": row.get("skill_key", ""),
+            "primary_env": row.get("primary_env", ""),
+            "source": row.get("source", ""),
+            "status": status,
+            "enabled": bool(row.get("enabled", True)),
+            "available": bool(row.get("available", False)),
+            "missing": list(row.get("missing", []) or []),
+            "contract_issues": list(row.get("contract_issues", []) or []),
+            "runtime_requirements": list(row.get("runtime_requirements", []) or []),
+            "hint": hint,
+        }
+        if row.get("fallback_hint"):
+            doctor_row["fallback_hint"] = row.get("fallback_hint")
+        if bool(args.all) or status not in {"ready", "disabled"}:
+            doctor_rows.append(doctor_row)
+
+    blocking = status_counts.get("missing_requirements", 0) + status_counts.get("policy_blocked", 0) + status_counts.get("invalid_contract", 0)
+    payload = {
+        "ok": blocking == 0,
+        "action": "skills_doctor",
+        "summary": diagnostics.get("summary", {}),
+        "watcher": diagnostics.get("watcher", {}),
+        "status_counts": status_counts,
+        "recommendations": recommendations,
+        "skills": doctor_rows,
+    }
+    _print_json(payload)
+    return 0 if payload.get("ok", False) else 2
 
 
 def _skills_lifecycle_payload(action: str, row: Any) -> dict[str, Any]:
@@ -1441,11 +1644,52 @@ def _managed_skill_slug(row: Any) -> str:
 
 
 def _managed_skill_status(row: Any) -> str:
-    if not bool(getattr(row, "enabled", True)):
-        return "disabled"
-    if not bool(getattr(row, "available", True)):
-        return "missing_requirements"
-    return "ready"
+    return _skills_doctor_status(
+        {
+            "name": getattr(row, "name", ""),
+            "skill_key": getattr(row, "skill_key", "") or getattr(row, "name", ""),
+            "available": bool(getattr(row, "available", False)),
+            "enabled": bool(getattr(row, "enabled", True)),
+            "missing": list(getattr(row, "missing", []) or []),
+            "contract_issues": list(getattr(row, "contract_issues", []) or []),
+        }
+    )
+
+
+def _managed_skill_hint(row: Any) -> str:
+    return _skills_doctor_hint(
+        {
+            "name": getattr(row, "name", ""),
+            "skill_key": getattr(row, "skill_key", "") or getattr(row, "name", ""),
+            "primary_env": getattr(row, "primary_env", ""),
+            "available": bool(getattr(row, "available", False)),
+            "enabled": bool(getattr(row, "enabled", True)),
+            "missing": list(getattr(row, "missing", []) or []),
+            "contract_issues": list(getattr(row, "contract_issues", []) or []),
+            "fallback_hint": getattr(row, "fallback_hint", ""),
+        }
+    )
+
+
+def _managed_skill_payload(row: Any) -> dict[str, Any]:
+    return {
+        "slug": _managed_skill_slug(row),
+        "name": row.name,
+        "skill_key": row.skill_key or row.name,
+        "primary_env": row.primary_env,
+        "description": row.description,
+        "available": row.available,
+        "enabled": row.enabled,
+        "pinned": row.pinned,
+        "status": _managed_skill_status(row),
+        "hint": _managed_skill_hint(row),
+        "version": row.version,
+        "version_pin": row.version_pin,
+        "missing": row.missing,
+        "homepage": row.homepage,
+        "fallback_hint": row.fallback_hint,
+        "path": str(row.path),
+    }
 
 
 def _resolve_managed_skill(loader: SkillsLoader, raw_name: str) -> tuple[Any | None, str, Path]:
@@ -1535,6 +1779,10 @@ def cmd_skills_install(args: argparse.Namespace) -> int:
     rc, payload = _run_clawhub_command(loader, "install", args.slug)
     payload["action"] = "install"
     payload["slug"] = args.slug
+    if rc == 0:
+        resolved_row, _slug, _target = _resolve_managed_skill(loader, args.slug)
+        if resolved_row is not None:
+            payload["resolved"] = _managed_skill_payload(resolved_row)
     _print_json(payload)
     return rc
 
@@ -1549,6 +1797,10 @@ def cmd_skills_update(args: argparse.Namespace) -> int:
     if row is not None:
         payload["name"] = row.name
         payload["skill_key"] = row.skill_key or row.name
+    if rc == 0:
+        resolved_row, _final_slug, _target = _resolve_managed_skill(loader, resolved_slug)
+        if resolved_row is not None:
+            payload["resolved"] = _managed_skill_payload(resolved_row)
     _print_json(payload)
     return rc
 
@@ -1574,6 +1826,9 @@ def cmd_skills_search(args: argparse.Namespace) -> int:
 def cmd_skills_managed(args: argparse.Namespace) -> int:
     loader = _skills_loader_for_args(args)
     rows = [row for row in loader.discover(include_unavailable=True) if row.source == "marketplace"]
+    wanted_status = str(getattr(args, "status", "") or "").strip().lower()
+    if wanted_status:
+        rows = [row for row in rows if _managed_skill_status(row) == wanted_status]
     managed_root = _skills_managed_root(loader)
     _print_json(
         {
@@ -1582,26 +1837,8 @@ def cmd_skills_managed(args: argparse.Namespace) -> int:
             "managed_root": str(managed_root),
             "skills_root": str(managed_root / "skills"),
             "count": len(rows),
-            "skills": [
-                {
-                    "slug": _managed_skill_slug(row),
-                    "name": row.name,
-                    "skill_key": row.skill_key or row.name,
-                    "primary_env": row.primary_env,
-                    "description": row.description,
-                    "available": row.available,
-                    "enabled": row.enabled,
-                    "pinned": row.pinned,
-                    "status": _managed_skill_status(row),
-                    "version": row.version,
-                    "version_pin": row.version_pin,
-                    "missing": row.missing,
-                    "homepage": row.homepage,
-                    "fallback_hint": row.fallback_hint,
-                    "path": str(row.path),
-                }
-                for row in rows
-            ],
+            "status_filter": wanted_status,
+            "skills": [_managed_skill_payload(row) for row in rows],
         }
     )
     return 0
@@ -1749,6 +1986,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_tools_show.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
     p_tools_show.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
     p_tools_show.set_defaults(handler=cmd_tools_show)
+
+    p_tools_approvals = tools_sub.add_parser("approvals", help="List live pending/reviewed tool approvals from the gateway")
+    p_tools_approvals.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_tools_approvals.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_tools_approvals.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_tools_approvals.add_argument("--status", choices=["pending", "approved", "rejected", "all"], default="pending")
+    p_tools_approvals.add_argument("--session-id", default="", help="Optional session filter")
+    p_tools_approvals.add_argument("--channel", default="", help="Optional channel filter")
+    p_tools_approvals.add_argument("--include-grants", action="store_true", help="Include active approval grants in the response")
+    p_tools_approvals.add_argument("--limit", type=int, default=50)
+    p_tools_approvals.set_defaults(handler=cmd_tools_approvals)
+
+    p_tools_approve = tools_sub.add_parser("approve", help="Approve one pending tool request through the gateway")
+    p_tools_approve.add_argument("request_id")
+    p_tools_approve.add_argument("--actor", default="", help="Optional operator label recorded with the review")
+    p_tools_approve.add_argument("--note", default="", help="Optional review note")
+    p_tools_approve.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_tools_approve.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_tools_approve.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_tools_approve.set_defaults(handler=cmd_tools_approve)
+
+    p_tools_reject = tools_sub.add_parser("reject", help="Reject one pending tool request through the gateway")
+    p_tools_reject.add_argument("request_id")
+    p_tools_reject.add_argument("--actor", default="", help="Optional operator label recorded with the review")
+    p_tools_reject.add_argument("--note", default="", help="Optional review note")
+    p_tools_reject.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_tools_reject.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_tools_reject.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_tools_reject.set_defaults(handler=cmd_tools_reject)
+
+    p_tools_revoke_grant = tools_sub.add_parser("revoke-grant", help="Revoke active temporary approval grants through the gateway")
+    p_tools_revoke_grant.add_argument("--session-id", default="", help="Optional session filter")
+    p_tools_revoke_grant.add_argument("--channel", default="", help="Optional channel filter")
+    p_tools_revoke_grant.add_argument("--rule", default="", help="Optional approval specifier filter")
+    p_tools_revoke_grant.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
+    p_tools_revoke_grant.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
+    p_tools_revoke_grant.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
+    p_tools_revoke_grant.set_defaults(handler=cmd_tools_revoke_grant)
 
     p_provider = sub.add_parser("provider", help="Provider auth lifecycle commands")
     provider_sub = p_provider.add_subparsers(dest="provider_command", required=True)
@@ -2076,6 +2351,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills_check = skills_sub.add_parser("check", help="Emit aggregated deterministic skills diagnostics")
     p_skills_check.set_defaults(handler=cmd_skills_check)
 
+    p_skills_doctor = skills_sub.add_parser("doctor", help="Emit actionable remediation hints for skill availability issues")
+    p_skills_doctor.add_argument("--all", action="store_true", help="Include ready and disabled skills in the report")
+    p_skills_doctor.set_defaults(handler=cmd_skills_doctor)
+
     p_skills_enable = skills_sub.add_parser("enable", help="Enable one skill in the local state")
     p_skills_enable.add_argument("name")
     p_skills_enable.set_defaults(handler=cmd_skills_enable)
@@ -2115,6 +2394,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills_search.set_defaults(handler=cmd_skills_search)
 
     p_skills_managed = skills_sub.add_parser("managed", help="List managed marketplace skills discovered locally")
+    p_skills_managed.add_argument(
+        "--status",
+        choices=["ready", "missing_requirements", "policy_blocked", "disabled", "invalid_contract", "unavailable"],
+        default="",
+        help="Optional managed-skill status filter",
+    )
     p_skills_managed.set_defaults(handler=cmd_skills_managed)
 
     p_skills_sync = skills_sub.add_parser("sync", help="Update managed marketplace skills with ClawHub")

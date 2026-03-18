@@ -3216,6 +3216,110 @@ def test_gateway_tools_catalog_include_schema_matches_tool_count(tmp_path: Path)
         assert schema_names == sorted(schema_names)
 
 
+def test_gateway_tools_approvals_endpoints_return_requests_and_grants(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_requests["req-1"] = {
+        "request_id": "req-1",
+        "tool": "browser",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "matched_approval_specifiers": ["browser:evaluate"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"action":"evaluate"}',
+        "notified_count": 1,
+    }
+    registry._approval_request_order.append("req-1")
+    registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+    with TestClient(app) as client:
+        v1_response = client.get("/v1/tools/approvals?session_id=telegram:1&channel=telegram&include_grants=true")
+        api_response = client.get("/api/tools/approvals?session_id=telegram:1&channel=telegram&include_grants=true")
+
+    for response in (v1_response, api_response):
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["count"] == 1
+        assert payload["requests"][0]["request_id"] == "req-1"
+        assert payload["requests"][0]["expires_in_s"] > 0.0
+        assert payload["grant_count"] == 1
+        assert payload["grants"][0]["rule"] == "browser:evaluate"
+
+
+def test_gateway_tools_approval_review_endpoint_updates_request(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_requests["req-1"] = {
+        "request_id": "req-1",
+        "tool": "browser",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "matched_approval_specifiers": ["browser:evaluate"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"action":"evaluate"}',
+        "notified_count": 1,
+    }
+    registry._approval_request_order.append("req-1")
+
+    with TestClient(app) as client:
+        response = client.post("/v1/tools/approvals/req-1/approve", json={"actor": "cli", "note": "ok"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["status"] == "approved"
+    assert payload["summary"]["request_id"] == "req-1"
+    reviewed = registry._approval_requests["req-1"]
+    assert reviewed["status"] == "approved"
+    assert reviewed["actor"] == "cli"
+    grant_keys = list(registry._approval_grants.keys())
+    assert len(grant_keys) == 1
+    assert grant_keys[0].startswith("exact::req-1::telegram:1::telegram::browser:evaluate")
+
+
+def test_gateway_tools_grants_revoke_endpoint_removes_matching_grants(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+    registry._approval_grants["telegram:2::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/tools/grants/revoke",
+            json={"session_id": "telegram:1", "channel": "telegram", "rule": "browser:evaluate"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["summary"]["removed_count"] == 1
+    assert "telegram:1::telegram::browser:evaluate" not in registry._approval_grants
+    assert "telegram:2::telegram::browser:evaluate" in registry._approval_grants
+
+
 def test_gateway_chat_provider_error_returns_graceful_message(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),

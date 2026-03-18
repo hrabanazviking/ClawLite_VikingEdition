@@ -250,6 +250,7 @@ def _gateway_control_request(
     method: str,
     endpoint: str,
     json_body: dict[str, Any] | None = None,
+    query_params: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], httpx.Response | None, Any]:
     base_url = str(gateway_url or "").strip().rstrip("/")
     if not base_url:
@@ -272,9 +273,15 @@ def _gateway_control_request(
     try:
         with httpx.Client(timeout=max(0.1, float(timeout)), headers=headers) as client:
             if method.upper() == "GET":
-                response = client.get(f"{base_url}{endpoint}")
+                if query_params:
+                    response = client.get(f"{base_url}{endpoint}", params=query_params)
+                else:
+                    response = client.get(f"{base_url}{endpoint}")
             else:
-                response = client.post(f"{base_url}{endpoint}", json=json_body)
+                if query_params:
+                    response = client.post(f"{base_url}{endpoint}", json=json_body, params=query_params)
+                else:
+                    response = client.post(f"{base_url}{endpoint}", json=json_body)
     except Exception as exc:
         payload["error"] = str(exc)
         payload["error_type"] = exc.__class__.__name__
@@ -611,6 +618,127 @@ def self_evolution_trigger(
         payload["runner"] = body.get("runner", {})
         return payload
     detail = body.get("detail", body.get("error", "self_evolution_trigger_failed")) if isinstance(body, dict) else str(body or "self_evolution_trigger_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def fetch_gateway_tool_approvals(
+    config: AppConfig,
+    *,
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+    status: str = "pending",
+    session_id: str = "",
+    channel: str = "",
+    include_grants: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="GET",
+        endpoint="/v1/tools/approvals",
+        query_params={
+            "status": str(status or "pending").strip().lower() or "pending",
+            "session_id": str(session_id or "").strip(),
+            "channel": str(channel or "").strip().lower(),
+            "include_grants": "true" if include_grants else "false",
+            "limit": max(1, int(limit or 1)),
+        },
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict):
+        payload["ok"] = True
+        payload["status"] = str(body.get("status", "pending") or "pending")
+        payload["session_id"] = str(body.get("session_id", "") or "")
+        payload["channel"] = str(body.get("channel", "") or "")
+        payload["include_grants"] = bool(body.get("include_grants", False))
+        payload["count"] = int(body.get("count", 0) or 0)
+        payload["requests"] = list(body.get("requests", []) or [])
+        payload["grant_count"] = int(body.get("grant_count", 0) or 0)
+        payload["grants"] = list(body.get("grants", []) or [])
+        return payload
+    detail = body.get("detail", body.get("error", "tool_approvals_fetch_failed")) if isinstance(body, dict) else str(body or "tool_approvals_fetch_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def review_gateway_tool_approval(
+    config: AppConfig,
+    *,
+    request_id: str,
+    decision: str,
+    actor: str = "",
+    note: str = "",
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    normalized_decision = str(decision or "").strip().lower()
+    if normalized_decision not in {"approved", "rejected"}:
+        return {"ok": False, "error": "invalid_review_decision"}
+
+    endpoint = "/v1/tools/approvals/{request_id}/{action}".format(
+        request_id=str(request_id or "").strip(),
+        action="approve" if normalized_decision == "approved" else "reject",
+    )
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint=endpoint,
+        json_body={
+            "actor": str(actor or "").strip(),
+            "note": str(note or "").strip(),
+        },
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = dict(body.get("summary", {})) if isinstance(body.get("summary"), dict) else {}
+        return payload
+    detail = body.get("detail", body.get("error", "tool_approval_review_failed")) if isinstance(body, dict) else str(body or "tool_approval_review_failed")
+    payload["error"] = str(detail)
+    return payload
+
+
+def revoke_gateway_tool_grants(
+    config: AppConfig,
+    *,
+    session_id: str = "",
+    channel: str = "",
+    rule: str = "",
+    gateway_url: str = "",
+    token: str = "",
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    payload, response, body = _gateway_control_request(
+        config,
+        gateway_url=gateway_url,
+        token=token,
+        timeout=timeout,
+        method="POST",
+        endpoint="/v1/tools/grants/revoke",
+        json_body={
+            "session_id": str(session_id or "").strip(),
+            "channel": str(channel or "").strip().lower(),
+            "rule": str(rule or "").strip().lower(),
+        },
+    )
+    if response is None:
+        return payload
+    if response.is_success and isinstance(body, dict) and bool(body.get("ok", False)):
+        payload["ok"] = True
+        payload["summary"] = dict(body.get("summary", {})) if isinstance(body.get("summary"), dict) else {}
+        return payload
+    detail = body.get("detail", body.get("error", "tool_grant_revoke_failed")) if isinstance(body, dict) else str(body or "tool_grant_revoke_failed")
     payload["error"] = str(detail)
     return payload
 

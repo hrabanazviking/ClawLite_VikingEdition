@@ -1051,6 +1051,89 @@ Behavior:
 - `dry_run=true` performs matching/scan without enqueuing outbound events.
 - Returns additive summary for auditability (`scanned`, `matched`, `replayed`, `kept`, `dropped`, `replayed_by_channel`).
 
+## `GET /v1/tools/catalog`
+
+Returns the live gateway tool catalog, grouped by runtime area and compatibility aliases.
+
+Query params:
+- `include_schema=true` to include the JSON-schema rows for each tool.
+
+Alias compatível: `GET /api/tools/catalog`.
+
+## `GET /v1/tools/approvals`
+
+Returns the live queue of approval-gated tool requests tracked by the running gateway.
+
+Query params:
+- `status`: `pending`, `approved`, `rejected`, or `all`
+- `session_id`: optional session filter
+- `channel`: optional channel filter
+- `include_grants=true`: also returns active temporary approval grants
+- `limit`: max rows to return
+
+Response baseline:
+- `count`: number of returned approval requests
+- `requests`: request snapshots with `request_id`, `tool`, `session_id`, `channel`, `matched_approval_specifiers`, `status`, and remaining TTL fields such as `expires_in_s`
+- `grant_count`: number of returned active grants
+- `grants`: active grants with `session_id`, `channel`, `rule`, `scope`, optional `request_id`, and `expires_in_s`
+
+Alias compatível: `GET /api/tools/approvals`.
+
+## `POST /v1/tools/approvals/{request_id}/approve`
+
+Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set.
+
+Request body:
+
+```json
+{
+  "actor": "ops",
+  "note": "approved after review"
+}
+```
+
+Alias compatível: `POST /api/tools/approvals/{request_id}/approve`.
+
+## `POST /v1/tools/approvals/{request_id}/reject`
+
+Rejects one pending tool request without creating a grant.
+
+Request body:
+
+```json
+{
+  "actor": "ops",
+  "note": "use a safer command"
+}
+```
+
+Alias compatível: `POST /api/tools/approvals/{request_id}/reject`.
+
+## `POST /v1/tools/grants/revoke`
+
+Revokes one or more active temporary tool-approval grants before their TTL expires.
+
+Request body:
+
+```json
+{
+  "session_id": "telegram:123",
+  "channel": "telegram",
+  "rule": "browser:evaluate"
+}
+```
+
+Any field may be omitted to widen the match:
+- omit `rule` to revoke all grants for the session/channel
+- omit `channel` to revoke all grants for the session
+- omit `session_id` to revoke every grant matching the remaining filters
+
+Response baseline:
+- `summary.removed_count`: number of grants removed
+- `summary.removed`: rows with `session_id`, `channel`, `rule`, `scope`, and optional `request_id`
+
+Alias compatível: `POST /api/tools/grants/revoke`.
+
 ## `POST /v1/chat`
 
 Request:

@@ -304,6 +304,39 @@ class ToolRegistry:
             ]
         )
 
+    @staticmethod
+    def _approval_exact_grant_key(*, request_id: str, session_id: str, channel: str, rule: str) -> str:
+        return "::".join(
+            [
+                "exact",
+                str(request_id or "").strip(),
+                str(session_id or "").strip(),
+                str(channel or "").strip().lower(),
+                str(rule or "").strip().lower(),
+            ]
+        )
+
+    @staticmethod
+    def _parse_approval_grant_key(key: str) -> dict[str, str]:
+        raw = str(key or "").strip()
+        parts = raw.split("::")
+        if len(parts) >= 5 and str(parts[0] or "").strip().lower() == "exact":
+            return {
+                "scope": "exact",
+                "request_id": str(parts[1] or "").strip(),
+                "session_id": str(parts[2] or "").strip(),
+                "channel": str(parts[3] or "").strip().lower(),
+                "rule": str(parts[4] or "").strip().lower(),
+            }
+        session_part, channel_part, rule_part = (parts + ["", "", ""])[:3]
+        return {
+            "scope": "legacy",
+            "request_id": "",
+            "session_id": str(session_part or "").strip(),
+            "channel": str(channel_part or "").strip().lower(),
+            "rule": str(rule_part or "").strip().lower(),
+        }
+
     def _prune_approval_state(self) -> None:
         now = time.monotonic()
         expired_grants = [key for key, expires_at in self._approval_grants.items() if expires_at <= now]
@@ -414,12 +447,28 @@ class ToolRegistry:
         session_id: str,
         channel: str,
         matched_rules: list[str],
+        request_id: str = "",
     ) -> bool:
         self._prune_approval_state()
         normalized_channel = str(channel or "").strip().lower()
         if not normalized_channel or not matched_rules:
             return False
         now = time.monotonic()
+        normalized_request_id = str(request_id or "").strip()
+        if normalized_request_id:
+            exact_matches = True
+            for rule in matched_rules:
+                exact_key = self._approval_exact_grant_key(
+                    request_id=normalized_request_id,
+                    session_id=session_id,
+                    channel=normalized_channel,
+                    rule=rule,
+                )
+                if float(self._approval_grants.get(exact_key, 0.0) or 0.0) <= now:
+                    exact_matches = False
+                    break
+            if exact_matches:
+                return True
         for rule in matched_rules:
             key = self._approval_grant_key(session_id=session_id, channel=normalized_channel, rule=rule)
             if float(self._approval_grants.get(key, 0.0) or 0.0) <= now:
@@ -487,13 +536,15 @@ class ToolRegistry:
         if normalized_decision == "approved":
             expires_at = time.monotonic() + self._approval_ttl_s
             for rule in payload.get("matched_approval_specifiers", []) or []:
-                key = self._approval_grant_key(
+                key = self._approval_exact_grant_key(
+                    request_id=normalized_request_id,
                     session_id=str(payload.get("session_id", "") or "").strip(),
                     channel=str(payload.get("channel", "") or "").strip().lower(),
                     rule=str(rule or "").strip().lower(),
                 )
                 self._approval_grants[key] = expires_at
             payload["grant_expires_at_monotonic"] = expires_at
+            payload["grant_scope"] = "exact"
 
         return {
             "ok": True,
@@ -505,6 +556,131 @@ class ToolRegistry:
             "session_id": str(payload.get("session_id", "") or "").strip(),
             "matched_approval_specifiers": list(payload.get("matched_approval_specifiers", []) or []),
             "grant_ttl_s": self._approval_ttl_s if normalized_decision == "approved" else 0.0,
+        }
+
+    def approval_requests_snapshot(
+        self,
+        *,
+        status: str = "pending",
+        session_id: str = "",
+        channel: str = "",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        self._prune_approval_state()
+        normalized_status = str(status or "pending").strip().lower() or "pending"
+        normalized_session = str(session_id or "").strip()
+        normalized_channel = str(channel or "").strip().lower()
+        max_rows = max(1, int(limit or 1))
+        now = time.monotonic()
+        rows: list[dict[str, Any]] = []
+
+        for request_id in reversed(self._approval_request_order):
+            payload = self._approval_requests.get(request_id)
+            if not isinstance(payload, dict):
+                continue
+            payload_status = str(payload.get("status", "pending") or "pending").strip().lower()
+            if normalized_status not in {"", "all"} and payload_status != normalized_status:
+                continue
+            if normalized_session and str(payload.get("session_id", "") or "").strip() != normalized_session:
+                continue
+            if normalized_channel and str(payload.get("channel", "") or "").strip().lower() != normalized_channel:
+                continue
+
+            created_at = float(payload.get("created_at_monotonic", 0.0) or 0.0)
+            reviewed_at = float(payload.get("reviewed_at_monotonic", 0.0) or 0.0)
+            expires_at = float(payload.get("expires_at_monotonic", 0.0) or 0.0)
+            grant_expires_at = float(payload.get("grant_expires_at_monotonic", 0.0) or 0.0)
+            row = dict(payload)
+            row["request_age_s"] = max(0.0, now - created_at) if created_at > 0 else 0.0
+            row["expires_in_s"] = max(0.0, expires_at - now) if expires_at > 0 else 0.0
+            if reviewed_at > 0:
+                row["review_age_s"] = max(0.0, now - reviewed_at)
+            if grant_expires_at > 0:
+                row["grant_expires_in_s"] = max(0.0, grant_expires_at - now)
+            rows.append(row)
+            if len(rows) >= max_rows:
+                break
+        return rows
+
+    def approval_grants_snapshot(
+        self,
+        *,
+        session_id: str = "",
+        channel: str = "",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        self._prune_approval_state()
+        normalized_session = str(session_id or "").strip()
+        normalized_channel = str(channel or "").strip().lower()
+        max_rows = max(1, int(limit or 1))
+        now = time.monotonic()
+        rows: list[dict[str, Any]] = []
+
+        for key, expires_at in sorted(self._approval_grants.items(), key=lambda item: float(item[1])):
+            parsed = self._parse_approval_grant_key(key)
+            session_part = parsed["session_id"]
+            channel_part = parsed["channel"]
+            rule_part = parsed["rule"]
+            if normalized_session and session_part != normalized_session:
+                continue
+            if normalized_channel and channel_part != normalized_channel:
+                continue
+            rows.append(
+                {
+                    "session_id": session_part,
+                    "channel": channel_part,
+                    "rule": rule_part,
+                    "scope": parsed["scope"],
+                    "request_id": parsed["request_id"],
+                    "expires_in_s": max(0.0, float(expires_at or 0.0) - now),
+                }
+            )
+            if len(rows) >= max_rows:
+                break
+        return rows
+
+    def revoke_approval_grants(
+        self,
+        *,
+        session_id: str = "",
+        channel: str = "",
+        rule: str = "",
+    ) -> dict[str, Any]:
+        self._prune_approval_state()
+        normalized_session = str(session_id or "").strip()
+        normalized_channel = str(channel or "").strip().lower()
+        normalized_rule = str(rule or "").strip().lower()
+        removed: list[dict[str, Any]] = []
+
+        for key in list(self._approval_grants.keys()):
+            parsed = self._parse_approval_grant_key(key)
+            session_part = parsed["session_id"]
+            channel_part = parsed["channel"]
+            rule_part = parsed["rule"]
+            if normalized_session and session_part != normalized_session:
+                continue
+            if normalized_channel and channel_part != normalized_channel:
+                continue
+            if normalized_rule and rule_part != normalized_rule:
+                continue
+            self._approval_grants.pop(key, None)
+            removed.append(
+                {
+                    "session_id": session_part,
+                    "channel": channel_part,
+                    "rule": rule_part,
+                    "scope": parsed["scope"],
+                    "request_id": parsed["request_id"],
+                }
+            )
+
+        return {
+            "ok": True,
+            "removed": removed,
+            "removed_count": len(removed),
+            "session_id": normalized_session,
+            "channel": normalized_channel,
+            "rule": normalized_rule,
         }
 
     def safety_decision(
@@ -527,12 +703,22 @@ class ToolRegistry:
             arguments=safe_arguments,
             rules=approval_specifiers,
         )
+        approval_request_id = ""
+        if matched_approval_specifiers:
+            approval_request_id = self._approval_request_id(
+                tool_name=name,
+                arguments=safe_arguments,
+                session_id=session_id,
+                channel=resolved_channel,
+                matched_rules=matched_approval_specifiers,
+            )
         approval_granted = False
         if matched_approval_specifiers:
             approval_granted = self._has_approval_grant(
                 session_id=session_id,
                 channel=resolved_channel,
                 matched_rules=matched_approval_specifiers,
+                request_id=approval_request_id,
             )
         matched_tool = str(name or "").strip().lower() in risky_tools
         is_risky = matched_tool or bool(matched_specifiers)
@@ -583,6 +769,7 @@ class ToolRegistry:
             "risky": is_risky,
             "approval_required": approval_required,
             "approval_granted": approval_granted,
+            "approval_request_id": approval_request_id,
             "blocked": blocked,
             "decision": decision,
             "block_reason": block_reason,
