@@ -342,7 +342,7 @@ clawlite provider login openai-codex
 clawlite provider status codex
 ```
 
-If the wizard or `provider status` reports an expired local Codex token, refresh it with `clawlite provider login openai-codex` and rerun the probe.
+If the wizard or `provider status` reports an expired local Codex token, refresh it with `clawlite provider login openai-codex` and rerun the probe. File-backed Codex auth now follows the current `~/.codex/auth.json` session instead of a stale snapshot previously saved in `~/.clawlite/config.json`.
 
 **Azure OpenAI**
 

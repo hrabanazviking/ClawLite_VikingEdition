@@ -17,6 +17,7 @@ from clawlite.config.schema import AppConfig
 from clawlite.providers.catalog import ONBOARDING_PROVIDER_ORDER, default_provider_model, provider_profile
 from clawlite.providers.codex import CODEX_DEFAULT_BASE_URL
 from clawlite.providers.codex_auth import load_codex_auth_file
+from clawlite.providers.codex_auth import resolve_codex_auth_snapshot
 from clawlite.providers.discovery import normalize_local_runtime_base_url, probe_local_provider_runtime
 from clawlite.providers.hints import provider_probe_hints, provider_transport_name
 from clawlite.providers.model_probe import evaluate_remote_model_check, model_check_hints
@@ -206,19 +207,18 @@ def resolve_codex_auth(config: AppConfig) -> dict[str, Any]:
             env_account = value
             break
 
-    file_token = str(file_auth.get("access_token", "") or "").strip()
-    file_account = str(file_auth.get("account_id", "") or "").strip()
-
-    token = cfg_token or env_token or file_token
-    account_id = cfg_account or env_account or file_account
-    if cfg_token:
-        source = cfg_source or "config"
-    elif env_token_name:
-        source = f"env:{env_token_name}"
-    elif file_token:
-        source = str(file_auth.get("source", "") or "")
-    else:
-        source = ""
+    resolved = resolve_codex_auth_snapshot(
+        config_token=cfg_token,
+        config_account_id=cfg_account,
+        config_source=cfg_source,
+        env_token=env_token,
+        env_token_name=env_token_name,
+        env_account_id=env_account,
+        file_auth=file_auth,
+    )
+    token = str(resolved.get("access_token", "") or "").strip()
+    account_id = str(resolved.get("account_id", "") or "").strip()
+    source = str(resolved.get("source", "") or "").strip()
 
     return {
         "configured": bool(token),

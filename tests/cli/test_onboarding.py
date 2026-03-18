@@ -10,6 +10,7 @@ from clawlite.cli.onboarding import build_dashboard_handoff
 from clawlite.cli.onboarding import ensure_gateway_token
 from clawlite.cli.onboarding import probe_provider
 from clawlite.cli.onboarding import probe_telegram
+from clawlite.cli.onboarding import resolve_codex_auth
 from clawlite.cli.onboarding import run_onboarding_wizard
 from clawlite.config.schema import AppConfig
 
@@ -83,6 +84,44 @@ def test_apply_provider_selection_openai_codex_updates_auth_and_model() -> None:
     assert cfg.auth.providers.openai_codex.source == "oauth_cli_kit:get_token"
     assert cfg.provider.model == "openai-codex/gpt-5.3-codex"
     assert cfg.agents.defaults.model == "openai-codex/gpt-5.3-codex"
+
+
+def test_resolve_codex_auth_prefers_current_auth_file_over_stale_file_snapshot(tmp_path: Path, monkeypatch) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        '{'
+        '"auth_mode":"chatgpt",'
+        '"tokens":{"access_token":"fresh-file-token","account_id":"org-fresh"}'
+        '}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(auth_path))
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+
+    cfg = AppConfig.from_dict(
+        {
+            "auth": {
+                "providers": {
+                    "openai_codex": {
+                        "access_token": "stale-config-token",
+                        "account_id": "org-stale",
+                        "source": f"file:{auth_path}",
+                    }
+                }
+            }
+        }
+    )
+
+    resolved = resolve_codex_auth(cfg)
+
+    assert resolved["configured"] is True
+    assert resolved["access_token"] == "fresh-file-token"
+    assert resolved["account_id"] == "org-fresh"
+    assert resolved["source"] == f"file:{auth_path}"
 
 
 def test_ensure_gateway_token_generates_when_missing() -> None:

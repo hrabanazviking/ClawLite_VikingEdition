@@ -3677,6 +3677,59 @@ def test_cli_provider_status_openai_codex_uses_auth_file_when_config_and_env_mis
     assert payload["account_id_masked"]
 
 
+def test_cli_provider_status_openai_codex_prefers_current_file_when_config_snapshot_is_stale(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "login",
+                "tokens": {
+                    "access_token": "codex-file-token-fresh",
+                    "account_id": "org-file-fresh",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(auth_path))
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "provider": {"model": "openai-codex/gpt-5.3-codex"},
+                "auth": {
+                    "providers": {
+                        "openai_codex": {
+                            "access_token": "stale-config-token",
+                            "account_id": "org-stale",
+                            "source": f"file:{auth_path}",
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc_status = main(["--config", str(config_path), "provider", "status", "openai-codex"])
+
+    assert rc_status == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is True
+    assert payload["source"] == f"file:{auth_path}"
+    assert payload["account_id_masked"].endswith("resh")
+
+
 def test_cli_validate_provider_reports_local_runtime_failure(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

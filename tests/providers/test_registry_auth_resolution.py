@@ -293,6 +293,47 @@ def test_build_provider_openai_codex_reads_auth_file_when_env_missing(tmp_path, 
     assert provider.account_id == "org-file"
 
 
+def test_build_provider_openai_codex_prefers_current_auth_file_when_config_source_is_file(tmp_path, monkeypatch) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "login",
+                "tokens": {
+                    "access_token": "codex-file-token-new",
+                    "account_id": "org-file-new",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWLITE_CODEX_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+    monkeypatch.setenv("CLAWLITE_CODEX_AUTH_PATH", str(auth_path))
+
+    provider = build_provider(
+        {
+            "model": "openai-codex/codex-5.3",
+            "auth": {
+                "providers": {
+                    "openai_codex": {
+                        "access_token": "stale-config-token",
+                        "account_id": "org-stale",
+                        "source": f"file:{auth_path}",
+                    }
+                }
+            },
+        }
+    )
+
+    assert isinstance(provider, CodexProvider)
+    assert provider.access_token == "codex-file-token-new"
+    assert provider.account_id == "org-file-new"
+
+
 def test_build_provider_gemini_oauth_reads_auth_file_when_env_missing(tmp_path, monkeypatch) -> None:
     auth_path = tmp_path / "oauth_creds.json"
     auth_path.write_text(

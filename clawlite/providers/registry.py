@@ -7,6 +7,7 @@ from typing import Any
 from clawlite.providers.base import LLMProvider
 from clawlite.providers.codex import CODEX_DEFAULT_BASE_URL, CodexProvider
 from clawlite.providers.codex_auth import load_codex_auth_file
+from clawlite.providers.codex_auth import resolve_codex_auth_snapshot
 from clawlite.providers.custom import CustomProvider
 from clawlite.providers.discovery import detect_local_runtime, normalize_local_runtime_base_url
 from clawlite.providers.failover import FailoverCandidate, FailoverProvider
@@ -605,22 +606,42 @@ def _resolve_codex_oauth(config: dict[str, Any]) -> tuple[str, str]:
             codex_payload = dict(candidate)
             break
 
-    token = (
-        _cfg_value(codex_payload, "access_token", "accessToken")
-        or _cfg_value(codex_payload, "token", "token")
-        or os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
-        or os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
-        or os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
-        or str(auth_file.get("access_token", "") or "").strip()
+    resolved = resolve_codex_auth_snapshot(
+        config_token=(
+            _cfg_value(codex_payload, "access_token", "accessToken")
+            or _cfg_value(codex_payload, "token", "token")
+        ),
+        config_account_id=(
+            _cfg_value(codex_payload, "account_id", "accountId")
+            or _cfg_value(codex_payload, "org_id", "orgId")
+            or _cfg_value(codex_payload, "organization", "organization")
+        ),
+        config_source=(
+            _cfg_value(codex_payload, "source", "source")
+            or _cfg_value(codex_payload, "auth_source", "authSource")
+        ),
+        env_token=(
+            os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
+            or os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
+            or os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
+        ),
+        env_token_name=(
+            "CLAWLITE_CODEX_ACCESS_TOKEN"
+            if os.getenv("CLAWLITE_CODEX_ACCESS_TOKEN", "").strip()
+            else "OPENAI_CODEX_ACCESS_TOKEN"
+            if os.getenv("OPENAI_CODEX_ACCESS_TOKEN", "").strip()
+            else "OPENAI_ACCESS_TOKEN"
+            if os.getenv("OPENAI_ACCESS_TOKEN", "").strip()
+            else ""
+        ),
+        env_account_id=(
+            os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip()
+            or os.getenv("OPENAI_ORG_ID", "").strip()
+        ),
+        file_auth=auth_file,
     )
-    account_id = (
-        _cfg_value(codex_payload, "account_id", "accountId")
-        or _cfg_value(codex_payload, "org_id", "orgId")
-        or _cfg_value(codex_payload, "organization", "organization")
-        or os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip()
-        or os.getenv("OPENAI_ORG_ID", "").strip()
-        or str(auth_file.get("account_id", "") or "").strip()
-    )
+    token = str(resolved.get("access_token", "") or "").strip()
+    account_id = str(resolved.get("account_id", "") or "").strip()
     return token, account_id
 
 

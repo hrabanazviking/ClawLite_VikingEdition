@@ -378,6 +378,8 @@ OpenAI Codex auth is resolved in this order:
 4. `OPENAI_ACCESS_TOKEN`
 5. auth file at `~/.codex/auth.json` or `CLAWLITE_CODEX_AUTH_PATH`
 
+If the config entry was originally imported from `file:...`, ClawLite now re-reads the current auth file instead of trusting the stale snapshot saved in `config.json`. That keeps the wizard, `provider status`, and runtime provider aligned with the latest local Codex session.
+
 Supported config aliases:
 
 - provider keys: `openai_codex`, `openai-codex`, `codex`, `openaiCodex`
