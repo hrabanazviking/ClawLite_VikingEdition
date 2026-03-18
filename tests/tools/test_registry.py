@@ -495,6 +495,12 @@ def test_tool_registry_exec_can_require_approval_for_specific_env_key() -> None:
         pending = reg.consume_pending_approval_requests(session_id="telegram:1", channel="telegram")
         assert len(pending) == 1
         assert pending[0]["matched_approval_specifiers"] == ["exec:env-key:git-ssh-command"]
+        assert pending[0]["approval_context"] == {
+            "tool": "exec",
+            "command_text": "git status",
+            "command_binary": "git",
+            "env_keys": ["git-ssh-command"],
+        }
 
     asyncio.run(_scenario())
 
@@ -627,6 +633,12 @@ def test_tool_registry_derives_host_specifiers_for_browser_navigate() -> None:
     ]
     assert payload["matched_approval_specifiers"] == ["browser:navigate:host:example-com"]
     assert payload["approval_required"] is True
+    assert payload["approval_context"] == {
+        "tool": "browser",
+        "action": "navigate",
+        "url": "https://example.com/account",
+        "host": "example-com",
+    }
 
 
 def test_tool_registry_safety_decision_reports_approval_requirement() -> None:

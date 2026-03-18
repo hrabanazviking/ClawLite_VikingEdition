@@ -1063,6 +1063,7 @@ Alias compatível: `GET /api/tools/catalog`.
 ## `GET /v1/tools/approvals`
 
 Returns the live queue of approval-gated tool requests tracked by the running gateway.
+Each request includes the existing raw `arguments_preview` plus structured `approval_context` for operator UX, such as exec command metadata, env override keys, cwd, or browser/web target hosts.
 
 Query params:
 - `status`: `pending`, `approved`, `rejected`, or `all`

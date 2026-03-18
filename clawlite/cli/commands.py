@@ -1859,6 +1859,20 @@ def cmd_skills_search(args: argparse.Namespace) -> int:
     payload["action"] = "search"
     payload["query"] = args.query
     payload["limit"] = max(1, int(args.limit or 5))
+    all_rows = _managed_skill_rows(loader)
+    query = str(args.query or "").strip().lower()
+    local_matches = [
+        _managed_skill_payload(row)
+        for row in all_rows
+        if not query
+        or query in _managed_skill_slug(row).lower()
+        or query in str(getattr(row, "name", "") or "").strip().lower()
+        or query in str(getattr(row, "skill_key", "") or "").strip().lower()
+        or query in str(getattr(row, "description", "") or "").strip().lower()
+    ]
+    payload["managed_count"] = len(all_rows)
+    payload["status_counts"] = _managed_skill_status_counts(all_rows)
+    payload["local_matches"] = local_matches
     _print_json(payload)
     return rc
 

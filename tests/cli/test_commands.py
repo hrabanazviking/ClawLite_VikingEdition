@@ -388,6 +388,12 @@ def test_cli_skills_install_update_and_sync_use_marketplace_root(tmp_path: Path,
 def test_cli_skills_search_uses_clawhub(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     calls: list[list[str]] = []
+    managed_skill = tmp_path / ".clawlite" / "marketplace" / "skills" / "discord-helper"
+    managed_skill.mkdir(parents=True, exist_ok=True)
+    (managed_skill / "SKILL.md").write_text(
+        "---\nname: Discord Helper\ndescription: managed discord skill\ncommand: echo hi\n---\nbody\n",
+        encoding="utf-8",
+    )
 
     def _fake_which(name: str) -> str | None:
         return "/usr/bin/npx" if name == "npx" else None
@@ -408,6 +414,9 @@ def test_cli_skills_search_uses_clawhub(tmp_path: Path, capsys, monkeypatch) -> 
     assert payload["action"] == "search"
     assert payload["query"] == "discord"
     assert payload["limit"] == 3
+    assert payload["managed_count"] == 1
+    assert payload["status_counts"] == {"ready": 1}
+    assert payload["local_matches"][0]["slug"] == "discord-helper"
     assert calls[0][3:7] == ["search", "discord", "--limit", "3"]
 
 
@@ -578,6 +587,7 @@ def test_cli_tools_safety_preview_reports_approval_mode(tmp_path: Path, capsys) 
     assert payload["approval_required"] is True
     assert payload["matched_approval_specifiers"] == ["browser:evaluate"]
     assert len(str(payload["approval_request_id"])) == 16
+    assert payload["approval_context"] == {"tool": "browser", "action": "evaluate"}
 
 
 def test_cli_tools_safety_preview_rejects_invalid_json(tmp_path: Path, capsys) -> None:

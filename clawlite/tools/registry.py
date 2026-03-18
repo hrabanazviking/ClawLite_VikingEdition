@@ -436,6 +436,49 @@ class ToolRegistry:
             return preview
         return preview[: max_chars - 3] + "..."
 
+    @classmethod
+    def _approval_context(cls, *, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        normalized_tool = str(tool_name or "").strip().lower()
+        if not normalized_tool:
+            return {}
+
+        context: dict[str, Any] = {}
+        if normalized_tool == "exec":
+            command_text = str(arguments.get("command", "") or "").strip()
+            binary = cls._command_specifier(arguments.get("command"))
+            env_keys = cls._exec_env_key_fragments(arguments.get("env"))
+            cwd = str(arguments.get("cwd", arguments.get("workdir")) or "").strip()
+            context = {
+                "tool": normalized_tool,
+                "command_text": command_text,
+                "command_binary": binary,
+                "shell_wrapper": cls._exec_needs_shell_wrapper(arguments.get("command")),
+                "env_keys": env_keys,
+                "cwd": cwd,
+            }
+        elif normalized_tool == "web_fetch":
+            context = {
+                "tool": normalized_tool,
+                "url": str(arguments.get("url", "") or "").strip(),
+                "host": cls._url_host_fragment(arguments.get("url")),
+                "method": str(arguments.get("method", "") or "").strip().upper(),
+            }
+        elif normalized_tool == "browser":
+            context = {
+                "tool": normalized_tool,
+                "action": str(arguments.get("action", "") or "").strip().lower(),
+                "url": str(arguments.get("url", "") or "").strip(),
+                "host": cls._url_host_fragment(arguments.get("url")),
+            }
+        elif normalized_tool == "run_skill":
+            context = {
+                "tool": normalized_tool,
+                "name": str(arguments.get("name", "") or "").strip(),
+                "script": str(arguments.get("script", "") or "").strip(),
+            }
+
+        return {key: value for key, value in context.items() if value not in ("", [], {}, None, False)}
+
     def _approval_request_id(
         self,
         *,
@@ -498,6 +541,7 @@ class ToolRegistry:
             "matched_approval_specifiers": matched_rules,
             "approval_reason": str(safety.get("approval_reason", "") or "").strip(),
             "arguments_preview": self._arguments_preview(arguments),
+            "approval_context": self._approval_context(tool_name=tool_name, arguments=arguments),
             "status": "pending",
             "created_at_monotonic": time.monotonic(),
             "expires_at_monotonic": time.monotonic() + self._approval_ttl_s,
@@ -626,6 +670,7 @@ class ToolRegistry:
             "channel": str(payload.get("channel", "") or "").strip(),
             "session_id": str(payload.get("session_id", "") or "").strip(),
             "matched_approval_specifiers": list(payload.get("matched_approval_specifiers", []) or []),
+            "approval_context": dict(payload.get("approval_context", {}) or {}),
             "grant_ttl_s": self._approval_ttl_s if normalized_decision == "approved" else 0.0,
         }
 
@@ -845,6 +890,7 @@ class ToolRegistry:
             "decision": decision,
             "block_reason": block_reason,
             "approval_reason": approval_reason,
+            "approval_context": self._approval_context(tool_name=name, arguments=safe_arguments),
             "matched_tool": matched_tool,
             "matched_specifiers": matched_specifiers,
             "matched_approval_specifiers": matched_approval_specifiers,

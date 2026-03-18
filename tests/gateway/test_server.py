@@ -3235,6 +3235,7 @@ def test_gateway_tools_approvals_endpoints_return_requests_and_grants(tmp_path: 
         "created_at_monotonic": time.monotonic() - 1.0,
         "expires_at_monotonic": time.monotonic() + 300.0,
         "arguments_preview": '{"action":"evaluate"}',
+        "approval_context": {"tool": "browser", "action": "evaluate"},
         "notified_count": 1,
     }
     registry._approval_request_order.append("req-1")
@@ -3274,6 +3275,7 @@ def test_gateway_tools_approval_review_endpoint_updates_request(tmp_path: Path) 
         "created_at_monotonic": time.monotonic() - 1.0,
         "expires_at_monotonic": time.monotonic() + 300.0,
         "arguments_preview": '{"action":"evaluate"}',
+        "approval_context": {"tool": "browser", "action": "evaluate"},
         "notified_count": 1,
     }
     registry._approval_request_order.append("req-1")
@@ -3286,6 +3288,7 @@ def test_gateway_tools_approval_review_endpoint_updates_request(tmp_path: Path) 
     assert payload["ok"] is True
     assert payload["summary"]["status"] == "approved"
     assert payload["summary"]["request_id"] == "req-1"
+    assert payload["summary"]["approval_context"] == {"tool": "browser", "action": "evaluate"}
     reviewed = registry._approval_requests["req-1"]
     assert reviewed["status"] == "approved"
     assert reviewed["actor"] == "cli"
