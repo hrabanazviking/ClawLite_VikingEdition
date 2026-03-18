@@ -7,6 +7,7 @@ import re
 import shlex
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from clawlite.config.schema import ToolSafetyPolicyConfig
 from clawlite.runtime.telemetry import get_tracer, set_span_attributes
@@ -221,6 +222,20 @@ class ToolRegistry:
         return cls._normalize_specifier_fragment(parts[-1] if parts else raw_binary)
 
     @classmethod
+    def _url_host_fragment(cls, raw_url: Any) -> str:
+        value = str(raw_url or "").strip()
+        if not value:
+            return ""
+        try:
+            parsed = urlsplit(value)
+        except Exception:
+            return ""
+        hostname = str(parsed.hostname or "").strip().lower()
+        if not hostname:
+            return ""
+        return cls._normalize_specifier_fragment(hostname)
+
+    @classmethod
     def _derive_tool_specifiers(cls, *, tool_name: str, arguments: dict[str, Any]) -> list[str]:
         normalized_tool = str(tool_name or "").strip().lower()
         if not normalized_tool:
@@ -228,15 +243,18 @@ class ToolRegistry:
         out: list[str] = [normalized_tool]
         seen = set(out)
 
+        def _add_direct(candidate: str) -> None:
+            normalized = str(candidate or "").strip().lower()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            out.append(normalized)
+
         def _add(fragment: Any) -> None:
             normalized = cls._normalize_specifier_fragment(fragment)
             if not normalized:
                 return
-            candidate = f"{normalized_tool}:{normalized}"
-            if candidate in seen:
-                return
-            seen.add(candidate)
-            out.append(candidate)
+            _add_direct(f"{normalized_tool}:{normalized}")
 
         for key in ("action", "operation", "method", "mode"):
             _add(arguments.get(key))
@@ -245,6 +263,20 @@ class ToolRegistry:
             _add(arguments.get("name"))
         elif normalized_tool == "exec":
             _add(cls._command_specifier(arguments.get("command")))
+        elif normalized_tool == "web_fetch":
+            host_fragment = cls._url_host_fragment(arguments.get("url"))
+            if host_fragment:
+                _add_direct(f"{normalized_tool}:host")
+                _add_direct(f"{normalized_tool}:host:{host_fragment}")
+        elif normalized_tool == "browser":
+            host_fragment = cls._url_host_fragment(arguments.get("url"))
+            action_fragment = cls._normalize_specifier_fragment(arguments.get("action"))
+            if host_fragment:
+                _add_direct(f"{normalized_tool}:host")
+                _add_direct(f"{normalized_tool}:host:{host_fragment}")
+                if action_fragment:
+                    _add_direct(f"{normalized_tool}:{action_fragment}:host")
+                    _add_direct(f"{normalized_tool}:{action_fragment}:host:{host_fragment}")
 
         return out
 

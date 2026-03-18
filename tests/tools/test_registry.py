@@ -491,6 +491,64 @@ def test_tool_registry_safety_decision_reports_matched_specifiers() -> None:
     assert payload["block_reason"] == "channel:telegram"
 
 
+def test_tool_registry_derives_host_specifiers_for_web_fetch() -> None:
+    reg = ToolRegistry(
+        safety=ToolSafetyPolicyConfig(
+            enabled=True,
+            risky_tools=[],
+            risky_specifiers=["web_fetch:host:example-com"],
+            blocked_channels=["telegram"],
+            allowed_channels=[],
+        )
+    )
+
+    payload = reg.safety_decision(
+        "web_fetch",
+        {"url": "https://example.com/docs"},
+        session_id="telegram:1",
+        channel="telegram",
+    )
+
+    assert payload["derived_specifiers"] == [
+        "web_fetch",
+        "web_fetch:host",
+        "web_fetch:host:example-com",
+    ]
+    assert payload["matched_specifiers"] == ["web_fetch:host:example-com"]
+    assert payload["blocked"] is True
+
+
+def test_tool_registry_derives_host_specifiers_for_browser_navigate() -> None:
+    reg = ToolRegistry(
+        safety=ToolSafetyPolicyConfig(
+            enabled=True,
+            risky_tools=[],
+            approval_specifiers=["browser:navigate:host:example-com"],
+            approval_channels=["telegram"],
+            blocked_channels=[],
+            allowed_channels=[],
+        )
+    )
+
+    payload = reg.safety_decision(
+        "browser",
+        {"action": "navigate", "url": "https://example.com/account"},
+        session_id="telegram:1",
+        channel="telegram",
+    )
+
+    assert payload["derived_specifiers"] == [
+        "browser",
+        "browser:navigate",
+        "browser:host",
+        "browser:host:example-com",
+        "browser:navigate:host",
+        "browser:navigate:host:example-com",
+    ]
+    assert payload["matched_approval_specifiers"] == ["browser:navigate:host:example-com"]
+    assert payload["approval_required"] is True
+
+
 def test_tool_registry_safety_decision_reports_approval_requirement() -> None:
     reg = ToolRegistry(
         safety=ToolSafetyPolicyConfig(

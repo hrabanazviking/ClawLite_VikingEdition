@@ -187,6 +187,20 @@ def test_load_config_bus_backend_and_redis_fields(tmp_path: Path) -> None:
     assert cfg.bus.redis_prefix == "clawlite:cluster"
 
 
+def test_load_config_bus_env_overrides(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "config.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CLAWLITE_BUS_BACKEND", "redis")
+    monkeypatch.setenv("CLAWLITE_BUS_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("CLAWLITE_BUS_REDIS_PREFIX", "clawlite:docker")
+
+    cfg = load_config(path)
+
+    assert cfg.bus.backend == "redis"
+    assert cfg.bus.redis_url == "redis://redis:6379/0"
+    assert cfg.bus.redis_prefix == "clawlite:docker"
+
+
 def test_load_config_observability_fields(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(

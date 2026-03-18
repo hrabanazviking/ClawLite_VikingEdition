@@ -183,6 +183,16 @@ def _env_overrides(*, include_model: bool = True) -> dict[str, Any]:
     codex_account_id = os.getenv("CLAWLITE_CODEX_ACCOUNT_ID", "").strip() or os.getenv("OPENAI_ORG_ID", "").strip()
     if codex_account_id:
         out.setdefault("auth", {}).setdefault("providers", {}).setdefault("openai_codex", {})["account_id"] = codex_account_id
+
+    bus_backend = os.getenv("CLAWLITE_BUS_BACKEND", "").strip().lower()
+    if bus_backend in {"inprocess", "redis"}:
+        out.setdefault("bus", {})["backend"] = bus_backend
+    bus_redis_url = os.getenv("CLAWLITE_BUS_REDIS_URL", "").strip()
+    if bus_redis_url:
+        out.setdefault("bus", {})["redis_url"] = bus_redis_url
+    bus_redis_prefix = os.getenv("CLAWLITE_BUS_REDIS_PREFIX", "").strip()
+    if bus_redis_prefix:
+        out.setdefault("bus", {})["redis_prefix"] = bus_redis_prefix
     return out
 
 

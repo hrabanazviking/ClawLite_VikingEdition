@@ -16,11 +16,11 @@ That same approval state is now exposed through the gateway/CLI (`tools approval
 ## Current Baseline
 
 - Latest tag: `v0.7.0-beta.0`
-- `main` currently matches that tag — the full `plano.md` milestone, phase 7 hardening, packaging extras, CI stabilization, and large module extractions are included in the beta release baseline
+- `main` is ahead of that tag — provider onboarding was expanded with better wizard suggestions and additional OpenAI-compatible providers, and Docker now includes the next parity slice with runtime extras plus an optional Redis bus profile
 - Full suite: `python -m pytest tests/ -q --tb=short` → **1561 passed, 1 skipped**
 - Focused runtime slice: `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → **190 passed**
 - CI: pytest on Python 3.10 and 3.12, Ruff lint, autonomy contracts, and smoke coverage for YAML CLI config, local-provider probes, quickstart wizard, cron, browser bootstrap hints, and isolated self-evolution branch validation
-- Docker: official `Dockerfile`, `docker-compose.yml`, and `docs/DOCKER.md` now ship in-tree as the first parity slice, using `ref/nanobot` ergonomics and `ref/openclaw` security/runtime patterns where they fit
+- Docker: official `Dockerfile`, `docker-compose.yml`, and `docs/DOCKER.md` now ship in-tree; the current parity slice also adds the `runtime` extra, env overrides for the bus backend, and an optional Redis compose profile
 - Discord parity now includes approval callbacks for gated tools plus static/auto presence with native `/discord-presence` operator controls
 - Discord parity slice 1 is now in the working tree: DM/guild policy controls, guild/channel/role allowlists, bot gating, explicit session routing, configurable `reply_to_mode`, isolated slash sessions, deferred interaction replies, persisted `/focus` bindings, and automatic idle/max-age expiry for stale Discord bindings
 
@@ -112,7 +112,7 @@ clawlite validate config
 ## Next Major Track
 
 - Current slice: Discord policy/routing parity, reply-mode control, isolated slash sessions, persisted `/focus` bindings, and automatic idle/max-age expiry
-- Next slice: tools and skills parity after the Discord milestone is committed
+- Next slice: tools and skills advanced parity after the current Docker runtime slice is committed
 
 ## Delivery Policy
 

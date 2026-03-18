@@ -3,10 +3,13 @@ x-clawlite-common: &clawlite-common
     context: .
     dockerfile: Dockerfile
     args:
-      CLAWLITE_PIP_EXTRAS: "${CLAWLITE_PIP_EXTRAS:-telegram,media,observability}"
+      CLAWLITE_PIP_EXTRAS: "${CLAWLITE_PIP_EXTRAS:-telegram,media,observability,runtime}"
       CLAWLITE_INSTALL_BROWSER: "${CLAWLITE_INSTALL_BROWSER:-}"
   environment:
     PYTHONUNBUFFERED: "1"
+    CLAWLITE_BUS_BACKEND: "${CLAWLITE_BUS_BACKEND:-inprocess}"
+    CLAWLITE_BUS_REDIS_URL: "${CLAWLITE_BUS_REDIS_URL:-redis://redis:6379/0}"
+    CLAWLITE_BUS_REDIS_PREFIX: "${CLAWLITE_BUS_REDIS_PREFIX:-clawlite:bus}"
   extra_hosts:
     - "host.docker.internal:host-gateway"
   security_opt:
@@ -14,6 +17,8 @@ x-clawlite-common: &clawlite-common
   cap_drop:
     - NET_ADMIN
     - NET_RAW
+  tmpfs:
+    - /tmp
   volumes:
     - ${HOME:-.}/.clawlite:/root/.clawlite
 
@@ -45,3 +50,20 @@ services:
     tty: true
     command: ["status"]
 
+  redis:
+    image: redis:7-alpine
+    container_name: clawlite-redis
+    profiles:
+      - redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - clawlite-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  clawlite-redis:

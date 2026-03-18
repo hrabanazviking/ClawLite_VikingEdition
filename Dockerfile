@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-ARG CLAWLITE_PIP_EXTRAS="telegram,media,observability"
+ARG CLAWLITE_PIP_EXTRAS="telegram,media,observability,runtime"
 ARG CLAWLITE_INSTALL_BROWSER=""
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -38,4 +38,3 @@ EXPOSE 8787
 
 ENTRYPOINT ["tini", "--", "clawlite"]
 CMD ["status"]
-

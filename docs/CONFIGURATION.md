@@ -380,6 +380,9 @@ Example:
 | `CLAWLITE_WORKSPACE` | Override `workspace_path` |
 | `CLAWLITE_LITELLM_BASE_URL` | Override `provider.litellm_base_url` |
 | `CLAWLITE_LITELLM_API_KEY` | Override `provider.litellm_api_key` |
+| `CLAWLITE_BUS_BACKEND` | Override `bus.backend` |
+| `CLAWLITE_BUS_REDIS_URL` | Override `bus.redis_url` |
+| `CLAWLITE_BUS_REDIS_PREFIX` | Override `bus.redis_prefix` |
 | `CLAWLITE_GATEWAY_HOST` | Override `gateway.host` |
 | `CLAWLITE_GATEWAY_PORT` | Override `gateway.port` |
 | `CLAWLITE_GATEWAY_AUTH_MODE` | Override `gateway.auth.mode` |

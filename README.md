@@ -47,7 +47,7 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -e .
 
 # Or install optional integrations up front
-python3 -m pip install -e ".[browser,telegram,media]"
+python3 -m pip install -e ".[browser,telegram,media,runtime]"
 
 # Optional browser runtime download
 python3 -m playwright install chromium
@@ -61,7 +61,7 @@ clawlite gateway
 
 Open **http://127.0.0.1:8787** → live dashboard with chat, automation, memory, and tools.
 
-If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, `.[media]` for TTS/PDF helpers, and `.[observability]` for OTLP/OpenTelemetry exports.
+If you pass `--config path.yaml`, YAML configs work out of the box. Optional runtimes now install via extras: `.[browser]` for Playwright, `.[telegram]` for the Telegram channel, `.[media]` for TTS/PDF helpers, `.[runtime]` for Redis-backed bus support, and `.[observability]` for OTLP/OpenTelemetry exports.
 Config profiles are also supported: `clawlite --config ./config.yaml --profile prod status` loads `config.yaml`, overlays `config.prod.yaml` if present, and then applies env vars.
 
 **Android / Termux path:** use `proot-distro` with Ubuntu instead of trying to run the full stack directly on native Termux. The one-shot wrapper is:
@@ -102,6 +102,12 @@ docker compose run --rm clawlite-cli status
 docker compose run --rm clawlite-cli run "summarize the latest session"
 ```
 
+If you want the Redis bus backend from Docker, enable the `redis` profile and the matching env overrides:
+
+```bash
+CLAWLITE_BUS_BACKEND=redis docker compose --profile redis up -d
+```
+
 Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 
 ---
@@ -117,6 +123,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Skills now honor OpenClaw-style `skills.entries.<skill>` overrides for `enabled`, `env`, and `apiKey`, including profile overlays such as `config.prod.yaml`.
 - Builtin skills can now be gated with `skills.allowBundled` without blocking workspace or marketplace overrides.
 - Tool safety now supports granular specifiers such as `browser:evaluate`, `run_skill:github`, and `exec:git`, plus approval mode via `approval_specifiers` / `approval_channels`, with `tool:*` wildcards for channel-specific policy.
+- Tool safety now also derives host-aware rules for `web_fetch` and `browser:navigate`, so operator policy can target specific destinations such as `web_fetch:host:example-com` instead of only whole-tool approvals.
 - Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`.
 - Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks.

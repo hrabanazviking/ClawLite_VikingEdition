@@ -120,6 +120,8 @@ Example granular policy:
 Specifier rules are lowercase and support `tool:*` wildcards. Common derived forms include:
 
 - `browser:navigate`, `browser:evaluate`
+- `browser:navigate:host:example-com`
+- `web_fetch:host:example-com`
 - `run_skill:github`, `run_skill:weather`
 - `exec:git`, `exec:python`
 
@@ -127,6 +129,7 @@ You can preview the effective decision locally without running the tool:
 
 ```bash
 clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"evaluate"}'
+clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"navigate","url":"https://example.com"}'
 ```
 
 The preview returns a `decision` of `allow`, `approval`, or `block`.
@@ -341,6 +344,7 @@ Call an MCP tool:
 Control a headless Chromium browser via Playwright. Actions: `navigate`, `click`, `fill`, `screenshot`, `evaluate`, `close`.
 
 `navigate` now applies the same basic host policy model as `web_fetch`: only `http` / `https`, optional allowlist / denylist, and private-address blocking by default.
+The safety registry also derives host-aware specifiers for `web_fetch` and `browser:navigate`, so you can target rules like `web_fetch:host:example-com` or `browser:navigate:host:example-com` instead of approving the whole tool.
 
 Install with `pip install -e ".[browser]"`, then run `python -m playwright install chromium` once.
 

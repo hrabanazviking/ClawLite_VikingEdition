@@ -35,10 +35,10 @@ docker compose run --rm clawlite-cli provider status
 
 ## Build Options
 
-The image installs `telegram`, `media`, and `observability` extras by default. Override them with build args if you want a different surface:
+The image installs `telegram`, `media`, `observability`, and `runtime` extras by default. Override them with build args if you want a different surface:
 
 ```bash
-CLAWLITE_PIP_EXTRAS=telegram,media,observability docker compose build
+CLAWLITE_PIP_EXTRAS=telegram,media,observability,runtime docker compose build
 ```
 
 To bake Playwright + Chromium into the image:
@@ -48,6 +48,8 @@ CLAWLITE_PIP_EXTRAS=browser,telegram,media,observability \
 CLAWLITE_INSTALL_BROWSER=1 \
 docker compose build
 ```
+
+The `runtime` extra installs the Redis Python client used by the optional Redis bus backend.
 
 ## Local Providers from the Container
 
@@ -59,6 +61,22 @@ Examples:
 - vLLM on host: `http://host.docker.internal:8000/v1`
 
 Use those URLs in ClawLite config instead of `127.0.0.1`, because inside the container `127.0.0.1` refers to the container itself.
+
+## Optional Redis Bus
+
+ClawLite's runtime can scale the internal bus through Redis. The compose file now includes an optional `redis` profile:
+
+```bash
+CLAWLITE_BUS_BACKEND=redis docker compose --profile redis up -d
+```
+
+Default env wiring in the compose file:
+
+- `CLAWLITE_BUS_BACKEND=inprocess`
+- `CLAWLITE_BUS_REDIS_URL=redis://redis:6379/0`
+- `CLAWLITE_BUS_REDIS_PREFIX=clawlite:bus`
+
+If you want Redis enabled all the time, set those env vars before running `docker compose up` or place them in your shell environment.
 
 ## Security Notes
 
@@ -76,6 +94,7 @@ What this Docker path covers now:
 - gateway healthcheck via `/health`
 - optional CLI sidecar container
 - host access to local Ollama/vLLM
+- optional Redis bus profile with persisted Redis data
 
 What remains for later parity work:
 
@@ -83,4 +102,3 @@ What remains for later parity work:
 - CI container build smoke
 - rootless image variant
 - sandbox/browser-optimized runtime images
-
