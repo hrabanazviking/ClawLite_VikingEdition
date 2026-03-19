@@ -65,7 +65,7 @@ class GatewayRequestHandlers:
         }
 
     async def chat(self, req: Any, request: Request) -> Any:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         if not str(req.session_id or "").strip() or not str(req.text or "").strip():
             raise HTTPException(status_code=400, detail="session_id and text are required")
         logger.debug("chat request received session={} chars={}", req.session_id, len(str(req.text or "")))
@@ -95,7 +95,7 @@ class GatewayRequestHandlers:
         return {"text": out.text, "model": out.model}
 
     async def tools_catalog(self, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         include_schema = self.parse_include_schema_flag_fn(request.query_params)
         return self.build_tools_catalog_payload_fn(self.runtime.engine.tools.schema(), include_schema=include_schema)
 
@@ -223,7 +223,7 @@ class GatewayRequestHandlers:
         return {"ok": True, "summary": summary}
 
     async def cron_add(self, req: Any, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         job_id = await self.runtime.cron.add_job(
             session_id=req.session_id,
             expression=req.expression,
@@ -233,15 +233,15 @@ class GatewayRequestHandlers:
         return {"ok": True, "status": "created", "id": job_id}
 
     async def cron_status(self, *, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         return self._cron_list_payload()
 
     async def cron_list(self, *, session_id: str = "", request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         return self._cron_list_payload(session_id=session_id)
 
     async def cron_get(self, *, job_id: str, session_id: str = "", request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         scoped_session = str(session_id or "").strip()
         jobs = self.runtime.cron.list_jobs(session_id=scoped_session or None)
         job = next((row for row in jobs if str(row.get("id", "") or "").strip() == str(job_id or "").strip()), None)
@@ -257,7 +257,7 @@ class GatewayRequestHandlers:
         session_id: str = "",
         request: Request,
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         scoped_session = str(session_id or "").strip() or None
         changed = self.runtime.cron.enable_job(
             job_id,
@@ -275,7 +275,7 @@ class GatewayRequestHandlers:
         }
 
     async def cron_remove(self, *, job_id: str, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         removed = await asyncio.to_thread(self.runtime.cron.remove_job, job_id)
         return {"ok": removed, "status": "removed" if removed else "not_found"}
 

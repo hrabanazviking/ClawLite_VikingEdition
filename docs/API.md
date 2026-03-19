@@ -8,6 +8,7 @@ Default base URL: `http://127.0.0.1:8787`
 - `gateway.auth.mode=optional`: accepts requests without token, but invalid token returns `401`.
 - `gateway.auth.mode=required`: requires token (except loopback when `allow_loopback_without_auth=true`).
 - Token can be sent via configurable header (default `Authorization`, with or without `Bearer ` prefix) or configurable query param (default `token`).
+- If a gateway token is configured, the control-plane routes (`/v1/status`, `/v1/dashboard/state`, `/v1/chat`, control mutations, approvals/grants, and `WS /v1/ws`) require that token even when the gateway is otherwise open on loopback.
 - `/health` only requires auth when `gateway.auth.protect_health=true` and mode is `required`.
 - `/v1/diagnostics` depends on `gateway.diagnostics.enabled` and may require auth with `gateway.diagnostics.require_auth=true`.
 
@@ -18,6 +19,8 @@ Entrypoint do dashboard local do gateway. Serve um shell HTML/CSS/JS empacotado 
 ## `GET /v1/dashboard/state`
 
 Resumo agregado para o dashboard local.
+
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Example response:
 
@@ -1164,9 +1167,13 @@ Campos opcionais:
 
 Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), enquanto Discord permanece em `send` com suporte a botões via `discord_components`. Canais sem capability explícita permanecem no contrato conservador de `send`.
 
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
+
 ## `GET /v1/status`
 
 Estado do control-plane do gateway.
+
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Campos de contrato estavel:
 - `contract_version`: versao do contrato HTTP do gateway.
@@ -1371,6 +1378,7 @@ desse coalescing podem ser ajustados em `gateway.websocket.coalesce_enabled`,
 `gateway.websocket.coalesce_profile` (`compact`, `newline`, `paragraph`, `raw`).
 
 Alias compatível: `WS /ws` (mesmo comportamento, incluindo autenticação).
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 ## Envelope de erro HTTP
 

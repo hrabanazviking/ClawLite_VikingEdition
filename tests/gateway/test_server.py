@@ -3473,7 +3473,8 @@ def test_gateway_tools_approval_endpoints_require_token_when_configured_even_on_
     registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
 
     with TestClient(app) as client:
-        assert client.get("/v1/status").status_code == 200
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/status").status_code == 401
 
         unauthorized_list = client.get("/v1/tools/approvals")
         assert unauthorized_list.status_code == 401
@@ -4353,6 +4354,16 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         assert unauthorized_tools_catalog_alias.json()["error"] == "gateway_auth_required"
         assert unauthorized_tools_catalog_alias.json()["code"] == "gateway_auth_required"
 
+        unauthorized_dashboard_state = client.get("/api/dashboard/state")
+        assert unauthorized_dashboard_state.status_code == 401
+        assert unauthorized_dashboard_state.json()["error"] == "gateway_auth_required"
+        assert unauthorized_dashboard_state.json()["code"] == "gateway_auth_required"
+
+        unauthorized_chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert unauthorized_chat.status_code == 401
+        assert unauthorized_chat.json()["error"] == "gateway_auth_required"
+        assert unauthorized_chat.json()["code"] == "gateway_auth_required"
+
         ok = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
         assert ok.status_code == 200
         payload = ok.json()
@@ -4381,6 +4392,17 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         tools_catalog_alias = client.get("/api/tools/catalog", headers={"Authorization": "Bearer secret-token"})
         assert tools_catalog_alias.status_code == 200
         assert tools_catalog_alias.json() == tools_catalog.json()
+
+        dashboard_state = client.get("/api/dashboard/state", headers={"Authorization": "Bearer secret-token"})
+        assert dashboard_state.status_code == 200
+
+        chat = client.post(
+            "/v1/chat",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"session_id": "cli:1", "text": "ping"},
+        )
+        assert chat.status_code == 200
+        assert chat.json()["text"] == "pong"
 
 
 def test_gateway_auth_auto_hardens_on_non_loopback_with_token(tmp_path: Path) -> None:
@@ -4413,7 +4435,7 @@ def test_gateway_auth_auto_hardens_on_non_loopback_with_token(tmp_path: Path) ->
         assert payload["auth"]["posture"] == "strict"
 
 
-def test_gateway_auth_keeps_loopback_open_with_mode_off(tmp_path: Path) -> None:
+def test_gateway_auth_keeps_loopback_health_and_assets_open_with_mode_off(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
         state_path=str(tmp_path / "state"),
@@ -4432,9 +4454,30 @@ def test_gateway_auth_keeps_loopback_open_with_mode_off(tmp_path: Path) -> None:
     app.state.runtime.engine.provider = FakeProvider()
 
     with TestClient(app) as client:
-        response = client.get("/v1/status")
-        assert response.status_code == 200
-        payload = response.json()
+        health = client.get("/health")
+        assert health.status_code == 200
+
+        root = client.get("/")
+        assert root.status_code == 200
+
+        asset = client.get("/_clawlite/dashboard.js")
+        assert asset.status_code == 200
+
+        status = client.get("/v1/status")
+        assert status.status_code == 401
+        assert status.json()["error"] == "gateway_auth_required"
+
+        dashboard_state = client.get("/api/dashboard/state")
+        assert dashboard_state.status_code == 401
+        assert dashboard_state.json()["error"] == "gateway_auth_required"
+
+        chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert chat.status_code == 401
+        assert chat.json()["error"] == "gateway_auth_required"
+
+        authorized_status = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
+        assert authorized_status.status_code == 200
+        payload = authorized_status.json()
         assert payload["auth"]["mode"] == "off"
         assert payload["auth"]["posture"] == "open"
 
@@ -4517,6 +4560,36 @@ def test_gateway_ws_alias_respects_auth_guard(tmp_path: Path) -> None:
                 pass
 
         with client.websocket_connect("/ws?token=secret-token") as socket:
+            _assert_connect_challenge(socket)
+            socket.send_json({"session_id": "cli:ws", "text": "ping"})
+            payload = socket.receive_json()
+            assert payload["text"] == "pong"
+
+
+def test_gateway_ws_requires_token_when_configured_even_on_loopback(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "host": "127.0.0.1",
+            "auth": {
+                "mode": "off",
+                "token": "secret-token",
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/v1/ws"):
+                pass
+
+        with client.websocket_connect("/v1/ws?token=secret-token") as socket:
             _assert_connect_challenge(socket)
             socket.send_json({"session_id": "cli:ws", "text": "ping"})
             payload = socket.receive_json()

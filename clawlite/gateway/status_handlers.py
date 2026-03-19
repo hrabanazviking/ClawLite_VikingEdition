@@ -70,11 +70,21 @@ class GatewayStatusHandlers:
         return {"metrics": get_telemetry_registry().snapshot_all()}
 
     async def status(self, request: Request) -> Any:
-        self._check(request, scope="control")
+        self.auth_guard.check_http(
+            request=request,
+            scope="control",
+            diagnostics_auth=self.diagnostics_require_auth,
+            require_token_if_configured=True,
+        )
         return self.status_payload_fn()
 
     async def dashboard_state(self, request: Request) -> dict[str, Any]:
-        self._check(request, scope="control")
+        self.auth_guard.check_http(
+            request=request,
+            scope="control",
+            diagnostics_auth=self.diagnostics_require_auth,
+            require_token_if_configured=True,
+        )
         return self.dashboard_state_payload_fn()
 
     async def diagnostics(self, request: Request) -> Any:
@@ -84,7 +94,12 @@ class GatewayStatusHandlers:
         return await self.diagnostics_payload_fn()
 
     async def api_token(self, request: Request) -> dict[str, Any]:
-        self._check(request, scope="control")
+        self.auth_guard.check_http(
+            request=request,
+            scope="control",
+            diagnostics_auth=self.diagnostics_require_auth,
+            require_token_if_configured=True,
+        )
         return self.token_payload_fn()
 
 

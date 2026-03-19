@@ -731,10 +731,19 @@ class GatewayAuthGuard:
 
     async def check_ws(self, *, socket: WebSocket, scope: str, diagnostics_auth: bool) -> bool:
         client_host = socket.client.host if socket.client is not None else None
-        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         header_value = str(socket.headers.get(self.header_name, "") or "")
         query_value = str(socket.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
+        require_token_if_configured = scope == "control" and bool(self.token)
+        if require_token_if_configured:
+            if not supplied_token:
+                await socket.close(code=4401, reason="gateway_auth_required")
+                return False
+            if not self._token_matches(supplied_token):
+                await socket.close(code=4401, reason="gateway_auth_invalid")
+                return False
+            return True
         if should_require and not self._token_matches(supplied_token):
             await socket.close(code=4401, reason="gateway_auth_required")
             return False

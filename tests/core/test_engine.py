@@ -442,26 +442,24 @@ class FakeMemoryWithDeferredTurnPersistence(FakeMemory):
 
     def remember_working_set(
         self,
-        messages,
         *,
+        role: str,
+        content: str,
         session_id: str = "",
         user_id: str = "",
         metadata: dict[str, Any] | None = None,
         allow_promotion: bool = True,
     ) -> None:
-        for item in list(messages or []):
-            if not isinstance(item, dict):
-                continue
-            self.working_set_writes.append(
-                {
-                    "session_id": session_id,
-                    "role": str(item.get("role", "") or ""),
-                    "content": str(item.get("content", "") or ""),
-                    "user_id": user_id,
-                    "metadata": dict(metadata or {}),
-                    "allow_promotion": bool(allow_promotion),
-                }
-            )
+        self.working_set_writes.append(
+            {
+                "session_id": session_id,
+                "role": str(role or ""),
+                "content": str(content or ""),
+                "user_id": user_id,
+                "metadata": dict(metadata or {}),
+                "allow_promotion": bool(allow_promotion),
+            }
+        )
 
     async def memorize(
         self,
@@ -2470,21 +2468,38 @@ def test_engine_run_defers_memory_persistence_until_after_transcript_write() -> 
         second = await asyncio.wait_for(second_task, timeout=1.0)
         assert second.text == "second"
         assert second_started.is_set() is True
-        assert memory.memorize_calls == [
+        assert memory.memorize_calls[0] == {
+            "messages": [
+                {"role": "user", "content": "ping"},
+                {"role": "assistant", "content": "pong"},
+            ],
+            "text": None,
+            "source": "session:cli:deferred",
+            "user_id": "deferred",
+            "shared": False,
+            "metadata": {},
+            "reasoning_layer": None,
+            "memory_type": None,
+            "happened_at": None,
+        }
+        assert len(memory.memorize_calls) >= 1
+        assert memory.working_set_writes[:2] == [
             {
-                "messages": [
-                    {"role": "user", "content": "ping"},
-                    {"role": "assistant", "content": "pong"},
-                ],
-                "text": None,
-                "source": "session:cli:deferred",
-                "user_id": "",
-                "shared": False,
-                "metadata": {},
-                "reasoning_layer": None,
-                "memory_type": None,
-                "happened_at": None,
-            }
+                "session_id": "cli:deferred",
+                "role": "user",
+                "content": "ping",
+                "user_id": "deferred",
+                "metadata": {"channel": "cli"},
+                "allow_promotion": True,
+            },
+            {
+                "session_id": "cli:deferred",
+                "role": "assistant",
+                "content": "pong",
+                "user_id": "deferred",
+                "metadata": {"channel": "cli"},
+                "allow_promotion": True,
+            },
         ]
         await engine.drain_turn_persistence()
 
