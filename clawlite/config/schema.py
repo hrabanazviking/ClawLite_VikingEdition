@@ -333,38 +333,35 @@ class GatewayAutonomyConfig(Base):
         return value or "self-evolution"
 
 
-class VikingConfig(Base):
-    """Configuration for Norse-themed subsystems added in VikingEdition."""
+class GatewayWebSocketConfig(Base):
+    coalesce_enabled: bool = True
+    coalesce_min_chars: int = 24
+    coalesce_max_chars: int = 120
+    coalesce_profile: str = "compact"
 
-    # ── Ægishjálmr (injection guard) ──────────────────────────────────────────
-    injection_guard_enabled: bool = True
+    @field_validator("coalesce_min_chars", "coalesce_max_chars", mode="before")
+    @classmethod
+    def _coalesce_char_bounds(cls, v: Any, info: Any) -> int:
+        defaults = {
+            "coalesce_min_chars": 24,
+            "coalesce_max_chars": 120,
+        }
+        value = v if v not in (None, "") else defaults.get(str(info.field_name), 1)
+        return max(1, int(value))
 
-    # ── Gjallarhorn (alert broadcaster) ───────────────────────────────────────
-    gjallarhorn_alert_target: str = ""       # channel target, e.g. "telegram:123456"
-    gjallarhorn_block_threshold: int = 5     # BLOCK events in window to sound horn
-    gjallarhorn_block_window_s: float = 300.0
-    gjallarhorn_high_tick_threshold: int = 3  # consecutive Huginn 'high' ticks
-    gjallarhorn_cooldown_s: float = 600.0    # seconds between same-reason alerts
+    @field_validator("coalesce_profile", mode="before")
+    @classmethod
+    def _coalesce_profile_default(cls, v: Any) -> str:
+        value = str(v or "compact").strip().lower()
+        if value not in {"compact", "newline", "paragraph", "raw"}:
+            return "compact"
+        return value
 
-    # ── Valkyrie (session reaper) ──────────────────────────────────────────────
-    valkyrie_enabled: bool = True
-    valkyrie_idle_days: float = 7.0          # archive sessions idle this long
-    valkyrie_dead_days: float = 30.0         # purge sessions archived this long
-    valkyrie_interval_s: float = 3600.0      # sweep interval
-
-    # ── Völva (memory oracle) ──────────────────────────────────────────────────
-    volva_enabled: bool = True
-    volva_interval_s: float = 1800.0         # maintenance sweep interval
-    volva_stale_hours: float = 48.0          # hours before category is stale
-    volva_consolidation_threshold: int = 50  # items before consolidation triggered
-
-    # ── Rate limiter ───────────────────────────────────────────────────────────
-    channel_rate_limit_messages: float = 10.0   # max messages per window
-    channel_rate_limit_window_s: float = 60.0   # sliding window in seconds
-
-    # ── Runestone (audit log) ──────────────────────────────────────────────────
-    runestone_path: str = ""                 # defaults to ~/.clawlite/runestone.jsonl
-    runestone_max_file_bytes: int = 10 * 1024 * 1024  # 10 MB before rotation
+    @model_validator(mode="after")
+    def _normalize_coalesce_bounds(self) -> "GatewayWebSocketConfig":
+        if self.coalesce_max_chars < self.coalesce_min_chars:
+            self.coalesce_max_chars = self.coalesce_min_chars
+        return self
 
 
 class GatewayConfig(Base):
@@ -379,7 +376,7 @@ class GatewayConfig(Base):
     diagnostics: GatewayDiagnosticsConfig = Field(default_factory=GatewayDiagnosticsConfig)
     supervisor: GatewaySupervisorConfig = Field(default_factory=GatewaySupervisorConfig)
     autonomy: GatewayAutonomyConfig = Field(default_factory=GatewayAutonomyConfig)
-    viking: VikingConfig = Field(default_factory=VikingConfig)
+    websocket: GatewayWebSocketConfig = Field(default_factory=GatewayWebSocketConfig)
 
     @field_validator("host", mode="before")
     @classmethod
@@ -1645,8 +1642,10 @@ class ToolSafetyPolicyConfig(Base):
         default_factory=lambda: ["browser", "exec", "run_skill", "web_fetch", "web_search", "mcp"]
     )
     risky_specifiers: list[str] = Field(default_factory=list)
-    approval_specifiers: list[str] = Field(default_factory=list)
-    approval_channels: list[str] = Field(default_factory=list)
+    approval_specifiers: list[str] = Field(
+        default_factory=lambda: ["browser:evaluate", "exec", "mcp", "run_skill"]
+    )
+    approval_channels: list[str] = Field(default_factory=lambda: ["discord", "telegram"])
     approval_grant_ttl_s: float = 900.0
     blocked_channels: list[str] = Field(default_factory=list)
     allowed_channels: list[str] = Field(default_factory=list)

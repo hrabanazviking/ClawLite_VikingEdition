@@ -664,6 +664,7 @@ class LiteLLMProvider(LLMProvider):
         self,
         *,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ):
@@ -686,7 +687,7 @@ class LiteLLMProvider(LLMProvider):
         # Non-OpenAI-compatible providers: fall back to complete()
         if not self.openai_compatible:
             try:
-                result = await self.complete(messages=messages, tools=None,
+                result = await self.complete(messages=messages, tools=tools,
                                              max_tokens=max_tokens, temperature=temperature)
                 yield ProviderChunk(text=result.text, accumulated=result.text, done=True)
             except Exception as exc:
@@ -710,6 +711,9 @@ class LiteLLMProvider(LLMProvider):
             payload["max_tokens"] = max(1, int(max_tokens))
         if temperature is not None:
             payload["temperature"] = float(temperature)
+        if tools:
+            payload["tools"] = [{"type": "function", "function": row} for row in tools]
+            payload["tool_choice"] = "auto"
 
         accumulated = ""
         self._diagnostics["requests"] = int(self._diagnostics["requests"]) + 1
@@ -717,6 +721,7 @@ class LiteLLMProvider(LLMProvider):
         _tel = get_telemetry_registry()
         _degraded_recovered = False
         auth_retry_used = False
+        reroute_full_run = False
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -739,9 +744,23 @@ class LiteLLMProvider(LLMProvider):
                                     choices = data.get("choices")
                                     if not isinstance(choices, list) or not choices:
                                         continue
-                                    delta = choices[0].get("delta") or {}
+                                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                                    delta = choice.get("delta") or {}
                                     text = str(delta.get("content") or "")
-                                    finish_reason = choices[0].get("finish_reason")
+                                    finish_reason = choice.get("finish_reason")
+                                    streamed_tool_calls = delta.get("tool_calls")
+                                    if not accumulated and not text and (
+                                        (isinstance(streamed_tool_calls, list) and streamed_tool_calls)
+                                        or finish_reason == "tool_calls"
+                                    ):
+                                        reroute_full_run = True
+                                        yield ProviderChunk(
+                                            text="",
+                                            accumulated="",
+                                            done=True,
+                                            requires_full_run=True,
+                                        )
+                                        break
                                     accumulated += text
                                     done = finish_reason is not None
                                     yield ProviderChunk(text=text, accumulated=accumulated, done=done)
@@ -770,6 +789,8 @@ class LiteLLMProvider(LLMProvider):
                         raise
 
             # Emit final done-chunk if stream ended without finish_reason (skip if already degraded-recovered)
+            if reroute_full_run:
+                return
             if not _degraded_recovered:
                 if not accumulated:
                     yield ProviderChunk(text="", accumulated="", done=True)

@@ -410,18 +410,22 @@ class ExecTool(Tool):
             return "blocked_by_policy:internal_url:missing_host"
         if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
             return f"blocked_by_policy:internal_url:{host}"
+
         try:
             literal = ipaddress.ip_address(host)
         except ValueError:
             literal = None
+
         if literal is not None:
             if cls._is_blocked_ip(literal):
                 return f"blocked_by_policy:internal_url:{host}"
             return None
+
         try:
             infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except socket.gaierror:
             return None
+
         for info in infos:
             try:
                 resolved = ipaddress.ip_address(str(info[4][0]))
@@ -494,6 +498,7 @@ class ExecTool(Tool):
                 if lower in cls._POWERSHELL_SKIP_VALUE_FLAGS:
                     skip_next = True
                     continue
+
             if token.startswith("-"):
                 continue
             urls.append(token)
@@ -550,6 +555,40 @@ class ExecTool(Tool):
         return None
 
     @classmethod
+    def _guard_env_split_string_payloads(cls, argv: list[str], *, recursion_depth: int = 0) -> str | None:
+        if recursion_depth >= 4:
+            return None
+        for index, raw in enumerate(argv):
+            if cls._binary_name(raw) != "env":
+                continue
+            pointer = index + 1
+            while pointer < len(argv):
+                token = str(argv[pointer] or "").strip()
+                lower = token.lower()
+                if not token:
+                    pointer += 1
+                    continue
+                if token in cls._SHELL_CONTROL_TOKENS:
+                    break
+                if cls._is_env_assignment(token):
+                    pointer += 1
+                    continue
+                if lower in {"-s", "--split-string"} and pointer + 1 < len(argv):
+                    payload = str(argv[pointer + 1] or "").strip()
+                    if not payload:
+                        break
+                    try:
+                        nested_argv = shlex.split(payload)
+                    except ValueError:
+                        return None
+                    return cls._guard_network_fetch_targets(nested_argv, recursion_depth=recursion_depth + 1)
+                consumption = cls._transparent_runtime_wrapper_flag_consumption("env", token)
+                if consumption is None:
+                    break
+                pointer += 1 + consumption
+        return None
+
+    @classmethod
     def _resolve_inline_runtime_start(cls, argv: list[str]) -> int | None:
         if not argv:
             return None
@@ -599,7 +638,7 @@ class ExecTool(Tool):
         flags = cls._INLINE_RUNTIME_FLAGS.get(runtime, frozenset())
         if not flags:
             return None
-        for index, inner_raw in enumerate(argv[start + 1:], start=start + 1):
+        for index, inner_raw in enumerate(argv[start + 1 :], start=start + 1):
             inner = str(inner_raw or "").strip()
             if not inner:
                 continue
@@ -634,7 +673,7 @@ class ExecTool(Tool):
             return None
         if cls._runtime_family(argv[start]) != "python":
             return None
-        for index, raw in enumerate(argv[start + 1:], start=start + 1):
+        for index, raw in enumerate(argv[start + 1 :], start=start + 1):
             token = str(raw or "").strip()
             lower = token.lower()
             if not token:
@@ -645,7 +684,7 @@ class ExecTool(Tool):
                 module_name = str(argv[index + 1] or "").strip().lower()
                 if module_name not in cls._PYTHON_NETWORK_MODULES:
                     return None
-                for candidate_raw in argv[index + 2:]:
+                for candidate_raw in argv[index + 2 :]:
                     candidate = str(candidate_raw or "").strip()
                     if not candidate:
                         continue
@@ -661,40 +700,6 @@ class ExecTool(Tool):
                 return None
             if not token.startswith("-"):
                 break
-        return None
-
-    @classmethod
-    def _guard_env_split_string_payloads(cls, argv: list[str], *, recursion_depth: int = 0) -> str | None:
-        if recursion_depth >= 4:
-            return None
-        for index, raw in enumerate(argv):
-            if cls._binary_name(raw) != "env":
-                continue
-            pointer = index + 1
-            while pointer < len(argv):
-                token = str(argv[pointer] or "").strip()
-                lower = token.lower()
-                if not token:
-                    pointer += 1
-                    continue
-                if token in cls._SHELL_CONTROL_TOKENS:
-                    break
-                if cls._is_env_assignment(token):
-                    pointer += 1
-                    continue
-                if lower in {"-s", "--split-string"} and pointer + 1 < len(argv):
-                    payload = str(argv[pointer + 1] or "").strip()
-                    if not payload:
-                        break
-                    try:
-                        nested_argv = shlex.split(payload)
-                    except ValueError:
-                        return None
-                    return cls._guard_network_fetch_targets(nested_argv, recursion_depth=recursion_depth + 1)
-                consumption = cls._transparent_runtime_wrapper_flag_consumption("env", token)
-                if consumption is None:
-                    break
-                pointer += 1 + consumption
         return None
 
     @classmethod
@@ -741,6 +746,10 @@ class ExecTool(Tool):
             return "blocked_by_policy:deny_pattern"
         if self.allow_patterns and (not self._match_any(self.allow_patterns, cmd)):
             return "blocked_by_policy:not_in_allow_patterns"
+
+        network_error = self._guard_network_fetch_targets(argv)
+        if network_error:
+            return network_error
 
         path_candidates = self._path_like_tokens(argv)
         for path_value in path_candidates:
@@ -793,16 +802,6 @@ class ExecTool(Tool):
             nested_error = self._guard_explicit_shell_command(shell_command, cwd, recursion_depth=recursion_depth)
             if nested_error:
                 return nested_error
-
-        # ᚾ Network guard: block internal fetches in curl/wget/inline runtimes
-        network_error = self._guard_network_fetch_targets(argv)
-        if network_error:
-            try:
-                from clawlite.core.runestone import audit as _rs_audit
-                _rs_audit(kind="exec_network_block", source="exec", details={"error": network_error, "command": cmd[:256]})
-            except Exception:
-                pass
-            return network_error
 
         return None
 

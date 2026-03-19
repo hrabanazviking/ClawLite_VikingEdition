@@ -127,19 +127,179 @@ def test_websocket_handler_streams_req_chat_chunks_before_final_result() -> None
                 "type": "req",
                 "id": "m1",
                 "method": "chat.send",
-                "params": {"sessionId": "cli:req-stream", "text": "ping", "stream": True},
+                "params": {
+                    "sessionId": "cli:req-stream",
+                    "text": "ping",
+                    "stream": True,
+                    "channel": "telegram",
+                    "chatId": 123,
+                    "runtimeMetadata": {"reply_to_message_id": "456"},
+                },
             },
         ]
     )
+    seen: list[tuple[str, str, str | None, str | None, dict[str, object] | None]] = []
+
+    async def _capturing_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        seen.append((session_id, text, channel, chat_id, runtime_metadata))
+        yield ProviderChunk(text="po", accumulated="po", done=False)
+        yield ProviderChunk(text="ng", accumulated="pong", done=True)
+
+    handler.stream_engine_with_timeout_fn = _capturing_stream
 
     asyncio.run(handler.handle(socket, path_label="/ws"))
 
+    assert seen == [
+        (
+            "cli:req-stream",
+            "ping",
+            "telegram",
+            "123",
+            {"reply_to_message_id": "456"},
+        )
+    ]
     assert socket.sent[2] == {
         "type": "event",
         "event": "chat.chunk",
         "id": "m1",
         "params": {
             "session_id": "cli:req-stream",
+            "text": "pong",
+            "accumulated": "pong",
+            "done": True,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[3] == {
+        "type": "res",
+        "id": "m1",
+        "ok": True,
+        "result": {
+            "session_id": "cli:req-stream",
+            "text": "pong",
+            "model": "",
+        },
+    }
+
+
+def test_websocket_handler_coalesces_stream_until_sentence_boundary() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {"type": "req", "id": "c1", "method": "connect", "params": {}},
+            {
+                "type": "req",
+                "id": "m2",
+                "method": "chat.send",
+                "params": {
+                    "sessionId": "cli:req-stream-boundary",
+                    "text": "ping",
+                    "stream": True,
+                },
+            },
+        ]
+    )
+
+    async def _sentence_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        del session_id, text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="Hello world", accumulated="Hello world", done=False)
+        yield ProviderChunk(text=", this is a test.", accumulated="Hello world, this is a test.", done=False)
+        yield ProviderChunk(text=" Next chunk", accumulated="Hello world, this is a test. Next chunk", done=False)
+        yield ProviderChunk(text=" closes.", accumulated="Hello world, this is a test. Next chunk closes.", done=True)
+
+    handler.stream_engine_with_timeout_fn = _sentence_stream
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    assert socket.sent[2] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m2",
+        "params": {
+            "session_id": "cli:req-stream-boundary",
+            "text": "Hello world, this is a test.",
+            "accumulated": "Hello world, this is a test.",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[3] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m2",
+        "params": {
+            "session_id": "cli:req-stream-boundary",
+            "text": " Next chunk closes.",
+            "accumulated": "Hello world, this is a test. Next chunk closes.",
+            "done": True,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[4] == {
+        "type": "res",
+        "id": "m2",
+        "ok": True,
+        "result": {
+            "session_id": "cli:req-stream-boundary",
+            "text": "Hello world, this is a test. Next chunk closes.",
+            "model": "",
+        },
+    }
+
+
+def test_websocket_handler_can_disable_stream_coalescing() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {"type": "req", "id": "c1", "method": "connect", "params": {}},
+            {
+                "type": "req",
+                "id": "m3",
+                "method": "chat.send",
+                "params": {
+                    "sessionId": "cli:req-stream-no-coalesce",
+                    "text": "ping",
+                    "stream": True,
+                },
+            },
+        ]
+    )
+    handler.coalesce_enabled = False
+
+    async def _chunked_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        del session_id, text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="po", accumulated="po", done=False)
+        yield ProviderChunk(text="ng", accumulated="pong", done=True)
+
+    handler.stream_engine_with_timeout_fn = _chunked_stream
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    assert socket.sent[2] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m3",
+        "params": {
+            "session_id": "cli:req-stream-no-coalesce",
             "text": "po",
             "accumulated": "po",
             "done": False,
@@ -149,9 +309,9 @@ def test_websocket_handler_streams_req_chat_chunks_before_final_result() -> None
     assert socket.sent[3] == {
         "type": "event",
         "event": "chat.chunk",
-        "id": "m1",
+        "id": "m3",
         "params": {
-            "session_id": "cli:req-stream",
+            "session_id": "cli:req-stream-no-coalesce",
             "text": "ng",
             "accumulated": "pong",
             "done": True,
@@ -160,11 +320,232 @@ def test_websocket_handler_streams_req_chat_chunks_before_final_result() -> None
     }
     assert socket.sent[4] == {
         "type": "res",
-        "id": "m1",
+        "id": "m3",
         "ok": True,
         "result": {
-            "session_id": "cli:req-stream",
+            "session_id": "cli:req-stream-no-coalesce",
             "text": "pong",
             "model": "",
         },
+    }
+
+
+def test_websocket_handler_uses_configured_coalesce_max_chars() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {"type": "req", "id": "c1", "method": "connect", "params": {}},
+            {
+                "type": "req",
+                "id": "m4",
+                "method": "chat.send",
+                "params": {
+                    "sessionId": "cli:req-stream-max",
+                    "text": "ping",
+                    "stream": True,
+                },
+            },
+        ]
+    )
+    handler.coalesce_min_chars = 50
+    handler.coalesce_max_chars = 12
+
+    async def _long_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        del session_id, text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="123456", accumulated="123456", done=False)
+        yield ProviderChunk(text="7890ab", accumulated="1234567890ab", done=False)
+        yield ProviderChunk(text="cdef", accumulated="1234567890abcdef", done=True)
+
+    handler.stream_engine_with_timeout_fn = _long_stream
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    assert socket.sent[2] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m4",
+        "params": {
+            "session_id": "cli:req-stream-max",
+            "text": "1234567890ab",
+            "accumulated": "1234567890ab",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[3] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m4",
+        "params": {
+            "session_id": "cli:req-stream-max",
+            "text": "cdef",
+            "accumulated": "1234567890abcdef",
+            "done": True,
+            "degraded": False,
+        },
+    }
+
+
+def test_websocket_handler_newline_profile_waits_for_newline_not_sentence() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {"type": "req", "id": "c1", "method": "connect", "params": {}},
+            {
+                "type": "req",
+                "id": "m5",
+                "method": "chat.send",
+                "params": {
+                    "sessionId": "cli:req-stream-newline",
+                    "text": "ping",
+                    "stream": True,
+                },
+            },
+        ]
+    )
+    handler.coalesce_profile = "newline"
+    handler.coalesce_min_chars = 8
+    handler.coalesce_max_chars = 200
+
+    async def _newline_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        del session_id, text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="Hello world.", accumulated="Hello world.", done=False)
+        yield ProviderChunk(text="\n", accumulated="Hello world.\n", done=False)
+        yield ProviderChunk(text="Next line done", accumulated="Hello world.\nNext line done", done=True)
+
+    handler.stream_engine_with_timeout_fn = _newline_stream
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    assert socket.sent[2] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m5",
+        "params": {
+            "session_id": "cli:req-stream-newline",
+            "text": "Hello world.\n",
+            "accumulated": "Hello world.\n",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[3] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m5",
+        "params": {
+            "session_id": "cli:req-stream-newline",
+            "text": "Next line done",
+            "accumulated": "Hello world.\nNext line done",
+            "done": True,
+            "degraded": False,
+        },
+    }
+
+
+def test_websocket_handler_paragraph_profile_waits_for_blank_line() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {"type": "req", "id": "c1", "method": "connect", "params": {}},
+            {
+                "type": "req",
+                "id": "m6",
+                "method": "chat.send",
+                "params": {
+                    "sessionId": "cli:req-stream-paragraph",
+                    "text": "ping",
+                    "stream": True,
+                },
+            },
+        ]
+    )
+    handler.coalesce_profile = "paragraph"
+    handler.coalesce_min_chars = 8
+    handler.coalesce_max_chars = 200
+
+    async def _paragraph_stream(
+        session_id: str,
+        text: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, object] | None = None,
+    ):
+        del session_id, text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="Para one.", accumulated="Para one.", done=False)
+        yield ProviderChunk(text="\n\n", accumulated="Para one.\n\n", done=False)
+        yield ProviderChunk(text="Para two done", accumulated="Para one.\n\nPara two done", done=True)
+
+    handler.stream_engine_with_timeout_fn = _paragraph_stream
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    assert socket.sent[2] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m6",
+        "params": {
+            "session_id": "cli:req-stream-paragraph",
+            "text": "Para one.\n\n",
+            "accumulated": "Para one.\n\n",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert socket.sent[3] == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m6",
+        "params": {
+            "session_id": "cli:req-stream-paragraph",
+            "text": "Para two done",
+            "accumulated": "Para one.\n\nPara two done",
+            "done": True,
+            "degraded": False,
+        },
+    }
+
+
+def test_websocket_handler_legacy_message_forwards_context_and_ignores_invalid_runtime_metadata() -> None:
+    handler, socket = _build_handler(
+        inbound=[
+            {
+                "type": "message",
+                "request_id": "legacy-1",
+                "session_id": "cli:legacy",
+                "text": "ping",
+                "channel": "telegram",
+                "chat_id": 789,
+                "runtime_metadata": ["invalid"],
+            },
+        ]
+    )
+
+    asyncio.run(handler.handle(socket, path_label="/ws"))
+
+    handler.run_engine_with_timeout_fn.assert_awaited_once_with(
+        "cli:legacy",
+        "ping",
+        channel="telegram",
+        chat_id="789",
+        runtime_metadata=None,
+    )
+    assert socket.sent[-1] == {
+        "type": "message_result",
+        "session_id": "cli:legacy",
+        "text": "pong",
+        "model": "fake/test",
+        "request_id": "legacy-1",
     }

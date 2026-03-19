@@ -4,10 +4,12 @@ import asyncio
 import importlib.util
 import json
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -169,6 +171,73 @@ class ProviderWithFailoverDiagnostics:
 
     def operator_clear_suppression(self, *, role: str = "", model: str = "") -> dict[str, object]:
         return {"ok": True, "cleared": 1, "role": role, "model": model}
+
+
+def _normalized_diagnostics_engine_payload(engine_payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(engine_payload)
+
+    skills_diag = dict(normalized.get("skills", {}) or {})
+    watcher = dict(skills_diag.get("watcher", {}) or {})
+    for key in (
+        "ticks",
+        "last_result",
+        "last_tick_monotonic",
+        "last_refresh_monotonic",
+        "pending",
+        "debounced",
+    ):
+        watcher.pop(key, None)
+    skills_diag["watcher"] = watcher
+    normalized["skills"] = skills_diag
+
+    memory_analysis = dict(normalized.get("memory_analysis", {}) or {})
+    if memory_analysis:
+        confidence = dict(memory_analysis.get("confidence", {}) or {})
+        counts = dict(memory_analysis.get("counts", {}) or {})
+        recent = dict(memory_analysis.get("recent", {}) or {})
+        semantic = dict(memory_analysis.get("semantic", {}) or {})
+        normalized["memory_analysis"] = {
+            "available": bool(memory_analysis.get("available", False)),
+            "keys": sorted(memory_analysis.keys()),
+            "confidence_keys": sorted(confidence.keys()),
+            "counts_keys": sorted(counts.keys()),
+            "recent_keys": sorted(recent.keys()),
+            "semantic_keys": sorted(semantic.keys()),
+            "reasoning_layers_type": type(memory_analysis.get("reasoning_layers", {})).__name__,
+            "categories_type": type(memory_analysis.get("categories", {})).__name__,
+            "top_sources_type": type(memory_analysis.get("top_sources", [])).__name__,
+        }
+
+    memory_integration = dict(normalized.get("memory_integration", {}) or {})
+    if memory_integration:
+        policies = dict(memory_integration.get("policies", {}) or {})
+        quality = dict(memory_integration.get("quality", {}) or {})
+        normalized["memory_integration"] = {
+            "available": bool(memory_integration.get("available", False)),
+            "mode": str(memory_integration.get("mode", "")),
+            "keys": sorted(memory_integration.keys()),
+            "policy_keys": sorted(policies.keys()),
+            "quality_keys": sorted(quality.keys()),
+        }
+
+    memory_quality = dict(normalized.get("memory_quality", {}) or {})
+    if memory_quality:
+        report = dict(memory_quality.get("report", {}) or {})
+        reasoning_layers = dict(report.get("reasoning_layers", {}) or {})
+        state = dict(memory_quality.get("state", {}) or {})
+        tuning = dict(memory_quality.get("tuning", {}) or {})
+        normalized["memory_quality"] = {
+            "available": bool(memory_quality.get("available", False)),
+            "updated": bool(memory_quality.get("updated", False)),
+            "error_type": type(memory_quality.get("error")).__name__,
+            "keys": sorted(memory_quality.keys()),
+            "report_keys": sorted(report.keys()),
+            "report_reasoning_layer_keys": sorted(reasoning_layers.keys()),
+            "state_keys": sorted(state.keys()),
+            "tuning_keys": sorted(tuning.keys()),
+        }
+
+    return normalized
 
 
 class RecoveringGatewayChannel(BaseChannel):
@@ -491,6 +560,63 @@ def test_gateway_chat_endpoint(tmp_path: Path) -> None:
         alias = client.post("/api/message", json={"session_id": "cli:1", "text": "ping"})
         assert alias.status_code == 200
         assert alias.json()["text"] == "pong"
+
+
+def test_gateway_chat_endpoint_forwards_optional_context(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    seen: list[dict[str, Any]] = []
+
+    async def _capture_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
+        seen.append(
+            {
+                "session_id": session_id,
+                "user_text": user_text,
+                "channel": channel,
+                "chat_id": chat_id,
+                "runtime_metadata": runtime_metadata,
+            }
+        )
+        return SimpleNamespace(text="pong", model="fake/test")
+
+    app.state.runtime.engine.run = _capture_run
+
+    with TestClient(app) as client:
+        chat = client.post(
+            "/v1/chat",
+            json={
+                "session_id": "cli:1",
+                "text": "ping",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "7"},
+            },
+        )
+        assert chat.status_code == 200
+        assert chat.json()["text"] == "pong"
+
+    forwarded = [row for row in seen if row["session_id"] == "cli:1"]
+    assert forwarded == [
+        {
+            "session_id": "cli:1",
+            "user_text": "ping",
+            "channel": "telegram",
+            "chat_id": "42",
+            "runtime_metadata": {"reply_to_message_id": "7"},
+        }
+    ]
 
 
 def test_gateway_chat_endpoint_timeout_returns_provider_style_code(tmp_path: Path) -> None:
@@ -2723,6 +2849,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
+        assert 'value="dashboard:operator"' not in body
 
 
 def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
@@ -2770,6 +2897,12 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerAutonomyWake" in js.text
     assert "triggerSupervisorRecovery" in js.text
     assert "hatch:operator" in js.text
+    assert 'const operatorStorageKey = "clawlite.dashboard.operatorId"' in js.text
+    assert 'const chatSessionStorageKey = "clawlite.dashboard.chatSessionId"' in js.text
+    assert "window.sessionStorage" in js.text
+    assert "window.localStorage.setItem(tokenStorageKey" not in js.text
+    assert "storageRemove(window.localStorage, tokenStorageKey);" in js.text
+    assert "dashboard:operator:" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
     assert "history.replaceState" in js.text
@@ -2820,6 +2953,37 @@ def test_gateway_dashboard_state_endpoint_returns_operational_summary(tmp_path: 
     assert "autonomy" in payload["provider"]
     assert "items" in payload["channels"]
     assert "enabled" in payload["self_evolution"]
+
+
+def test_gateway_dashboard_state_redacts_sensitive_handoff_token_fields(tmp_path: Path) -> None:
+    token = "secret" + "-token"
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+        gateway={
+            "auth": {
+                "mode": "required",
+                "token": token,
+            }
+        },
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        response = client.get("/api/dashboard/state", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    handoff = payload["handoff"]
+    assert handoff["gateway_url"] == "http://127.0.0.1:8787"
+    assert handoff["gateway_token_masked"] == "****et-token"
+    assert "gateway_token" not in handoff
+    assert "dashboard_url_with_token" not in handoff
+    dashboard_row = next(item for item in handoff["guidance"] if item["id"] == "dashboard")
+    assert "#token=" not in dashboard_row["body"]
+    assert token not in json.dumps(handoff)
 
 
 class _ReplayChannel(BaseChannel):
@@ -3311,10 +3475,48 @@ def test_gateway_tools_approval_review_endpoint_updates_request(tmp_path: Path) 
     assert payload["summary"]["approval_context"] == {"tool": "browser", "action": "evaluate"}
     reviewed = registry._approval_requests["req-1"]
     assert reviewed["status"] == "approved"
-    assert reviewed["actor"] == "cli"
+    assert reviewed["actor"] == "control-plane"
     grant_keys = list(registry._approval_grants.keys())
     assert len(grant_keys) == 1
     assert grant_keys[0].startswith("exact::req-1::telegram:1::telegram::browser:evaluate")
+
+
+def test_gateway_tools_approval_review_endpoint_rejects_actor_bound_requests_from_generic_control_plane(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_requests["req-actor"] = {
+        "request_id": "req-actor",
+        "tool": "browser",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "requester_actor": "telegram:42",
+        "matched_approval_specifiers": ["browser:evaluate"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"action":"evaluate"}',
+        "approval_context": {"tool": "browser", "action": "evaluate"},
+        "notified_count": 1,
+    }
+    registry._approval_request_order.append("req-actor")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/tools/approvals/req-actor/approve",
+            json={"actor": "telegram:42", "note": "ok"},
+        )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"] == "approval_channel_bound:telegram:42"
+    reviewed = registry._approval_requests["req-actor"]
+    assert reviewed["status"] == "pending"
 
 
 def test_gateway_tools_grants_revoke_endpoint_removes_matching_grants(tmp_path: Path) -> None:
@@ -3341,6 +3543,83 @@ def test_gateway_tools_grants_revoke_endpoint_removes_matching_grants(tmp_path: 
     assert payload["summary"]["removed_count"] == 1
     assert "telegram:1::telegram::browser:evaluate" not in registry._approval_grants
     assert "telegram:2::telegram::browser:evaluate" in registry._approval_grants
+
+
+def test_gateway_tools_approval_endpoints_require_token_when_configured_even_on_loopback(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "off",
+                "token": "secret-token",
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_requests["req-1"] = {
+        "request_id": "req-1",
+        "tool": "browser",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "matched_approval_specifiers": ["browser:evaluate"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"action":"evaluate"}',
+        "approval_context": {"tool": "browser", "action": "evaluate"},
+        "notified_count": 1,
+    }
+    registry._approval_request_order.append("req-1")
+    registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/v1/status").status_code == 401
+
+        unauthorized_list = client.get("/v1/tools/approvals")
+        assert unauthorized_list.status_code == 401
+        assert unauthorized_list.json()["error"] == "gateway_auth_required"
+
+        unauthorized_review = client.post("/v1/tools/approvals/req-1/approve", json={"actor": "ops"})
+        assert unauthorized_review.status_code == 401
+        assert unauthorized_review.json()["error"] == "gateway_auth_required"
+
+        unauthorized_revoke = client.post(
+            "/v1/tools/grants/revoke",
+            json={"session_id": "telegram:1", "channel": "telegram", "rule": "browser:evaluate"},
+        )
+        assert unauthorized_revoke.status_code == 401
+        assert unauthorized_revoke.json()["error"] == "gateway_auth_required"
+
+        invalid_list = client.get("/v1/tools/approvals", headers={"Authorization": "Bearer wrong-token"})
+        assert invalid_list.status_code == 401
+        assert invalid_list.json()["error"] == "gateway_auth_invalid"
+
+        headers = {"Authorization": "Bearer secret-token"}
+        listed = client.get("/v1/tools/approvals", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["count"] == 1
+
+        reviewed = client.post(
+            "/v1/tools/approvals/req-1/approve",
+            headers=headers,
+            json={"actor": "ops", "note": "reviewed"},
+        )
+        assert reviewed.status_code == 200
+        assert registry._approval_requests["req-1"]["actor"] == "control-plane"
+
+        revoked = client.post(
+            "/v1/tools/grants/revoke",
+            headers=headers,
+            json={"session_id": "telegram:1", "channel": "telegram", "rule": "browser:evaluate"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["summary"]["removed_count"] >= 1
 
 
 def test_gateway_chat_provider_error_returns_graceful_message(tmp_path: Path) -> None:
@@ -4180,6 +4459,16 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         assert unauthorized_tools_catalog_alias.json()["error"] == "gateway_auth_required"
         assert unauthorized_tools_catalog_alias.json()["code"] == "gateway_auth_required"
 
+        unauthorized_dashboard_state = client.get("/api/dashboard/state")
+        assert unauthorized_dashboard_state.status_code == 401
+        assert unauthorized_dashboard_state.json()["error"] == "gateway_auth_required"
+        assert unauthorized_dashboard_state.json()["code"] == "gateway_auth_required"
+
+        unauthorized_chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert unauthorized_chat.status_code == 401
+        assert unauthorized_chat.json()["error"] == "gateway_auth_required"
+        assert unauthorized_chat.json()["code"] == "gateway_auth_required"
+
         ok = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
         assert ok.status_code == 200
         payload = ok.json()
@@ -4208,6 +4497,17 @@ def test_gateway_auth_required_for_control_plane(tmp_path: Path) -> None:
         tools_catalog_alias = client.get("/api/tools/catalog", headers={"Authorization": "Bearer secret-token"})
         assert tools_catalog_alias.status_code == 200
         assert tools_catalog_alias.json() == tools_catalog.json()
+
+        dashboard_state = client.get("/api/dashboard/state", headers={"Authorization": "Bearer secret-token"})
+        assert dashboard_state.status_code == 200
+
+        chat = client.post(
+            "/v1/chat",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"session_id": "cli:1", "text": "ping"},
+        )
+        assert chat.status_code == 200
+        assert chat.json()["text"] == "pong"
 
 
 def test_gateway_auth_auto_hardens_on_non_loopback_with_token(tmp_path: Path) -> None:
@@ -4240,7 +4540,7 @@ def test_gateway_auth_auto_hardens_on_non_loopback_with_token(tmp_path: Path) ->
         assert payload["auth"]["posture"] == "strict"
 
 
-def test_gateway_auth_keeps_loopback_open_with_mode_off(tmp_path: Path) -> None:
+def test_gateway_auth_keeps_loopback_health_and_assets_open_with_mode_off(tmp_path: Path) -> None:
     cfg = AppConfig(
         workspace_path=str(tmp_path / "workspace"),
         state_path=str(tmp_path / "state"),
@@ -4259,9 +4559,30 @@ def test_gateway_auth_keeps_loopback_open_with_mode_off(tmp_path: Path) -> None:
     app.state.runtime.engine.provider = FakeProvider()
 
     with TestClient(app) as client:
-        response = client.get("/v1/status")
-        assert response.status_code == 200
-        payload = response.json()
+        health = client.get("/health")
+        assert health.status_code == 200
+
+        root = client.get("/")
+        assert root.status_code == 200
+
+        asset = client.get("/_clawlite/dashboard.js")
+        assert asset.status_code == 200
+
+        status = client.get("/v1/status")
+        assert status.status_code == 401
+        assert status.json()["error"] == "gateway_auth_required"
+
+        dashboard_state = client.get("/api/dashboard/state")
+        assert dashboard_state.status_code == 401
+        assert dashboard_state.json()["error"] == "gateway_auth_required"
+
+        chat = client.post("/v1/chat", json={"session_id": "cli:1", "text": "ping"})
+        assert chat.status_code == 401
+        assert chat.json()["error"] == "gateway_auth_required"
+
+        authorized_status = client.get("/v1/status", headers={"Authorization": "Bearer secret-token"})
+        assert authorized_status.status_code == 200
+        payload = authorized_status.json()
         assert payload["auth"]["mode"] == "off"
         assert payload["auth"]["posture"] == "open"
 
@@ -4344,6 +4665,36 @@ def test_gateway_ws_alias_respects_auth_guard(tmp_path: Path) -> None:
                 pass
 
         with client.websocket_connect("/ws?token=secret-token") as socket:
+            _assert_connect_challenge(socket)
+            socket.send_json({"session_id": "cli:ws", "text": "ping"})
+            payload = socket.receive_json()
+            assert payload["text"] == "pong"
+
+
+def test_gateway_ws_requires_token_when_configured_even_on_loopback(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "host": "127.0.0.1",
+            "auth": {
+                "mode": "off",
+                "token": "secret-token",
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    app.state.runtime.engine.provider = FakeProvider()
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/v1/ws"):
+                pass
+
+        with client.websocket_connect("/v1/ws?token=secret-token") as socket:
             _assert_connect_challenge(socket)
             socket.send_json({"session_id": "cli:ws", "text": "ping"})
             payload = socket.receive_json()
@@ -4595,9 +4946,25 @@ def test_gateway_ws_req_streams_chunks_before_final_response(tmp_path: Path) -> 
     )
     app = create_app(cfg)
 
-    async def _fake_stream_run(*, session_id: str, user_text: str):
+    seen: list[dict[str, Any]] = []
+
+    async def _fake_stream_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
         assert session_id == "cli:req-stream"
         assert user_text == "ping"
+        seen.append(
+            {
+                "channel": channel,
+                "chat_id": chat_id,
+                "runtime_metadata": runtime_metadata,
+            }
+        )
         yield ProviderChunk(text="po", accumulated="po", done=False)
         yield ProviderChunk(text="ng", accumulated="pong", done=True)
 
@@ -4615,32 +4982,33 @@ def test_gateway_ws_req_streams_chunks_before_final_response(tmp_path: Path) -> 
                     "type": "req",
                     "id": "m-stream",
                     "method": "chat.send",
-                    "params": {"sessionId": "cli:req-stream", "text": "ping", "stream": True},
+                    "params": {
+                        "sessionId": "cli:req-stream",
+                        "text": "ping",
+                        "stream": True,
+                        "channel": "telegram",
+                        "chatId": 123,
+                        "runtimeMetadata": {"reply_to_message_id": "456"},
+                    },
                 }
             )
             chunk_one = socket.receive_json()
-            chunk_two = socket.receive_json()
             final_payload = socket.receive_json()
 
+    assert seen == [
+        {
+            "channel": "telegram",
+            "chat_id": "123",
+            "runtime_metadata": {"reply_to_message_id": "456"},
+        }
+    ]
     assert chunk_one == {
         "type": "event",
         "event": "chat.chunk",
         "id": "m-stream",
         "params": {
             "session_id": "cli:req-stream",
-            "text": "po",
-            "accumulated": "po",
-            "done": False,
-            "degraded": False,
-        },
-    }
-    assert chunk_two == {
-        "type": "event",
-        "event": "chat.chunk",
-        "id": "m-stream",
-        "params": {
-            "session_id": "cli:req-stream",
-            "text": "ng",
+            "text": "pong",
             "accumulated": "pong",
             "done": True,
             "degraded": False,
@@ -4653,6 +5021,173 @@ def test_gateway_ws_req_streams_chunks_before_final_response(tmp_path: Path) -> 
         "result": {
             "session_id": "cli:req-stream",
             "text": "pong",
+            "model": "",
+        },
+    }
+
+
+def test_gateway_ws_req_respects_websocket_coalescing_config(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+        gateway={"websocket": {"coalesce_enabled": False}},
+    )
+    app = create_app(cfg)
+
+    async def _fake_stream_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
+        del session_id, user_text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="po", accumulated="po", done=False)
+        yield ProviderChunk(text="ng", accumulated="pong", done=True)
+
+    app.state.runtime.engine.stream_run = _fake_stream_run
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as socket:
+            _assert_connect_challenge(socket)
+            socket.send_json({"type": "req", "id": "c1", "method": "connect", "params": {}})
+            connect_payload = socket.receive_json()
+            assert connect_payload["ok"] is True
+
+            socket.send_json(
+                {
+                    "type": "req",
+                    "id": "m-stream-raw",
+                    "method": "chat.send",
+                    "params": {
+                        "sessionId": "cli:req-stream-raw",
+                        "text": "ping",
+                        "stream": True,
+                    },
+                }
+            )
+            chunk_one = socket.receive_json()
+            chunk_two = socket.receive_json()
+            final_payload = socket.receive_json()
+
+    assert chunk_one == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m-stream-raw",
+        "params": {
+            "session_id": "cli:req-stream-raw",
+            "text": "po",
+            "accumulated": "po",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert chunk_two == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m-stream-raw",
+        "params": {
+            "session_id": "cli:req-stream-raw",
+            "text": "ng",
+            "accumulated": "pong",
+            "done": True,
+            "degraded": False,
+        },
+    }
+    assert final_payload == {
+        "type": "res",
+        "id": "m-stream-raw",
+        "ok": True,
+        "result": {
+            "session_id": "cli:req-stream-raw",
+            "text": "pong",
+            "model": "",
+        },
+    }
+
+
+def test_gateway_ws_req_respects_websocket_coalescing_profile(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        channels={},
+        gateway={"websocket": {"coalesce_profile": "newline", "coalesce_min_chars": 8}},
+    )
+    app = create_app(cfg)
+
+    async def _fake_stream_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
+        del session_id, user_text, channel, chat_id, runtime_metadata
+        yield ProviderChunk(text="Hello world.", accumulated="Hello world.", done=False)
+        yield ProviderChunk(text="\n", accumulated="Hello world.\n", done=False)
+        yield ProviderChunk(text="Next line done", accumulated="Hello world.\nNext line done", done=True)
+
+    app.state.runtime.engine.stream_run = _fake_stream_run
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as socket:
+            _assert_connect_challenge(socket)
+            socket.send_json({"type": "req", "id": "c1", "method": "connect", "params": {}})
+            connect_payload = socket.receive_json()
+            assert connect_payload["ok"] is True
+
+            socket.send_json(
+                {
+                    "type": "req",
+                    "id": "m-stream-newline",
+                    "method": "chat.send",
+                    "params": {
+                        "sessionId": "cli:req-stream-newline",
+                        "text": "ping",
+                        "stream": True,
+                    },
+                }
+            )
+            chunk_one = socket.receive_json()
+            chunk_two = socket.receive_json()
+            final_payload = socket.receive_json()
+
+    assert chunk_one == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m-stream-newline",
+        "params": {
+            "session_id": "cli:req-stream-newline",
+            "text": "Hello world.\n",
+            "accumulated": "Hello world.\n",
+            "done": False,
+            "degraded": False,
+        },
+    }
+    assert chunk_two == {
+        "type": "event",
+        "event": "chat.chunk",
+        "id": "m-stream-newline",
+        "params": {
+            "session_id": "cli:req-stream-newline",
+            "text": "Next line done",
+            "accumulated": "Hello world.\nNext line done",
+            "done": True,
+            "degraded": False,
+        },
+    }
+    assert final_payload == {
+        "type": "res",
+        "id": "m-stream-newline",
+        "ok": True,
+        "result": {
+            "session_id": "cli:req-stream-newline",
+            "text": "Hello world.\nNext line done",
             "model": "",
         },
     }
@@ -4891,22 +5426,8 @@ def test_gateway_diagnostics_schema_and_toggle(tmp_path: Path) -> None:
         assert alias_payload["schema_version"] == payload["schema_version"]
         assert alias_payload["contract_version"] == payload["contract_version"]
         assert alias_payload["environment"] == payload["environment"]
-        expected_engine = dict(payload["engine"])
-        actual_engine = dict(alias_payload["engine"])
-        for engine_block in (expected_engine, actual_engine):
-            skills_diag = dict(engine_block.get("skills", {}) or {})
-            watcher = dict(skills_diag.get("watcher", {}) or {})
-            for key in (
-                "ticks",
-                "last_result",
-                "last_tick_monotonic",
-                "last_refresh_monotonic",
-                "pending",
-                "debounced",
-            ):
-                watcher.pop(key, None)
-            skills_diag["watcher"] = watcher
-            engine_block["skills"] = skills_diag
+        expected_engine = _normalized_diagnostics_engine_payload(dict(payload["engine"]))
+        actual_engine = _normalized_diagnostics_engine_payload(dict(alias_payload["engine"]))
         assert actual_engine == expected_engine
         assert set(alias_payload["control_plane"].keys()) == set(payload["control_plane"].keys())
         assert alias_payload["control_plane"]["contract_version"] == payload["control_plane"]["contract_version"]
@@ -5962,22 +6483,8 @@ def test_gateway_diagnostics_omits_provider_telemetry_when_disabled(tmp_path: Pa
 
         alias_payload = client.get("/api/diagnostics").json()
         assert "provider" not in alias_payload["engine"]
-        expected_engine = dict(payload["engine"])
-        actual_engine = dict(alias_payload["engine"])
-        for engine_block in (expected_engine, actual_engine):
-            skills_diag = dict(engine_block.get("skills", {}) or {})
-            watcher = dict(skills_diag.get("watcher", {}) or {})
-            for key in (
-                "ticks",
-                "last_result",
-                "last_tick_monotonic",
-                "last_refresh_monotonic",
-                "pending",
-                "debounced",
-            ):
-                watcher.pop(key, None)
-            skills_diag["watcher"] = watcher
-            engine_block["skills"] = skills_diag
+        expected_engine = _normalized_diagnostics_engine_payload(dict(payload["engine"]))
+        actual_engine = _normalized_diagnostics_engine_payload(dict(alias_payload["engine"]))
         assert actual_engine == expected_engine
 
 
@@ -6294,8 +6801,16 @@ def test_gateway_cron_delete_uses_to_thread_and_preserves_payload(tmp_path: Path
 
 def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_send() -> None:
     class _Engine:
-        async def run(self, *, session_id: str, user_text: str):
-            del session_id, user_text
+        async def run(
+            self,
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ):
+            del session_id, user_text, channel, chat_id, runtime_metadata
             await asyncio.sleep(0.05)
             return SimpleNamespace(text="late", model="fake/test")
 
@@ -6317,6 +6832,174 @@ def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_sen
         runtime.channels.send.assert_not_awaited()
 
     asyncio.run(_scenario())
+
+
+def test_route_cron_job_forwards_resolved_context_to_engine_and_channel_send() -> None:
+    seen: list[dict[str, Any]] = []
+
+    class _Engine:
+        async def run(
+            self,
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ):
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return SimpleNamespace(text="done", model="fake/test")
+
+    runtime = SimpleNamespace(
+        engine=_Engine(),
+        channels=SimpleNamespace(send=AsyncMock(return_value="msg-1")),
+    )
+    job = SimpleNamespace(
+        id="job-2",
+        session_id="telegram:chat42",
+        payload=SimpleNamespace(
+            prompt="run check",
+            channel="",
+            target="",
+            runtime_metadata={"reply_to_message_id": "7"},
+        ),
+    )
+
+    async def _scenario() -> None:
+        result = await _route_cron_job(runtime, job)
+        assert result == "done"
+
+    asyncio.run(_scenario())
+
+    assert seen == [
+        {
+            "session_id": "telegram:chat42",
+            "user_text": "run check",
+            "channel": "telegram",
+            "chat_id": "chat42",
+            "runtime_metadata": {"reply_to_message_id": "7"},
+        }
+    ]
+    runtime.channels.send.assert_awaited_once_with(channel="telegram", target="chat42", text="done")
+
+
+def test_gateway_job_workers_forward_context_for_agent_and_skill_runs(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    seen: list[dict[str, Any]] = []
+    agent_seen = threading.Event()
+    skill_seen = threading.Event()
+
+    def _job_state(job: Any) -> dict[str, Any]:
+        if job is None:
+            return {"status": None, "error": "", "result": ""}
+        return {
+            "status": getattr(job, "status", None),
+            "error": str(getattr(job, "error", "") or ""),
+            "result": str(getattr(job, "result", "") or ""),
+        }
+
+    async def _capture_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
+        seen.append(
+            {
+                "session_id": session_id,
+                "user_text": user_text,
+                "channel": channel,
+                "chat_id": chat_id,
+                "runtime_metadata": runtime_metadata,
+                }
+            )
+        if session_id == "telegram:42":
+            agent_seen.set()
+        elif session_id == "discord:99":
+            skill_seen.set()
+        return SimpleNamespace(text="ok", model="fake/test")
+
+    app.state.runtime.engine.run = _capture_run
+    app.state.runtime.skills_loader.load_skill_content = lambda name: "Skill body" if name == "demo" else None
+
+    with TestClient(app):
+        agent_job = app.state.runtime.job_queue.submit(
+            "agent_run",
+            {
+                "task": "run agent task",
+                "channel": "telegram",
+                "target": "42",
+                "runtime_metadata": {"reply_to_message_id": "7"},
+            },
+            session_id="telegram:42",
+        )
+        skill_job = app.state.runtime.job_queue.submit(
+            "skill_exec",
+            {
+                "skill": "demo",
+                "task": "run skill task",
+                "channel": "discord",
+                "chat_id": "99",
+                "runtime_metadata": {"custom_id": "btn-1"},
+            },
+            session_id="discord:99",
+        )
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            agent_status = app.state.runtime.job_queue.status(agent_job.id)
+            skill_status = app.state.runtime.job_queue.status(skill_job.id)
+            if (
+                agent_seen.is_set()
+                and skill_seen.is_set()
+                and agent_status is not None
+                and skill_status is not None
+                and agent_status.status == "done"
+                and skill_status.status == "done"
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(
+                "timed out waiting for job workers to finish "
+                f"(agent_seen={agent_seen.is_set()} agent={_job_state(agent_status)} "
+                f"skill_seen={skill_seen.is_set()} skill={_job_state(skill_status)})"
+            )
+
+    forwarded = [row for row in seen if row["session_id"] in {"telegram:42", "discord:99"}]
+    assert forwarded == [
+        {
+            "session_id": "telegram:42",
+            "user_text": "run agent task",
+            "channel": "telegram",
+            "chat_id": "42",
+            "runtime_metadata": {"reply_to_message_id": "7"},
+        },
+        {
+            "session_id": "discord:99",
+            "user_text": "Skill context:\nSkill body\n\nTask: run skill task",
+            "channel": "discord",
+            "chat_id": "99",
+            "runtime_metadata": {"custom_id": "btn-1"},
+        },
+    ]
 
 
 def test_gateway_heartbeat_trigger_contract_updates_state(tmp_path: Path) -> None:

@@ -304,6 +304,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "timed_out": True,
                 }
             )
+        finally:
+            drain_turn_persistence = getattr(runtime.engine, "drain_turn_persistence", None)
+            if callable(drain_turn_persistence):
+                await drain_turn_persistence()
 
     asyncio.run(_scenario())
     return 0
@@ -347,6 +351,10 @@ def cmd_hatch(args: argparse.Namespace) -> int:
                 }
             )
             return 2
+        finally:
+            drain_turn_persistence = getattr(runtime.engine, "drain_turn_persistence", None)
+            if callable(drain_turn_persistence):
+                await drain_turn_persistence()
 
         model = str(getattr(out, "model", "") or "").strip()
         text = str(getattr(out, "text", "") or "")
@@ -2227,7 +2235,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tools_approve = tools_sub.add_parser("approve", help="Approve one pending tool request through the gateway")
     p_tools_approve.add_argument("request_id")
-    p_tools_approve.add_argument("--actor", default="", help="Optional operator label recorded with the review")
+    p_tools_approve.add_argument(
+        "--actor",
+        default="",
+        help="Compatibility-only label; generic gateway reviews are recorded as control-plane",
+    )
     p_tools_approve.add_argument("--note", default="", help="Optional review note")
     p_tools_approve.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
     p_tools_approve.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")
@@ -2236,7 +2248,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tools_reject = tools_sub.add_parser("reject", help="Reject one pending tool request through the gateway")
     p_tools_reject.add_argument("request_id")
-    p_tools_reject.add_argument("--actor", default="", help="Optional operator label recorded with the review")
+    p_tools_reject.add_argument(
+        "--actor",
+        default="",
+        help="Compatibility-only label; generic gateway reviews are recorded as control-plane",
+    )
     p_tools_reject.add_argument("--note", default="", help="Optional review note")
     p_tools_reject.add_argument("--gateway-url", default="", help="Gateway base URL, e.g. http://127.0.0.1:8787")
     p_tools_reject.add_argument("--token", default="", help="Bearer token for protected gateway endpoints")

@@ -158,7 +158,7 @@ class BrowserTool(Tool):
                 status = response.status if response else 0
                 title = await page.title()
                 text = (await page.inner_text("body"))[:8000]
-                return f"[{status}] {title}\n\n{text}"
+                return _format_untrusted_browser_content(f"[{status}] {title}\n\n{text}")
             if action == "click":
                 selector = str(arguments.get("selector", "") or "").strip()
                 if not selector:

@@ -42,6 +42,7 @@ class EngineProtocol:
         user_text: str,
         channel: str | None = None,
         chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
         progress_hook=None,
         stop_event=None,
     ): ...
@@ -1835,6 +1836,7 @@ class ChannelManager:
                     user_text=event.text,
                     channel=event.channel,
                     chat_id=target,
+                    runtime_metadata=event.metadata,
                     progress_hook=_progress_hook,
                     stop_event=self.bus.stop_event(event.session_id),
                 )

@@ -38,7 +38,7 @@ Notes:
 - `run` does not require the gateway to be running.
 - `hatch` does not require the gateway to be running; it uses the dedicated `hatch:operator` session and only completes bootstrap when a pending hatch exists.
 - `status` includes enabled channels, provider model, heartbeat interval, and bootstrap state.
-- `dashboard` prints the current dashboard URL, tokenized handoff URL, bootstrap state, post-onboarding guidance (including web-search hints), and can open the browser unless `--no-open` is passed.
+- `dashboard` prints the current dashboard URL, a one-time tokenized handoff URL, bootstrap state, post-onboarding guidance (including web-search hints), and can open the browser unless `--no-open` is passed. The browser keeps that token only for the current tab session after bootstrap.
 - `discord status` reads Discord runtime state from `/api/dashboard/state`; `discord refresh` calls the live gateway transport-refresh control.
 - `telegram status` reads Telegram runtime state from `/api/dashboard/state` and includes operator hints; `telegram refresh`, `telegram offset-commit`, `telegram offset-sync`, and `telegram offset-reset` call the live gateway control endpoints.
 - `jobs list` reads from the persisted job store, `jobs status` inspects one job by id, and `jobs cancel` requires a live runtime because it calls the gateway cancellation path.
@@ -239,14 +239,14 @@ The local skill state is stored in `~/.clawlite/state/skills-state.json`.
 | --- | --- | --- |
 | `tools safety <tool>` | Previews the effective safety policy for one tool call | `clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"evaluate"}'` |
 | `tools approvals` | Lists live pending/reviewed tool approval requests from the gateway, with optional tool/rule filters | `clawlite tools approvals --include-grants --tool browser --rule browser:evaluate` |
-| `tools approve <request_id>` | Approves one pending tool request through the gateway | `clawlite tools approve req-1 --actor ops` |
-| `tools reject <request_id>` | Rejects one pending tool request through the gateway | `clawlite tools reject req-1 --actor ops --note "needs safer scope"` |
+| `tools approve <request_id>` | Approves one pending tool request through the gateway | `clawlite tools approve req-1 --note "approved after review"` |
+| `tools reject <request_id>` | Rejects one pending tool request through the gateway | `clawlite tools reject req-1 --note "needs safer scope"` |
 | `tools revoke-grant` | Revokes active temporary tool grants through the gateway | `clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate` |
 | `tools catalog` | Fetches the live gateway tool catalog | `clawlite tools catalog --include-schema --group runtime` |
 | `tools show <name>` | Shows one live tool entry, resolving aliases like `bash -> exec` | `clawlite tools show bash` |
 
 `tools safety` does not run the tool. It shows the resolved channel, derived specifiers, matched risky rules, matched approval rules, a structured `approval_context`, and a final `decision` of `allow`, `approval`, or `block`. For `exec`, the preview now also exposes derived specifiers such as `exec:shell`, `exec:env-key:...`, and `exec:cwd`.
-`tools approvals`, `tools approve`, `tools reject`, and `tools revoke-grant` use the live gateway control surface and accept the same `--gateway-url`, `--token`, and `--timeout` flags as `tools catalog`. Approval rows now surface structured context like exec binary/env keys/cwd and browser or web host targets, and `tools approvals` can narrow the queue further with `--tool` and `--rule`.
+`tools approvals`, `tools approve`, `tools reject`, and `tools revoke-grant` use the live gateway control surface and accept the same `--gateway-url`, `--token`, and `--timeout` flags as `tools catalog`. Approval rows now surface structured context like exec binary/env keys/cwd and browser or web host targets, and `tools approvals` can narrow the queue further with `--tool` and `--rule`. When a gateway token is configured, the approval/grant endpoints require that token even on loopback. When a request row includes `requester_actor`, that review is actor-bound: inspect it from CLI if you want, but approve/reject it from the original Telegram/Discord interaction instead of the generic CLI command. Generic CLI-triggered reviews are recorded as `control-plane`, not as the optional `--actor` label.
 `tools catalog` and `tools show` call the gateway catalog endpoint and accept `--gateway-url`, `--token`, and `--timeout`.
 
 ## Common Operator Workflow

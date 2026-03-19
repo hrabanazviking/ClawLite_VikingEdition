@@ -219,6 +219,31 @@ def test_message_tool_maps_buttons_to_telegram_metadata() -> None:
     asyncio.run(_scenario())
 
 
+def test_message_tool_maps_buttons_to_discord_components() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+        out = await tool.run(
+            {
+                "channel": "discord",
+                "target": "channel:1",
+                "text": "choose",
+                "buttons": [[{"text": "Approve", "callback_data": "approve:1"}, {"text": "Open", "url": "https://example.com"}]],
+            },
+            ToolContext(session_id="s"),
+        )
+        assert out.startswith("sent:discord")
+        sent_metadata = api.calls[-1]["metadata"]
+        components = sent_metadata["discord_components"]
+        assert components[0]["type"] == 1
+        assert components[0]["components"][0]["custom_id"] == "approve:1"
+        assert components[0]["components"][0]["style"] == 1
+        assert components[0]["components"][1]["url"] == "https://example.com"
+        assert components[0]["components"][1]["style"] == 5
+
+    asyncio.run(_scenario())
+
+
 def test_message_tool_maps_media_to_telegram_metadata() -> None:
     async def _scenario() -> None:
         api = FakeMsgAPI()
@@ -261,7 +286,7 @@ def test_message_tool_rejects_media_for_non_telegram_channel() -> None:
             )
             raise AssertionError("expected ValueError for non-telegram media")
         except ValueError as exc:
-            assert "telegram" in str(exc)
+            assert "media is not supported on `slack`" in str(exc)
 
     asyncio.run(_scenario())
 
@@ -284,6 +309,25 @@ def test_message_tool_invalid_buttons_raises_value_error() -> None:
             raise AssertionError("expected ValueError for invalid buttons")
         except ValueError as exc:
             assert "exactly one" in str(exc)
+
+    asyncio.run(_scenario())
+
+
+def test_message_tool_rejects_buttons_for_unsupported_channel() -> None:
+    async def _scenario() -> None:
+        api = FakeMsgAPI()
+        tool = MessageTool(api)
+
+        with pytest.raises(ValueError, match="buttons are not supported"):
+            await tool.run(
+                {
+                    "channel": "slack",
+                    "target": "general",
+                    "text": "choose",
+                    "buttons": [[{"text": "Approve", "callback_data": "approve:1"}]],
+                },
+                ToolContext(session_id="s"),
+            )
 
     asyncio.run(_scenario())
 
@@ -342,9 +386,27 @@ def test_message_tool_telegram_action_constraints_raise_value_error() -> None:
             )
             raise AssertionError("expected ValueError for non-telegram action")
         except ValueError as exc:
-            assert "telegram" in str(exc)
+            assert "action `edit` is not supported on `slack`" in str(exc)
 
     asyncio.run(_scenario())
+
+
+def test_message_tool_channel_capabilities_are_honest() -> None:
+    assert MessageTool.channel_capabilities("telegram") == {
+        "actions": ["create_topic", "delete", "edit", "react", "reply", "send"],
+        "buttons": True,
+        "media": True,
+    }
+    assert MessageTool.channel_capabilities("discord") == {
+        "actions": ["send"],
+        "buttons": True,
+        "media": False,
+    }
+    assert MessageTool.channel_capabilities("slack") == {
+        "actions": ["send"],
+        "buttons": False,
+        "media": False,
+    }
 
 
 def test_spawn_tool() -> None:

@@ -10,7 +10,15 @@ from typing import Any
 
 import clawlite.core.engine as engine_module
 from clawlite.config.schema import ToolSafetyPolicyConfig
-from clawlite.core.engine import AgentEngine, InMemorySessionStore, LoopDetectionSettings, ProviderResult, ToolCall, TurnBudget
+from clawlite.core.engine import (
+    AgentEngine,
+    InMemorySessionStore,
+    LoopDetectionSettings,
+    ProviderChunk,
+    ProviderResult,
+    ToolCall,
+    TurnBudget,
+)
 from clawlite.core.memory import MemoryRecord
 from clawlite.core.subagent import SubagentManager, SubagentRun
 from clawlite.core.subagent_synthesizer import SubagentSynthesizer
@@ -42,7 +50,17 @@ class FakeProvider:
 
 @dataclass
 class FakeTools:
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del channel, user_id, requester_id
         return f"{name}:{arguments.get('text', '')}:{session_id}"
 
     def schema(self):
@@ -88,6 +106,71 @@ class FakePromptCaptureProvider:
         del tools
         self.snapshots.append(copy.deepcopy(messages))
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
+
+
+class FakeStreamingPromptCaptureProvider:
+    def __init__(self, text: str = "ok") -> None:
+        self.text = text
+        self.snapshots: list[list[dict[str, Any]]] = []
+        self.stream_calls = 0
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del max_tokens, temperature
+        self.stream_calls += 1
+        self.snapshots.append(copy.deepcopy(messages))
+        if not self.text:
+            yield ProviderChunk(text="", accumulated="", done=True)
+            return
+        accumulated = ""
+        for index, char in enumerate(self.text):
+            accumulated += char
+            yield ProviderChunk(text=char, accumulated=accumulated, done=index == len(self.text) - 1)
+
+
+class FakeStreamingErrorProvider:
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        yield ProviderChunk(text="", accumulated="", done=True, error="provider_stream_error:boom")
+
+
+class FakeStreamingDegradedProvider:
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        yield ProviderChunk(text="o", accumulated="o", done=False)
+        yield ProviderChunk(text="k", accumulated="ok", done=True, degraded=True)
+
+
+class LockTrackingStreamingProvider:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            yield ProviderChunk(text="o", accumulated="o", done=False)
+            await asyncio.sleep(0.02)
+            yield ProviderChunk(text="k", accumulated="ok", done=True)
+        finally:
+            self.active -= 1
+
+
+class StoppableStreamingProvider:
+    def __init__(self) -> None:
+        self.closed = False
+        self.yielded_second = False
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        try:
+            yield ProviderChunk(text="o", accumulated="o", done=False)
+            await asyncio.sleep(0.05)
+            self.yielded_second = True
+            yield ProviderChunk(text="k", accumulated="ok", done=True)
+        finally:
+            self.closed = True
 
 
 class FakeFixedTextProvider:
@@ -155,9 +238,42 @@ class FakeWebToolProvider:
         return ProviderResult(text="OpenClaw is an autonomous assistant stack.", tool_calls=[], model="fake/model")
 
 
+class FakeStreamingWebToolProvider(FakeWebToolProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_calls = 0
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        self.stream_calls += 1
+        yield ProviderChunk(text="st", accumulated="st", done=False)
+        yield ProviderChunk(text="ream", accumulated="stream", done=True)
+
+
+class FakeStreamingToolSignalProvider:
+    def __init__(self) -> None:
+        self.stream_calls = 0
+        self.tools_seen: list[dict[str, Any]] | None = None
+
+    async def stream(self, *, messages, tools=None, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        self.stream_calls += 1
+        self.tools_seen = list(tools or [])
+        yield ProviderChunk(text="", accumulated="", done=True, requires_full_run=True)
+
+
 class FakeWebSearchTools:
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
-        del arguments, session_id, channel, user_id
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del arguments, session_id, channel, user_id, requester_id
         if name != "web_search":
             raise AssertionError(f"unexpected tool {name}")
         return json.dumps(
@@ -324,6 +440,108 @@ class FakeMemoryWithAsyncMemorize(FakeMemory):
         del messages, source
         self.consolidate_calls += 1
         return None
+
+
+class FakeMemoryWithDeferredTurnPersistence(FakeMemory):
+    supports_deferred_turn_persistence = True
+
+    def __init__(self, rows: list[MemoryRecord] | None = None) -> None:
+        super().__init__(rows)
+        self.memorize_calls: list[dict[str, Any]] = []
+        self.working_set_writes: list[dict[str, Any]] = []
+        self.allow_memorize = asyncio.Event()
+        self.memorize_started = asyncio.Event()
+
+    def remember_working_set(
+        self,
+        *,
+        role: str,
+        content: str,
+        session_id: str = "",
+        user_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        allow_promotion: bool = True,
+    ) -> None:
+        self.working_set_writes.append(
+            {
+                "session_id": session_id,
+                "role": str(role or ""),
+                "content": str(content or ""),
+                "user_id": user_id,
+                "metadata": dict(metadata or {}),
+                "allow_promotion": bool(allow_promotion),
+            }
+        )
+
+    async def memorize(
+        self,
+        *,
+        messages=None,
+        source: str = "session",
+        text: str | None = None,
+        user_id: str = "",
+        shared: bool = False,
+        metadata: dict[str, Any] | None = None,
+        reasoning_layer: str | None = None,
+        memory_type: str | None = None,
+        happened_at: str | None = None,
+    ) -> dict[str, Any]:
+        self.memorize_started.set()
+        await self.allow_memorize.wait()
+        self.memorize_calls.append(
+            {
+                "messages": messages,
+                "text": text,
+                "source": source,
+                "user_id": user_id,
+                "shared": shared,
+                "metadata": dict(metadata or {}),
+                "reasoning_layer": reasoning_layer,
+                "memory_type": memory_type,
+                "happened_at": happened_at,
+            }
+        )
+        return {"status": "ok"}
+
+
+class FakeMemoryWithWorkingSetBatchCapture(FakeMemory):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.working_set_writes: list[dict[str, Any]] = []
+        self.batch_calls: list[dict[str, Any]] = []
+
+    def remember_working_messages(
+        self,
+        *,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        user_id: str = "default",
+        metadata: dict[str, Any] | None = None,
+        allow_promotion: bool = True,
+    ) -> None:
+        self.batch_calls.append(
+            {
+                "session_id": session_id,
+                "messages": [dict(item) for item in messages],
+                "user_id": user_id,
+                "metadata": dict(metadata or {}),
+                "allow_promotion": allow_promotion,
+            }
+        )
+        for item in messages:
+            self.working_set_writes.append(
+                {
+                    "session_id": session_id,
+                    "role": str(item.get("role", "") or ""),
+                    "content": str(item.get("content", "") or ""),
+                    "user_id": user_id,
+                    "metadata": dict(metadata or {}),
+                    "allow_promotion": allow_promotion,
+                }
+            )
+
+    def remember_working_set(self, *args, **kwargs) -> None:
+        raise AssertionError("remember_working_set fallback should not be used when batch API is available")
 
 
 class FakeMemoryWithContextKwargs(FakeMemory):
@@ -972,8 +1190,17 @@ class FakeWhitespaceVariantFailTools:
             "  boom failed   ",
         ]
 
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
-        del name, arguments, session_id, channel, user_id
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del name, arguments, session_id, channel, user_id, requester_id
         message = self._errors[min(self.calls, len(self._errors) - 1)]
         self.calls += 1
         raise RuntimeError(message)
@@ -983,8 +1210,17 @@ class FakeWhitespaceVariantFailTools:
 
 
 class FakePingPongTools:
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
-        del arguments, session_id, channel, user_id
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del arguments, session_id, channel, user_id, requester_id
         if name == "alpha":
             return "alpha:still waiting"
         if name == "beta":
@@ -1002,8 +1238,17 @@ class FakeChangingResultTools:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
-        del channel, user_id
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del channel, user_id, requester_id
         self.calls += 1
         return f"{name}:{arguments.get('text', '')}:{session_id}:{self.calls}"
 
@@ -1186,7 +1431,17 @@ class ContextCaptureTools:
         self.last_channel = ""
         self.last_user_id = ""
 
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
+        del requester_id
         self.last_channel = str(channel)
         self.last_user_id = str(user_id)
         return f"{name}:ok:{session_id}"
@@ -1210,7 +1465,16 @@ class ExecuteCaptureTools:
     def __init__(self) -> None:
         self.execute_calls: list[dict[str, Any]] = []
 
-    async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+    async def execute(
+        self,
+        name,
+        arguments,
+        *,
+        session_id: str,
+        channel: str = "",
+        user_id: str = "",
+        requester_id: str = "",
+    ) -> str:
         self.execute_calls.append(
             {
                 "name": name,
@@ -1218,6 +1482,7 @@ class ExecuteCaptureTools:
                 "session_id": session_id,
                 "channel": channel,
                 "user_id": user_id,
+                "requester_id": requester_id,
             }
         )
         return f"{name}:{arguments.get('text', '')}:{session_id}"
@@ -1313,6 +1578,7 @@ def test_engine_accepts_tool_arguments_from_json_string_payload() -> None:
                 "session_id": "cli:json-args",
                 "channel": "cli",
                 "user_id": "json-args",
+                "requester_id": "",
             }
         ]
         tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
@@ -1394,6 +1660,7 @@ def test_engine_normalizes_dict_provider_payloads_and_tuple_tool_calls() -> None
                 "session_id": "cli:dict-provider",
                 "channel": "cli",
                 "user_id": "dict-provider",
+                "requester_id": "",
             }
         ]
         metrics = engine.turn_metrics_snapshot()
@@ -1901,6 +2168,989 @@ def test_engine_injects_compressed_history_summary_before_recent_turns() -> None
     asyncio.run(_scenario())
 
 
+def test_engine_injects_allowlisted_runtime_metadata_into_prompt_context() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=FakeMemory(),
+        )
+
+        out = await engine.run(
+            session_id="telegram:42",
+            user_text="continue",
+            channel="telegram",
+            chat_id="42",
+            runtime_metadata={
+                "message_id": "m-42",
+                "message_thread_id": 13,
+                "thread_ts": "1700.3",
+                "reply_to_text": "parent context",
+                "command": "focus",
+                "command_args": "session-1",
+                "is_dm": True,
+                "is_forum": True,
+                "callback_signed": True,
+                "custom_id": "approve:123",
+                "media_type": "voice",
+                "bridge_payload": {"raw": "ignore me"},
+            },
+        )
+
+        assert out.text == "ok"
+        final_user_message = provider.snapshots[0][-1]
+        assert final_user_message["role"] == "user"
+        runtime_context = str(final_user_message.get("content", ""))
+        assert runtime_context.endswith("continue")
+        assert "[Runtime Context" in runtime_context
+        assert "Message ID: m-42" in runtime_context
+        assert "Thread ID: 13" in runtime_context
+        assert "Thread TS: 1700.3" in runtime_context
+        assert "Reply-To Text: parent context" in runtime_context
+        assert "Command: focus" in runtime_context
+        assert "Command Args: session-1" in runtime_context
+        assert "Is DM: true" in runtime_context
+        assert "Is Forum: true" in runtime_context
+        assert "Callback Signed: true" in runtime_context
+        assert "Custom ID: approve:123" in runtime_context
+        assert "Media Type: voice" in runtime_context
+        assert "bridge_payload" not in runtime_context
+        assert "ignore me" not in runtime_context
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_uses_shaped_prompt_memory_history_and_runtime_context() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("ok")
+        memory = FakeMemory(
+            [
+                MemoryRecord(
+                    id="a1b2c3d4e5f6",
+                    text="Remember the thread context.",
+                    source="session:telegram:42",
+                    created_at="2026-03-04T12:00:00+00:00",
+                )
+            ]
+        )
+        sessions = InMemorySessionStore()
+        sessions.append("telegram:42", "user", "older request")
+        sessions.append("telegram:42", "assistant", "older answer")
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=memory,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="telegram:42",
+                user_text="continue",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={
+                    "message_thread_id": 13,
+                    "reply_to_text": "parent context",
+                },
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in chunks) == "ok"
+        assert provider.stream_calls == 1
+        snapshot = provider.snapshots[0]
+        memory_sections = [row for row in snapshot if row.get("role") == "system" and "[Memory]" in str(row.get("content", ""))]
+        assert memory_sections
+        assert any(row.get("role") == "assistant" and "older answer" in str(row.get("content", "")) for row in snapshot)
+        final_user_message = snapshot[-1]
+        assert final_user_message["role"] == "user"
+        merged_content = str(final_user_message.get("content", ""))
+        assert merged_content.endswith("continue")
+        assert "[Runtime Context" in merged_content
+        assert "Thread ID: 13" in merged_content
+        assert "Reply-To Text: parent context" in merged_content
+
+    asyncio.run(_scenario())
+
+
+def test_engine_run_merges_runtime_context_into_single_current_user_message() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+        )
+
+        out = await engine.run(
+            session_id="telegram:42",
+            user_text="hello",
+            channel="telegram",
+            chat_id="42",
+            runtime_metadata={"reply_to_message_id": "7"},
+        )
+
+        assert out.text == "ok"
+        snapshot = provider.snapshots[0]
+        user_rows = [row for row in snapshot if row.get("role") == "user"]
+        assert user_rows
+        final_user_message = user_rows[-1]
+        content = str(final_user_message.get("content", ""))
+        assert content.endswith("hello")
+        assert "[Runtime Context" in content
+        assert "Reply-To Message ID: 7" in content
+        if len(user_rows) >= 2:
+            assert "[Runtime Context" not in str(user_rows[-2].get("content", ""))
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_persists_user_and_assistant_messages_after_completion() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("pong")
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+
+        chunks = [chunk async for chunk in await engine.stream_run(session_id="cli:stream", user_text="ping")]
+
+        assert "".join(chunk.text for chunk in chunks) == "pong"
+        assert sessions.rows == [
+            {"session_id": "cli:stream", "role": "user", "content": "ping"},
+            {"session_id": "cli:stream", "role": "assistant", "content": "pong"},
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_persists_empty_completion_turn() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("")
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+
+        chunks = [chunk async for chunk in await engine.stream_run(session_id="cli:stream-empty", user_text="ping")]
+
+        assert chunks == [ProviderChunk(text="", accumulated="", done=True)]
+        assert sessions.rows == [
+            {"session_id": "cli:stream-empty", "role": "user", "content": "ping"},
+            {"session_id": "cli:stream-empty", "role": "assistant", "content": ""},
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_records_working_memory_for_completed_turns() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("ok")
+        memory = FakeMemoryWithWorkingSetCapture()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=memory,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="telegram:42",
+                user_text="hello there",
+                channel="telegram",
+                chat_id="42",
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in chunks) == "ok"
+        assert memory.working_set_writes == [
+            {
+                "session_id": "telegram:42",
+                "role": "user",
+                "content": "hello there",
+                "user_id": "42",
+                "metadata": {"channel": "telegram"},
+                "allow_promotion": True,
+            },
+            {
+                "session_id": "telegram:42",
+                "role": "assistant",
+                "content": "ok",
+                "user_id": "42",
+                "metadata": {"channel": "telegram"},
+                "allow_promotion": True,
+            },
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_prefers_batch_working_memory_persistence_when_available() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("ok")
+        memory = FakeMemoryWithWorkingSetBatchCapture()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=memory,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="telegram:42",
+                user_text="hello there",
+                channel="telegram",
+                chat_id="42",
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in chunks) == "ok"
+        assert memory.batch_calls == [
+            {
+                "session_id": "telegram:42",
+                "messages": [
+                    {"role": "user", "content": "hello there"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "user_id": "42",
+                "metadata": {"channel": "telegram"},
+                "allow_promotion": True,
+            }
+        ]
+        assert memory.working_set_writes == [
+            {
+                "session_id": "telegram:42",
+                "role": "user",
+                "content": "hello there",
+                "user_id": "42",
+                "metadata": {"channel": "telegram"},
+                "allow_promotion": True,
+            },
+            {
+                "session_id": "telegram:42",
+                "role": "assistant",
+                "content": "ok",
+                "user_id": "42",
+                "metadata": {"channel": "telegram"},
+                "allow_promotion": True,
+            },
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_memorizes_completed_turn_with_runtime_user_context() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("ok")
+        memory = FakeMemoryWithContextKwargs()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=memory,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="telegram:42",
+                user_text="remember this",
+                channel="telegram",
+                chat_id="42",
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in chunks) == "ok"
+        assert memory.memorize_calls == [
+            {
+                "messages": [
+                    {"role": "user", "content": "remember this"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "source": "session:telegram:42",
+                "user_id": "42",
+                "shared": False,
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_skips_assistant_persistence_after_provider_error_chunk() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingErrorProvider()
+        memory = FakeMemoryWithAsyncMemorize()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=memory,
+        )
+
+        chunks = [chunk async for chunk in await engine.stream_run(session_id="cli:stream-error", user_text="ping")]
+
+        assert chunks == [ProviderChunk(text="", accumulated="", done=True, error="provider_stream_error:boom")]
+        assert sessions.rows == [
+            {"session_id": "cli:stream-error", "role": "user", "content": "ping"},
+        ]
+        assert memory.memorize_calls == []
+        assert memory.consolidate_calls == 0
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_persists_degraded_completion_turn() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingDegradedProvider()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+
+        chunks = [chunk async for chunk in await engine.stream_run(session_id="cli:stream-degraded", user_text="ping")]
+
+        assert chunks == [
+            ProviderChunk(text="o", accumulated="o", done=False),
+            ProviderChunk(text="k", accumulated="ok", done=True, degraded=True),
+        ]
+        assert sessions.rows == [
+            {"session_id": "cli:stream-degraded", "role": "user", "content": "ping"},
+            {"session_id": "cli:stream-degraded", "role": "assistant", "content": "ok"},
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_run_defers_memory_persistence_until_after_transcript_write() -> None:
+    async def _scenario() -> None:
+        provider = FakeFixedTextProvider("pong")
+        memory = FakeMemoryWithDeferredTurnPersistence()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=memory,
+        )
+
+        first = await engine.run(session_id="cli:deferred", user_text="ping")
+        assert first.text == "pong"
+        assert sessions.rows == [
+            {"session_id": "cli:deferred", "role": "user", "content": "ping"},
+            {"session_id": "cli:deferred", "role": "assistant", "content": "pong"},
+        ]
+        assert memory.memorize_calls == []
+        await asyncio.wait_for(memory.memorize_started.wait(), timeout=1.0)
+
+        second_started = asyncio.Event()
+
+        class _SecondProvider(FakeFixedTextProvider):
+            async def complete(self, *, messages, tools):
+                second_started.set()
+                return await super().complete(messages=messages, tools=tools)
+
+        engine.provider = _SecondProvider("second")
+        second_task = asyncio.create_task(engine.run(session_id="cli:deferred", user_text="again"))
+        await asyncio.sleep(0.05)
+        assert second_started.is_set() is False
+
+        memory.allow_memorize.set()
+        second = await asyncio.wait_for(second_task, timeout=1.0)
+        assert second.text == "second"
+        assert second_started.is_set() is True
+        assert memory.memorize_calls[0] == {
+            "messages": [
+                {"role": "user", "content": "ping"},
+                {"role": "assistant", "content": "pong"},
+            ],
+            "text": None,
+            "source": "session:cli:deferred",
+            "user_id": "deferred",
+            "shared": False,
+            "metadata": {},
+            "reasoning_layer": None,
+            "memory_type": None,
+            "happened_at": None,
+        }
+        assert len(memory.memorize_calls) >= 1
+        assert memory.working_set_writes[:2] == [
+            {
+                "session_id": "cli:deferred",
+                "role": "user",
+                "content": "ping",
+                "user_id": "deferred",
+                "metadata": {"channel": "cli"},
+                "allow_promotion": True,
+            },
+            {
+                "session_id": "cli:deferred",
+                "role": "assistant",
+                "content": "pong",
+                "user_id": "deferred",
+                "metadata": {"channel": "cli"},
+                "allow_promotion": True,
+            },
+        ]
+        await engine.drain_turn_persistence()
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_serializes_same_session_streams_with_lock() -> None:
+    async def _scenario() -> None:
+        provider = LockTrackingStreamingProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=FakeMemory(),
+        )
+
+        async def _consume() -> str:
+            parts: list[str] = []
+            async for chunk in await engine.stream_run(
+                session_id="telegram:42",
+                user_text="go",
+                channel="telegram",
+                chat_id="42",
+            ):
+                parts.append(chunk.text)
+            return "".join(parts)
+
+        first, second = await asyncio.gather(_consume(), _consume())
+        assert first == "ok"
+        assert second == "ok"
+        assert provider.max_active == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_stops_mid_stream_and_skips_assistant_persistence() -> None:
+    async def _scenario() -> None:
+        provider = StoppableStreamingProvider()
+        memory = FakeMemoryWithAsyncMemorize()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=memory,
+        )
+
+        chunks: list[ProviderChunk] = []
+        async for chunk in await engine.stream_run(session_id="cli:stream-stop", user_text="ping"):
+            chunks.append(chunk)
+            if len(chunks) == 1:
+                assert engine.request_stop("cli:stream-stop") is True
+
+        assert chunks == [
+            ProviderChunk(text="o", accumulated="o", done=False),
+            ProviderChunk(text="", accumulated="o", done=True, error="engine_stop_requested"),
+        ]
+        assert provider.closed is True
+        assert provider.yielded_second is False
+        assert sessions.rows == [
+            {"session_id": "cli:stream-stop", "role": "user", "content": "ping"},
+        ]
+        assert memory.memorize_calls == []
+        assert memory.consolidate_calls == 0
+        assert engine._stop_requested(session_id="cli:stream-stop", stop_event=None) is False
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_to_full_run_for_live_lookup_turns() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingWebToolProvider()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream",
+                user_text="Pesquise na internet sobre OpenClaw",
+            )
+        ]
+
+        final_text = "".join(chunk.text for chunk in chunks)
+        assert final_text.startswith("OpenClaw is an autonomous assistant stack.")
+        assert "Sources:" in final_text
+        assert provider.stream_calls == 0
+        assert provider.calls == 2
+        assert chunks == [
+            ProviderChunk(
+                text=final_text,
+                accumulated=final_text,
+                done=True,
+            )
+        ]
+        assert sessions.rows == [
+            {"session_id": "cli:stream", "role": "user", "content": "Pesquise na internet sobre OpenClaw"},
+            {
+                "session_id": "cli:stream",
+                "role": "assistant",
+                "content": final_text,
+            },
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_to_full_run_for_explicit_github_skill_turns() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("stream")
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["github"]),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="github-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-gh",
+                user_text="check the GitHub issue status for this repo",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "7"},
+            )
+        ]
+
+        assert provider.stream_calls == 0
+        assert chunks == [
+            ProviderChunk(text="github-result", accumulated="github-result", done=True)
+        ]
+        assert seen == [
+            {
+                "session_id": "cli:stream-gh",
+                "user_text": "check the GitHub issue status for this repo",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "7"},
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_to_full_run_for_summarize_sources() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("stream-summary")
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="summary-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-summary",
+                user_text="summarize docs/architecture.pdf",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "8"},
+            )
+        ]
+
+        assert provider.stream_calls == 0
+        assert chunks == [
+            ProviderChunk(text="summary-result", accumulated="summary-result", done=True)
+        ]
+        assert seen == [
+            {
+                "session_id": "cli:stream-summary",
+                "user_text": "summarize docs/architecture.pdf",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "8"},
+            }
+        ]
+
+        provider_url = FakeStreamingPromptCaptureProvider("stream-summary-url")
+        engine_url = AgentEngine(
+            provider=provider_url,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+        seen_url: list[str] = []
+
+        async def _fallback_run_url(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            del session_id, channel, chat_id, runtime_metadata
+            seen_url.append(user_text)
+            return ProviderResult(text="summary-url-result", tool_calls=[], model="fake/model")
+
+        engine_url.run = _fallback_run_url  # type: ignore[method-assign]
+
+        url_chunks = [
+            chunk
+            async for chunk in await engine_url.stream_run(
+                session_id="cli:stream-summary-url",
+                user_text="summarize https://example.com/article",
+            )
+        ]
+
+        assert provider_url.stream_calls == 0
+        assert "".join(chunk.text for chunk in url_chunks) == "summary-url-result"
+        assert seen_url == ["summarize https://example.com/article"]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_to_full_run_for_explicit_web_search_requests() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingWebToolProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["web-search"]),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="web-search-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-web-search",
+                user_text="use the web-search skill to find current docs",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "9"},
+            )
+        ]
+
+        assert provider.stream_calls == 0
+        assert chunks == [ProviderChunk(text="web-search-result", accumulated="web-search-result", done=True)]
+        assert seen == [
+            {
+                "session_id": "cli:stream-web-search",
+                "user_text": "use the web-search skill to find current docs",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "9"},
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_when_provider_stream_requires_full_run_before_text() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingToolSignalProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="tool-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-tools",
+                user_text="search for OpenClaw docs",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "10"},
+            )
+        ]
+
+        assert provider.stream_calls == 1
+        assert provider.tools_seen == FakeWebSearchTools().schema()
+        assert chunks == [ProviderChunk(text="tool-result", accumulated="tool-result", done=True)]
+        assert seen == [
+            {
+                "session_id": "cli:stream-tools",
+                "user_text": "search for OpenClaw docs",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "10"},
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_keeps_provider_stream_for_explanatory_github_and_docker_prompts() -> None:
+    async def _scenario() -> None:
+        github_provider = FakeStreamingPromptCaptureProvider("stream-gh")
+        github_engine = AgentEngine(
+            provider=github_provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["github"]),
+        )
+
+        github_chunks = [
+            chunk
+            async for chunk in await github_engine.stream_run(
+                session_id="cli:stream-gh-topic",
+                user_text="how do GitHub workflows work?",
+            )
+        ]
+
+        docker_provider = FakeStreamingPromptCaptureProvider("stream-docker")
+        docker_engine = AgentEngine(
+            provider=docker_provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["docker"]),
+        )
+
+        docker_chunks = [
+            chunk
+            async for chunk in await docker_engine.stream_run(
+                session_id="cli:stream-docker-topic",
+                user_text="what is a Docker image?",
+            )
+        ]
+
+        summarize_provider = FakeStreamingPromptCaptureProvider("stream-summary")
+        summarize_engine = AgentEngine(
+            provider=summarize_provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+
+        summarize_chunks = [
+            chunk
+            async for chunk in await summarize_engine.stream_run(
+                session_id="cli:stream-summary-topic",
+                user_text="resuma isso em 3 linhas",
+            )
+        ]
+
+        summarize_repo_chunks = [
+            chunk
+            async for chunk in await summarize_engine.stream_run(
+                session_id="cli:stream-summary-repo",
+                user_text="summarize owner/repo in 3 bullet points",
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in github_chunks) == "stream-gh"
+        assert github_provider.stream_calls == 1
+        assert "".join(chunk.text for chunk in docker_chunks) == "stream-docker"
+        assert docker_provider.stream_calls == 1
+        assert "".join(chunk.text for chunk in summarize_chunks) == "stream-summary"
+        assert "".join(chunk.text for chunk in summarize_repo_chunks) == "stream-summary"
+        assert summarize_provider.stream_calls == 2
+
+        web_search_provider = FakeStreamingPromptCaptureProvider("stream-web")
+        web_search_engine = AgentEngine(
+            provider=web_search_provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["web-search"]),
+        )
+        web_search_chunks = [
+            chunk
+            async for chunk in await web_search_engine.stream_run(
+                session_id="cli:stream-web-search-topic",
+                user_text="explain how the web-search skill works",
+            )
+        ]
+
+        assert "".join(chunk.text for chunk in web_search_chunks) == "stream-web"
+        assert web_search_provider.stream_calls == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_requires_full_run_for_live_lookup_and_explicit_skill_routes() -> None:
+    assert AgentEngine._stream_requires_full_run(
+        user_text="Qual a temperatura em Suzano, SP?",
+        live_lookup_required=True,
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="check GitHub issue #42 for this repo",
+        live_lookup_required=False,
+        available_skill_names={"github"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="restart the docker compose stack",
+        live_lookup_required=False,
+        available_skill_names={"docker"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="summarize docs/architecture.pdf",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="summarize https://example.com/article",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="use the summarize skill on https://example.com",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="use the web-search skill to find docs",
+        live_lookup_required=False,
+        available_tool_names={"web_search"},
+        available_skill_names={"web-search"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="how do GitHub workflows work?",
+        live_lookup_required=False,
+        available_skill_names={"github"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="what is a Docker image?",
+        live_lookup_required=False,
+        available_skill_names={"docker"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="Resume isso em 3 linhas",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="summarize owner/repo in 3 bullet points",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="explain how the web-search skill works",
+        live_lookup_required=False,
+        available_tool_names={"web_search"},
+        available_skill_names={"web-search"},
+    )
+
+
 def test_engine_formats_memory_snippets_with_ref_and_source_marker() -> None:
     async def _scenario() -> None:
         provider = FakePromptCaptureProvider()
@@ -2249,6 +3499,65 @@ def test_engine_memory_planner_retrieve_uses_original_query() -> None:
     asyncio.run(_scenario())
 
 
+def test_engine_memory_planner_expands_same_query_after_probe_when_no_rewrite_applies() -> None:
+    async def _scenario() -> None:
+        provider = FakePromptCaptureProvider()
+        query = "deployment blockers timeline"
+        memory = FakePlannerMemory(
+            {
+                query: [
+                    MemoryRecord(
+                        id=f"probe-{idx}",
+                        text=text,
+                        source="session:cli:ops",
+                        created_at=f"2026-03-04T12:0{idx}:00+00:00",
+                    )
+                    for idx, text in enumerate(
+                        [
+                            "Unrelated note one.",
+                            "Unrelated note two.",
+                            "Unrelated note three.",
+                            "Unrelated note four.",
+                            "Deployment blockers are database migration lag and API timeout budgets.",
+                            "Deployment blockers also include missing rollback rehearsal.",
+                        ],
+                        start=1,
+                    )
+                ]
+            }
+        )
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=memory)
+
+        out = await engine.run(session_id="cli:memory-probe-expand", user_text=query)
+        assert out.text == "ok"
+        assert memory.search_calls == [query, query, query]
+        assert memory.search_call_details == [
+            {
+                "query": query,
+                "limit": 4,
+                "user_id": "memory-probe-expand",
+                "session_id": "cli:memory-probe-expand",
+                "include_shared": True,
+            },
+            {
+                "query": query,
+                "limit": 6,
+                "user_id": "memory-probe-expand",
+                "session_id": "cli:memory-probe-expand",
+                "include_shared": True,
+            },
+            {
+                "query": query,
+                "limit": 12,
+                "user_id": "memory-probe-expand",
+                "session_id": "cli:memory-probe-expand",
+                "include_shared": True,
+            },
+        ]
+
+    asyncio.run(_scenario())
+
+
 def test_engine_memory_planner_next_query_rewrites_after_insufficient_first_hit() -> None:
     async def _scenario() -> None:
         provider = FakePromptCaptureProvider()
@@ -2282,7 +3591,7 @@ def test_engine_memory_planner_next_query_rewrites_after_insufficient_first_hit(
         assert memory.search_call_details == [
             {
                 "query": original_query,
-                "limit": 6,
+                "limit": 4,
                 "user_id": "next-query",
                 "session_id": "cli:next-query",
                 "include_shared": True,
@@ -3414,8 +4723,17 @@ def test_engine_compacts_large_tool_results_before_history_injection() -> None:
         provider = FakeToolCompactionProvider()
 
         class LargeToolResultTools(FakeTools):
-            async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
-                del name, arguments, session_id, channel, user_id
+            async def execute(
+                self,
+                name,
+                arguments,
+                *,
+                session_id: str,
+                channel: str = "",
+                user_id: str = "",
+                requester_id: str = "",
+            ) -> str:
+                del name, arguments, session_id, channel, user_id, requester_id
                 return "LARGE-RESULT-" * 400
 
         engine = AgentEngine(

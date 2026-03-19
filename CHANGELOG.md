@@ -17,10 +17,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord operator flows now include native `/discord-status` and `/discord-refresh` commands handled before the agent loop
 
 ### Fixed
+- `stream_run()` now reuses the same base prompt shaping as `run()` for memory, history, and allowlisted runtime metadata, instead of streaming from raw session rows only
+- `stream_run()` now falls back to the full `run()` loop for live-lookup turns, instead of staying on a text-only provider stream path when the answer should be verified with current web/weather data
+- prompt runtime context now includes a few more safe structural channel hints such as message IDs, Slack thread timestamps, Telegram forum state, Discord DM state, signed callback/button ids, and single media-type markers without exposing raw channel payloads
+- `exec` and `process` now also block internal `http(s)` targets inside obvious inline runtime fetch payloads such as `python -c` and `node -e`, closing another path around `web_fetch` network policy
+- the inline-runtime network guard now also resolves common transparent launch wrappers such as `/usr/bin/env`, `env -i`, `env -S`, `command --`, `nohup`, `nice`, `timeout`, and `stdbuf`, closing another set of `exec` / `process` bypasses around `web_fetch` policy
+- the same guard now also covers explicit runtime modes like `node -p` and `python -m urllib.request`, closing a few more interpreter-level bypasses without blocking non-network module invocations
 - `AgentEngine` now marks synthesized subagent digests with the async-safe subagent API inside the live event loop, so completed digest runs no longer leak back into later turns
 - engine regressions that inspect exact tool/tool-call history now use hermetic in-memory session state instead of machine-local persisted rows
 - cron scheduler regression coverage now waits on an explicit callback event instead of a fixed sleep, removing a suite-load race in `test_cron_service_add_and_run`
 - `exec` and `process` now treat explicit shell wrappers such as `sh -lc`, `bash -lc`, and `cmd /c` as nested shell executions for workspace guarding, so `$HOME` / `~` style path expansion can no longer bypass `restrict_to_workspace`
+- `exec` and `process` now block obvious `curl` / `wget` / PowerShell `http(s)` fetches to localhost, private ranges, and metadata-style targets, closing a network-policy bypass that sat outside `web_fetch`
+- `web_fetch` and `web_search` now mark successful payloads as untrusted external content and include a safety notice so fetched pages/snippets are treated as data rather than instructions
+- prompt guidance now treats browser page reads and browser evaluations as untrusted external data, while `browser.navigate` keeps the explicit external-content notice and `browser.evaluate` preserves its raw return contract
+- inbound channel turns now inject a compact allowlisted subset of runtime metadata into the untrusted prompt context, so reply/thread/command/media hints reach the model without exposing raw webhook payloads
+- inbound channel text now normalizes real CRLF/CR newlines and neutralizes obvious spoof markers like `[System Message]` or line-leading `System:` before it reaches the agent loop
+- direct gateway chat turns over HTTP and WebSocket now forward optional `channel`, `chat_id`, and `runtime_metadata` into the engine, preserving the same safe runtime-context path used by native channel adapters
+- cron dispatch and queued `agent_run` / `skill_exec` jobs now preserve explicit routing context (`channel`, `target` / `chat_id`, `runtime_metadata`) when that metadata is already present in the job payload
+- inbound channel text now also neutralizes bracketed `[Developer]` role-spoof markers before channel traffic reaches the agent loop, while keeping noisier prefixes like `Assistant:` and `Tool:` untouched for now
+- `stream_run()` now also falls back to the full `run()` loop for explicit GitHub and Docker skill-routed turns, reducing another class of streaming/text-only divergence without broadly disabling provider streaming
+- `stream_run()` now also falls back to the full `run()` loop for summarize requests that clearly reference a URL or local file when the summarize skill is available, so tool-backed summary turns no longer stay on the text-only streaming path
+- the untrusted runtime-context block is now merged into the current user turn before provider calls, avoiding another provider-compatibility edge around adjacent `user` messages without changing what gets persisted to session history
+- gateway WebSocket streaming now coalesces tiny provider chunks into fewer `chat.chunk` events before the final response, reducing frame spam without changing ordering or accumulated text semantics
+- gateway WebSocket chunk coalescing is now configurable under `gateway.websocket`, while preserving the existing default buffering behavior and `chat.chunk` contract
+- gateway WebSocket coalescing now also supports configurable delivery profiles (`compact`, `newline`, `paragraph`, `raw`) so different WS clients can choose how aggressively chunks are grouped without changing the engine stream itself
+- the default approval baseline now requires review for `browser:evaluate`, `exec`, `mcp`, and `run_skill` on Telegram and Discord, instead of leaving those channels opt-in by default
+- approval-gated tool reviews now fail closed when a different actor tries to approve someone else's request on channels where the original requester identity is known
+- actor-bound Telegram/Discord approval requests can no longer be approved through the generic gateway/CLI review path just by replaying the expected actor string; those reviews now stay on the native channel interaction path unless stronger control-plane identity is added later
+- generic HTTP approval/grant endpoints now require the configured gateway token even on loopback, and generic reviews stamp the reviewer as `control-plane` instead of trusting a caller-supplied actor label
+- `stream_run()` now keeps the per-session lock through provider-stream cleanup and persists even empty completed turns, reducing another class of state divergence versus `run()`
+- successful `stream_run()` turns now reuse the same session/memory persistence path as `run()`, while provider-error done-chunks stop short of appending empty assistant rows into session history
+- the main-turn memory planner now probes a smaller initial search window before widening the same query, reducing the common retrieval cost when early memory hits are already sufficient
+- active `stream_run()` sessions now honor stop requests mid-stream instead of draining the provider to the end, and cancelled streams skip assistant persistence while finishing with an explicit stop chunk
+- the `message` tool now exposes a more honest per-channel contract: Discord supports send plus button components, Telegram keeps the richer action/media bridge, and unsupported channels fail closed for advanced actions/buttons/media
+- production runtimes now batch transcript appends per turn and defer heavier memory persistence behind the response while draining that per-session queue before the next prompt and on CLI/gateway shutdown
+- completed-turn working-memory persistence now prefers a single batch write when the memory backend supports it, reducing post-turn working-set flush overhead without changing transcript durability
+- `stream_run()` now also falls back to the full `run()` loop for explicit `web_search` / `web-search` routing requests instead of staying on a raw provider stream when the operator already asked for a live search path
+- OpenAI-compatible provider streaming now advertises pre-text tool-call turns back to the engine, so `stream_run()` can fall back to the full tool loop before emitting visible text instead of getting stuck on a text-only stream path
+- when a gateway token is configured, the broader control-plane surface now requires it even on loopback, including `status`, dashboard state, chat, cron/control mutations, approvals/grants, and gateway WebSocket chat, while root/assets/health stay open unless separately protected
+- authenticated dashboard state now redacts raw handoff secrets, keeping only `gateway_url` and a masked token preview instead of echoing `gateway_token` or tokenized dashboard URLs back through the runtime API
+- the packaged dashboard now keeps its gateway token only in `sessionStorage` for the current browser tab, clears any legacy `localStorage` copy on load/clear, and defaults live chat to a per-tab `dashboard:operator:<id>` session instead of a shared browser-wide operator route
 
 ## [v0.7.0-beta.0] - 2026-03-17
 

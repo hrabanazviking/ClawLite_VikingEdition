@@ -8,6 +8,7 @@ Default base URL: `http://127.0.0.1:8787`
 - `gateway.auth.mode=optional`: accepts requests without token, but invalid token returns `401`.
 - `gateway.auth.mode=required`: requires token (except loopback when `allow_loopback_without_auth=true`).
 - Token can be sent via configurable header (default `Authorization`, with or without `Bearer ` prefix) or configurable query param (default `token`).
+- If a gateway token is configured, the control-plane routes (`/v1/status`, `/v1/dashboard/state`, `/v1/chat`, control mutations, approvals/grants, and `WS /v1/ws`) require that token even when the gateway is otherwise open on loopback.
 - `/health` only requires auth when `gateway.auth.protect_health=true` and mode is `required`.
 - `/v1/diagnostics` depends on `gateway.diagnostics.enabled` and may require auth with `gateway.diagnostics.require_auth=true`.
 
@@ -15,9 +16,13 @@ Default base URL: `http://127.0.0.1:8787`
 
 Entrypoint do dashboard local do gateway. Serve um shell HTML/CSS/JS empacotado com visão operacional para status, diagnostics, sessions, automation, tools e chat ao vivo.
 
+The packaged dashboard treats tokenized URLs as a one-time bootstrap path: it scrubs `#token=` from the address bar after load, keeps the gateway token only for the current browser tab, and seeds live chat with a per-tab `dashboard:operator:<id>` session instead of a fixed shared browser identity.
+
 ## `GET /v1/dashboard/state`
 
 Resumo agregado para o dashboard local.
+
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Example response:
 
@@ -37,7 +42,7 @@ Example response:
     "count": 2,
     "items": [
       {
-        "session_id": "dashboard:operator",
+        "session_id": "dashboard:operator:a1b2c3d4e5f6",
         "last_role": "assistant",
         "last_preview": "Runtime ready.",
         "active_subagents": 0,
@@ -48,14 +53,10 @@ Example response:
   },
   "channels": {
     "count": 1,
-    "readiness_counts": {
-      "stable": 1
-    },
     "items": [
       {
         "name": "telegram",
         "enabled": true,
-        "readiness": "stable",
         "state": "running",
         "summary": "enabled | running"
       }
@@ -70,7 +71,7 @@ Example response:
   "workspace": {},
   "handoff": {
     "gateway_url": "http://127.0.0.1:8787",
-    "dashboard_url_with_token": "http://127.0.0.1:8787#token=abcd",
+    "gateway_token_masked": "****abcd",
     "bootstrap_pending": true,
     "recommended_first_message": "Wake up, my friend!",
     "hatch_session_id": "hatch:operator",
@@ -112,7 +113,7 @@ Example response:
 
 Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política de autenticação).
 
-This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload. Channel summaries are additive and now include per-item `readiness` plus aggregate `readiness_counts` to show rollout maturity (`stable`, `beta`, `experimental`).
+This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload. The dashboard handoff block intentionally redacts raw gateway secrets: it keeps `gateway_url` plus `gateway_token_masked`, but does not return `gateway_token` or `dashboard_url_with_token`.
 
 ## `POST /v1/control/memory/suggest/refresh`
 
@@ -663,7 +664,7 @@ Scheduler diagnostics/status payloads are additive and include reliability telem
 
 If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostics_disabled","status":404}`.
 
-`channels` entries are additive and may include channel-specific `signals` maps for operational counters/state, plus `readiness` and `enabled` snapshots for control-plane readiness dashboards.
+`channels` entries are additive and may include channel-specific `signals` maps for operational counters/state.
 
 For Telegram, `signals` may also include safe-offset reliability fields such as `offset_next`, `offset_watermark_update_id`, `offset_highest_completed_update_id`, `offset_pending_count`, and `offset_min_pending_update_id`, plus additive counters like `offset_safe_advance_count`, `polling_stale_update_skip_count`, `webhook_stale_update_skip_count`, `media_download_count`, `media_download_error_count`, `media_transcription_count`, and `media_transcription_error_count`.
 
@@ -1068,6 +1069,7 @@ Alias compatível: `GET /api/tools/catalog`.
 
 Returns the live queue of approval-gated tool requests tracked by the running gateway.
 Each request includes the existing raw `arguments_preview` plus structured `approval_context` for operator UX, such as exec command metadata, env override keys, cwd, or browser/web target hosts.
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Query params:
 - `status`: `pending`, `approved`, `rejected`, or `all`
@@ -1080,7 +1082,7 @@ Query params:
 
 Response baseline:
 - `count`: number of returned approval requests
-- `requests`: request snapshots with `request_id`, `tool`, `session_id`, `channel`, `matched_approval_specifiers`, `status`, and remaining TTL fields such as `expires_in_s`
+- `requests`: request snapshots with `request_id`, `tool`, `session_id`, `channel`, optional `requester_actor`, `matched_approval_specifiers`, `status`, and remaining TTL fields such as `expires_in_s`
 - `grant_count`: number of returned active grants
 - `grants`: active grants with `session_id`, `channel`, `rule`, `scope`, optional `request_id`, and `expires_in_s`
 
@@ -1088,28 +1090,28 @@ Alias compatível: `GET /api/tools/approvals`.
 
 ## `POST /v1/tools/approvals/{request_id}/approve`
 
-Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set.
+Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set. When `requester_actor` was recorded on the original request, only that same actor can review it from the native channel interaction path; generic HTTP review fails closed with `approval_channel_bound`. If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback. Generic HTTP reviews record the reviewer as `control-plane`; caller-supplied actor labels are ignored.
 
 Request body:
 
 ```json
 {
-  "actor": "ops",
   "note": "approved after review"
 }
 ```
 
 Alias compatível: `POST /api/tools/approvals/{request_id}/approve`.
 
+For actor-bound channel requests, inspect the queue over HTTP/CLI if needed, but perform the actual review from the original Telegram/Discord button callback instead of the generic control-plane endpoint.
+
 ## `POST /v1/tools/approvals/{request_id}/reject`
 
-Rejects one pending tool request without creating a grant.
+Rejects one pending tool request without creating a grant. If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback. Generic HTTP reviews record the reviewer as `control-plane`; caller-supplied actor labels are ignored.
 
 Request body:
 
 ```json
 {
-  "actor": "ops",
   "note": "use a safer command"
 }
 ```
@@ -1119,6 +1121,7 @@ Alias compatível: `POST /api/tools/approvals/{request_id}/reject`.
 ## `POST /v1/tools/grants/revoke`
 
 Revokes one or more active temporary tool-approval grants before their TTL expires.
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Request body:
 
@@ -1148,17 +1151,31 @@ Request:
 ```json
 {
   "session_id": "telegram:123",
-  "text": "remind me to drink water"
+  "text": "remind me to drink water",
+  "channel": "telegram",
+  "chat_id": "123",
+  "runtime_metadata": {
+    "reply_to_message_id": "456"
+  }
 }
 ```
 
 Alias compatível: `POST /api/message` (mesma request/response e mesma política de autenticação).
 
-Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), preservando o fluxo normal de envio e inline keyboard.
+Campos opcionais:
+- `channel`: dica explícita de canal quando a requisição HTTP não veio de um adapter já normalizado.
+- `chat_id`: identificador do alvo/chat a preservar no contexto do turno.
+- `runtime_metadata`: objeto JSON opcional com metadata inbound adicional. O gateway só aceita objeto e ignora outros tipos; o prompt do agente continua vendo apenas a allowlist segura/untrusted já documentada.
+
+Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), enquanto Discord permanece em `send` com suporte a botões via `discord_components`. Canais sem capability explícita permanecem no contrato conservador de `send`.
+
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 ## `GET /v1/status`
 
 Estado do control-plane do gateway.
+
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Campos de contrato estavel:
 - `contract_version`: versao do contrato HTTP do gateway.
@@ -1335,8 +1352,19 @@ WebSocket for chat.
 Input message:
 
 ```json
-{"session_id":"cli:ws","text":"hello"}
+{
+  "session_id": "cli:ws",
+  "text": "hello",
+  "channel": "telegram",
+  "chat_id": "123",
+  "runtime_metadata": {
+    "reply_to_message_id": "456"
+  }
+}
 ```
+
+No envelope `req` moderno, WebSocket também aceita `sessionId`, `chatId` e `runtimeMetadata`.
+Os campos opcionais têm a mesma semântica do `POST /v1/chat`, e `runtime_metadata` / `runtimeMetadata` inválido é ignorado em vez de virar erro de contrato.
 
 Output message:
 
@@ -1344,7 +1372,15 @@ Output message:
 {"text":"...","model":"gemini/gemini-2.5-flash"}
 ```
 
+Quando `stream=true` for usado no envelope `req` moderno, o gateway envia eventos `chat.chunk`
+antes do `res` final. Esses eventos podem ser coalescidos pelo transporte para juntar chunks muito
+pequenos do provider em blocos mais úteis, preservando a ordem e o campo `accumulated`. Os limites
+desse coalescing podem ser ajustados em `gateway.websocket.coalesce_enabled`,
+`gateway.websocket.coalesce_min_chars`, `gateway.websocket.coalesce_max_chars` e
+`gateway.websocket.coalesce_profile` (`compact`, `newline`, `paragraph`, `raw`).
+
 Alias compatível: `WS /ws` (mesmo comportamento, incluindo autenticação).
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 ## Envelope de erro HTTP
 
