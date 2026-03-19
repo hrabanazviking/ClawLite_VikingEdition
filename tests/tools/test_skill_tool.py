@@ -1087,6 +1087,118 @@ def test_run_skill_tmux_blocks_on_non_unix_platform(tmp_path: Path, monkeypatch)
     asyncio.run(_scenario())
 
 
+def test_run_skill_cron_dispatches_to_cron_tool(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "cron",
+        "name: cron\ndescription: cron helper\nscript: cron",
+    )
+
+    class FakeCronTool(Tool):
+        name = "cron"
+        description = "fake cron"
+
+        def args_schema(self) -> dict:
+            return {"type": "object", "properties": {"action": {"type": "string"}}}
+
+        async def run(self, arguments: dict, ctx: ToolContext) -> str:
+            del ctx
+            return json.dumps({"ok": True, "action": str(arguments.get("action", ""))})
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeCronTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "cron", "tool_arguments": {"action": "list"}},
+            ToolContext(session_id="cli:cron", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["action"] == "list"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_obsidian_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "obsidian",
+        "name: obsidian\ndescription: obsidian helper\nscript: obsidian",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "obsidian", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "list" in payload["available_actions"]
+        assert "search" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_obsidian_write_read_and_search(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "obsidian",
+        "name: obsidian\ndescription: obsidian helper\nscript: obsidian",
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("OBSIDIAN_VAULT", str(vault))
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+
+        write_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "write",
+                    "path": "notes/today.md",
+                    "content": "# Today\nhello world",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        assert json.loads(write_out)["status"] == "ok"
+
+        read_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "read",
+                    "path": "notes/today.md",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        read_payload = json.loads(read_out)
+        assert "hello world" in read_payload["content"]
+
+        search_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "hello",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        search_payload = json.loads(search_out)
+        assert search_payload["count"] == 1
+        assert search_payload["matches"][0]["path"] == "notes/today.md"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

@@ -1466,6 +1466,109 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    @staticmethod
+    def _obsidian_vault(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> Path:
+        payload = SkillTool._skill_payload(arguments)
+        raw = str(payload.get("vault", arguments.get("vault", "")) or "").strip()
+        if not raw and env_overrides:
+            raw = str(env_overrides.get("OBSIDIAN_VAULT", "") or "").strip()
+        if not raw:
+            raw = str(os.getenv("OBSIDIAN_VAULT", "") or "").strip()
+        if not raw:
+            raise RuntimeError("obsidian_vault_missing")
+        root = Path(raw).expanduser().resolve()
+        if not root.exists() or not root.is_dir():
+            raise RuntimeError("obsidian_vault_not_found")
+        return root
+
+    @staticmethod
+    def _obsidian_resolve_note(root: Path, note_path: str) -> Path:
+        if not note_path.strip():
+            raise ValueError("path is required")
+        target = (root / note_path.strip()).expanduser().resolve()
+        if target != root and root not in target.parents:
+            raise ValueError("path_outside_vault")
+        return target
+
+    async def _run_obsidian(
+        self,
+        arguments: dict[str, Any],
+        *,
+        spec_name: str,
+        env_overrides: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "filesystem",
+                    "usage": "Set OBSIDIAN_VAULT env (or tool_arguments.vault), then provide action-specific fields.",
+                    "available_actions": ["list", "read", "write", "append", "search"],
+                    "examples": [
+                        {"action": "list", "tool_arguments": {"action": "list", "limit": 20}},
+                        {"action": "read", "tool_arguments": {"action": "read", "path": "notes/today.md"}},
+                        {"action": "append", "tool_arguments": {"action": "append", "path": "notes/today.md", "content": "\n## Update\nDone."}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            root = self._obsidian_vault(arguments, env_overrides=env_overrides)
+        except RuntimeError as exc:
+            return f"skill_blocked:{spec_name}:{str(exc)}"
+
+        limit_raw = payload.get("limit", arguments.get("limit", 50))
+        limit = max(1, min(500, int(limit_raw or 50)))
+
+        if action == "list":
+            notes = [str(path.relative_to(root).as_posix()) for path in sorted(root.rglob("*.md"))]
+            return json.dumps({"status": "ok", "count": len(notes[:limit]), "notes": notes[:limit]}, ensure_ascii=False)
+
+        if action in {"read", "write", "append"}:
+            note_path = str(payload.get("path", arguments.get("path", "")) or "").strip()
+            target = self._obsidian_resolve_note(root, note_path)
+            if action == "read":
+                if not target.exists() or not target.is_file():
+                    raise ValueError("note_not_found")
+                text = target.read_text(encoding="utf-8", errors="ignore")
+                return json.dumps({"status": "ok", "path": str(target.relative_to(root).as_posix()), "content": text}, ensure_ascii=False)
+            content = str(payload.get("content", arguments.get("content", "")) or "")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if action == "write":
+                target.write_text(content, encoding="utf-8")
+            else:
+                with target.open("a", encoding="utf-8") as handle:
+                    handle.write(content)
+            return json.dumps({"status": "ok", "path": str(target.relative_to(root).as_posix())}, ensure_ascii=False)
+
+        if action == "search":
+            query = str(payload.get("query", arguments.get("query", "")) or "").strip()
+            if not query:
+                raise ValueError("query is required for obsidian search")
+            matches: list[dict[str, Any]] = []
+            lowered = query.lower()
+            for note in sorted(root.rglob("*.md")):
+                text = note.read_text(encoding="utf-8", errors="ignore")
+                if lowered not in text.lower():
+                    continue
+                snippet = ""
+                for line in text.splitlines():
+                    if lowered in line.lower():
+                        snippet = line.strip()
+                        break
+                matches.append({"path": str(note.relative_to(root).as_posix()), "snippet": snippet})
+                if len(matches) >= limit:
+                    break
+            return json.dumps({"status": "ok", "count": len(matches), "matches": matches}, ensure_ascii=False)
+
+        raise ValueError("action must be one of: guide, list, read, write, append, search")
+
     async def _run_apple_notes(
         self,
         arguments: dict[str, Any],
@@ -2978,6 +3081,12 @@ class SkillTool(Tool):
                 spec_name=spec_name,
                 timeout=self._timeout_value(arguments),
                 env_overrides=env_overrides or {},
+            )
+        if script_name == "obsidian":
+            return await self._run_obsidian(
+                arguments,
+                spec_name=spec_name,
+                env_overrides=env_overrides,
             )
         if script_name == "apple_notes":
             return await self._run_apple_notes(
