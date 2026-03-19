@@ -906,6 +906,107 @@ def test_run_skill_onepassword_item_get_dispatches_op_command(tmp_path: Path) ->
     asyncio.run(_scenario())
 
 
+def test_run_skill_docker_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "docker",
+        "name: docker\ndescription: docker helper\nscript: docker",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "docker", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:docker", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "docker"
+        assert "compose_up" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_docker_logs_dispatches_docker_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "docker",
+        "name: docker\ndescription: docker helper\nscript: docker",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "docker logs api --tail 200": "exit=0\nstdout=logs\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "docker",
+                "tool_arguments": {
+                    "action": "logs",
+                    "target": "api",
+                    "tail": 200,
+                },
+            },
+            ToolContext(session_id="cli:docker", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=logs\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_apple_notes_guide_mode_returns_structured_help(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "apple-notes",
+        "name: apple-notes\ndescription: apple notes helper\nscript: apple_notes",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "darwin")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "apple-notes", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:notes", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["platform"] == "darwin"
+        assert "read" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_apple_notes_blocks_on_non_macos(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "apple-notes",
+        "name: apple-notes\ndescription: apple notes helper\nscript: apple_notes",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "win32")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "apple-notes", "tool_arguments": {"action": "list"}},
+            ToolContext(session_id="cli:notes", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:apple-notes:platform_not_supported"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

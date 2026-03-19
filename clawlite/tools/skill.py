@@ -1257,6 +1257,228 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    async def _run_docker(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["docker", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        target = str(payload.get("target", payload.get("container", arguments.get("target", ""))) or "").strip()
+        service = str(payload.get("service", arguments.get("service", "")) or "").strip()
+        tail_raw = payload.get("tail", arguments.get("tail", 100))
+        tail = max(1, min(2000, int(tail_raw or 100)))
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "docker",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "available_actions": [
+                        "ps",
+                        "ps_all",
+                        "logs",
+                        "inspect",
+                        "compose_ps",
+                        "compose_logs",
+                        "compose_up",
+                        "compose_down",
+                        "request",
+                    ],
+                    "examples": [
+                        {"action": "ps", "tool_arguments": {"action": "ps"}},
+                        {"action": "logs", "tool_arguments": {"action": "logs", "target": "api", "tail": 200}},
+                        {"action": "compose_up", "tool_arguments": {"action": "compose_up"}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        argv: list[str] = ["docker"]
+        if action == "ps":
+            argv.append("ps")
+        elif action == "ps_all":
+            argv.extend(["ps", "-a"])
+        elif action == "logs":
+            if not target:
+                raise ValueError("target is required for docker logs")
+            argv.extend(["logs", target, "--tail", str(tail)])
+        elif action == "inspect":
+            if not target:
+                raise ValueError("target is required for docker inspect")
+            argv.extend(["inspect", target])
+        elif action == "compose_ps":
+            argv.extend(["compose", "ps"])
+        elif action == "compose_logs":
+            argv.extend(["compose", "logs", "--tail", str(tail)])
+            if service:
+                argv.append(service)
+        elif action == "compose_up":
+            argv.extend(["compose", "up", "-d"])
+        elif action == "compose_down":
+            argv.extend(["compose", "down"])
+        elif action == "request":
+            command = str(payload.get("command", arguments.get("command", "")) or "").strip()
+            if not command:
+                raise ValueError("command is required for docker request")
+            argv.extend(shlex.split(command))
+        else:
+            raise ValueError("action must be one of: guide, ps, ps_all, logs, inspect, compose_ps, compose_logs, compose_up, compose_down, request")
+
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=argv,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
+    async def _run_apple_notes(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        if not sys.platform.startswith("darwin"):
+            return f"skill_blocked:{spec_name}:platform_not_supported"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["osascript", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        account = str(payload.get("account", arguments.get("account", "iCloud")) or "iCloud").strip()
+        folder = str(payload.get("folder", arguments.get("folder", "Notes")) or "Notes").strip()
+        note = str(payload.get("note", payload.get("name", arguments.get("note", ""))) or "").strip()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "osascript",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "platform": "darwin",
+                    "available_actions": ["list", "read", "search", "create", "append", "request"],
+                    "examples": [
+                        {"action": "list", "tool_arguments": {"action": "list", "folder": "Notes"}},
+                        {"action": "read", "tool_arguments": {"action": "read", "note": "Daily"}},
+                        {"action": "create", "tool_arguments": {"action": "create", "note": "Todo", "body": "- task"}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        def _esc(text: str) -> str:
+            return str(text or "").replace("\\", "\\\\").replace('"', '\\"')
+
+        script = ""
+        if action == "list":
+            script = (
+                f'tell application "Notes"\n'
+                f'  set noteNames to {{}}\n'
+                f'  repeat with n in notes of folder "{_esc(folder)}" of account "{_esc(account)}"\n'
+                f'    set end of noteNames to name of n\n'
+                f'  end repeat\n'
+                f'  return noteNames\n'
+                f'end tell'
+            )
+        elif action == "read":
+            if not note:
+                raise ValueError("note is required for apple_notes read")
+            script = (
+                f'tell application "Notes"\n'
+                f'  set theNote to note "{_esc(note)}" of folder "{_esc(folder)}" of account "{_esc(account)}"\n'
+                f'  return body of theNote\n'
+                f'end tell'
+            )
+        elif action == "search":
+            query = str(payload.get("query", arguments.get("query", "")) or "").strip()
+            if not query:
+                raise ValueError("query is required for apple_notes search")
+            script = (
+                f'tell application "Notes"\n'
+                f'  set results to {{}}\n'
+                f'  repeat with n in notes of folder "{_esc(folder)}" of account "{_esc(account)}"\n'
+                f'    if name of n contains "{_esc(query)}" then\n'
+                f'      set end of results to name of n\n'
+                f'    end if\n'
+                f'  end repeat\n'
+                f'  return results\n'
+                f'end tell'
+            )
+        elif action == "create":
+            if not note:
+                raise ValueError("note is required for apple_notes create")
+            body = str(payload.get("body", arguments.get("body", "")) or "").strip()
+            script = (
+                f'tell application "Notes"\n'
+                f'  tell account "{_esc(account)}"\n'
+                f'    make new note at folder "{_esc(folder)}" with properties {{name:"{_esc(note)}", body:"{_esc(body)}"}}\n'
+                f'  end tell\n'
+                f'end tell'
+            )
+        elif action == "append":
+            if not note:
+                raise ValueError("note is required for apple_notes append")
+            body = str(payload.get("body", arguments.get("body", "")) or "").strip()
+            if not body:
+                raise ValueError("body is required for apple_notes append")
+            script = (
+                f'tell application "Notes"\n'
+                f'  set theNote to note "{_esc(note)}" of folder "{_esc(folder)}" of account "{_esc(account)}"\n'
+                f'  set body of theNote to (body of theNote) & "<br>{_esc(body)}"\n'
+                f'end tell'
+            )
+        elif action == "request":
+            script = str(payload.get("script", arguments.get("script", "")) or "").strip()
+            if not script:
+                raise ValueError("script is required for apple_notes request")
+        else:
+            raise ValueError("action must be one of: guide, list, read, search, create, append, request")
+
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=["osascript", "-e", script],
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
     @staticmethod
     def _notion_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
         payload = SkillTool._skill_payload(arguments)
@@ -2622,6 +2844,22 @@ class SkillTool(Tool):
             )
         if script_name == "onepassword":
             return await self._run_onepassword(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "docker":
+            return await self._run_docker(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "apple_notes":
+            return await self._run_apple_notes(
                 arguments,
                 ctx,
                 spec_name=spec_name,
