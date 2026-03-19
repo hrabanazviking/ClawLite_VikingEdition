@@ -134,6 +134,8 @@ esoterica, and the arts. Configured via `IDENTITY.md` and `SOUL.md` in the
 workspace templates. Her values are drawn from the Heathen Third Path:
 Wyrd & Orlog, Frith, Gæfa, Drengskapr, Maegen, Gestrisni.
 
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_18.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_18.jpg)
+
 ### Norse Subsystems
 
 | Module | Norse Name | Role |
