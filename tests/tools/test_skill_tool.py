@@ -636,6 +636,29 @@ def test_run_skill_gh_issues_uses_skill_entry_api_key_for_auth(tmp_path: Path, m
     asyncio.run(_scenario())
 
 
+def test_run_skill_github_issues_alias_uses_gh_issues_script(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "github-issues",
+        "name: github-issues\ndescription: gh issue helper alias\nscript: gh_issues",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "github-issues", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:github-issues", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "gh issue"
+        assert "list" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_github_guide_mode_returns_structured_help(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
