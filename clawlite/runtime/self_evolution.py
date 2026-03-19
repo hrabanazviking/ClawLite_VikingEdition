@@ -39,7 +39,25 @@ from clawlite.utils.logging import bind_event
 MAX_FILES_PER_RUN = 3
 MAX_LINES_DELTA = 200          # total added+removed across changed files
 _SELF_FILE = Path(__file__).resolve()
-_DENYLIST_NAMES = frozenset({"self_evolution.py", "autonomy.py", "gateway", "config"})
+_DENYLIST_NAMES = frozenset({
+    # Self-protection
+    "self_evolution.py",
+    # High-privilege runtime modules
+    "autonomy.py",
+    "autonomy_actions.py",
+    "autonomy_log.py",
+    "supervisor.py",
+    # Entire sensitive directories (matched against path parts)
+    "gateway",
+    "config",
+    "runtime",
+    "providers",
+    # Individual high-risk tool files
+    "exec.py",
+    "files.py",
+    "mcp.py",
+    "spawn.py",
+})
 _GAP_PATTERN = re.compile(
     r"#\s*(TODO|FIXME|HACK|XXX|STUB|NOT IMPLEMENTED|raise NotImplementedError)",
     re.IGNORECASE,
@@ -264,19 +282,69 @@ class SourceScanner:
 # ── LLM-based fix proposer ────────────────────────────────────────────────────
 
 class FixProposer:
-    """Generates a fix proposal by calling the runtime LLM provider."""
+    """
+    Generates a fix proposal using the Þing (Thing) consensus pattern.
+
+    Named after the Viking assembly where decisions required agreement
+    among multiple voices before action was taken. Three parallel LLM
+    calls are made; at least 2-of-3 must agree on the fix description
+    before the patch is applied. This dramatically reduces bad patches
+    from a single lucky-but-wrong LLM response.
+    """
+
+    THING_VOTES = 3        # number of parallel LLM calls (the assembly)
+    THING_THRESHOLD = 2    # minimum votes needed to proceed
 
     def __init__(self, run_llm: Callable[[str], Awaitable[str]]) -> None:
         self._run_llm = run_llm
 
     async def propose(self, gap: Gap, context: str) -> FixProposal | None:
         prompt = self._build_prompt(gap, context)
-        try:
-            raw = await asyncio.wait_for(self._run_llm(prompt), timeout=60.0)
-        except Exception as exc:
-            bind_event("self_evolution.propose").warning("llm call failed gap={} error={}", gap.text[:60], exc)
+        log = bind_event("self_evolution.thing")
+
+        # Convene the Þing — run THING_VOTES parallel LLM calls
+        async def _call() -> str | None:
+            try:
+                return await asyncio.wait_for(self._run_llm(prompt), timeout=60.0)
+            except Exception as exc:
+                log.warning("thing vote failed gap={} error={}", gap.text[:60], exc)
+                return None
+
+        raw_votes = await asyncio.gather(*[_call() for _ in range(self.THING_VOTES)])
+        proposals = [self._parse_response(gap, r) for r in raw_votes if r is not None]
+
+        if not proposals:
+            log.warning("thing: all votes failed for gap={}", gap.text[:60])
             return None
-        return self._parse_response(gap, raw)
+
+        # Tally votes by normalized description
+        def _normalize(desc: str) -> str:
+            return re.sub(r"[^a-z0-9 ]", "", desc.strip().lower())
+
+        tally: dict[str, list[FixProposal]] = {}
+        for p in proposals:
+            key = _normalize(p.description)
+            tally.setdefault(key, []).append(p)
+
+        # Find the majority proposal
+        best_key, best_group = max(tally.items(), key=lambda kv: len(kv[1]))
+        vote_count = len(best_group)
+
+        log.info(
+            "thing: gap={} votes={}/{} agreement={} description={}",
+            gap.text[:60], vote_count, len(proposals), vote_count >= self.THING_THRESHOLD,
+            best_group[0].description[:80],
+        )
+
+        if vote_count < self.THING_THRESHOLD:
+            log.warning(
+                "thing: no consensus reached gap={} best_votes={} needed={}",
+                gap.text[:60], vote_count, self.THING_THRESHOLD,
+            )
+            return None
+
+        # Return the first proposal from the majority group
+        return best_group[0]
 
     @staticmethod
     def _build_prompt(gap: Gap, context: str) -> str:

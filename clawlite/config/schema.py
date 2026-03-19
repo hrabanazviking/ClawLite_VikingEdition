@@ -333,6 +333,40 @@ class GatewayAutonomyConfig(Base):
         return value or "self-evolution"
 
 
+class VikingConfig(Base):
+    """Configuration for Norse-themed subsystems added in VikingEdition."""
+
+    # ── Ægishjálmr (injection guard) ──────────────────────────────────────────
+    injection_guard_enabled: bool = True
+
+    # ── Gjallarhorn (alert broadcaster) ───────────────────────────────────────
+    gjallarhorn_alert_target: str = ""       # channel target, e.g. "telegram:123456"
+    gjallarhorn_block_threshold: int = 5     # BLOCK events in window to sound horn
+    gjallarhorn_block_window_s: float = 300.0
+    gjallarhorn_high_tick_threshold: int = 3  # consecutive Huginn 'high' ticks
+    gjallarhorn_cooldown_s: float = 600.0    # seconds between same-reason alerts
+
+    # ── Valkyrie (session reaper) ──────────────────────────────────────────────
+    valkyrie_enabled: bool = True
+    valkyrie_idle_days: float = 7.0          # archive sessions idle this long
+    valkyrie_dead_days: float = 30.0         # purge sessions archived this long
+    valkyrie_interval_s: float = 3600.0      # sweep interval
+
+    # ── Völva (memory oracle) ──────────────────────────────────────────────────
+    volva_enabled: bool = True
+    volva_interval_s: float = 1800.0         # maintenance sweep interval
+    volva_stale_hours: float = 48.0          # hours before category is stale
+    volva_consolidation_threshold: int = 50  # items before consolidation triggered
+
+    # ── Rate limiter ───────────────────────────────────────────────────────────
+    channel_rate_limit_messages: float = 10.0   # max messages per window
+    channel_rate_limit_window_s: float = 60.0   # sliding window in seconds
+
+    # ── Runestone (audit log) ──────────────────────────────────────────────────
+    runestone_path: str = ""                 # defaults to ~/.clawlite/runestone.jsonl
+    runestone_max_file_bytes: int = 10 * 1024 * 1024  # 10 MB before rotation
+
+
 class GatewayConfig(Base):
     host: str = "127.0.0.1"
     port: int = 8787
@@ -345,6 +379,7 @@ class GatewayConfig(Base):
     diagnostics: GatewayDiagnosticsConfig = Field(default_factory=GatewayDiagnosticsConfig)
     supervisor: GatewaySupervisorConfig = Field(default_factory=GatewaySupervisorConfig)
     autonomy: GatewayAutonomyConfig = Field(default_factory=GatewayAutonomyConfig)
+    viking: VikingConfig = Field(default_factory=VikingConfig)
 
     @field_validator("host", mode="before")
     @classmethod

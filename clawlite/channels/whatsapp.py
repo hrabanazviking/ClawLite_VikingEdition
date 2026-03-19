@@ -173,6 +173,27 @@ class WhatsAppChannel(BaseChannel):
 
     async def start(self) -> None:
         self._running = True
+        # Verify bridge connectivity before accepting messages
+        health_url = self._bridge_endpoint(self.bridge_url, "/health")
+        try:
+            client = await self._get_client()
+            response = await asyncio.wait_for(client.get(health_url), timeout=3.0)
+            if response.status_code >= 500:
+                raise RuntimeError(f"whatsapp_bridge_unhealthy:http_{response.status_code}")
+        except asyncio.TimeoutError:
+            self._last_error = "bridge_unreachable"
+            import logging
+            logging.getLogger("clawlite.channels.whatsapp").warning(
+                "WhatsApp bridge not reachable at %s — messages will fail until bridge is running", health_url
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            self._last_error = str(exc)
+            import logging
+            logging.getLogger("clawlite.channels.whatsapp").warning(
+                "WhatsApp bridge connectivity check failed: %s", exc
+            )
 
     async def stop(self) -> None:
         for task in list(self._typing_tasks.values()):

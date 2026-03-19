@@ -1,11 +1,46 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from clawlite.core.injection_guard import scan_inbound
+from clawlite.utils.logging import bind_event
+
 InboundHandler = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
+
+
+class _TokenBucketRateLimiter:
+    """
+    Per-key token bucket rate limiter.
+
+    Default: 10 messages per 60 seconds per (channel, session_id) key.
+    Thread/coroutine safe via monotonic time — no locks needed.
+    """
+
+    def __init__(self, *, rate: float = 10.0, per_s: float = 60.0) -> None:
+        self._rate = max(1.0, float(rate))
+        self._per_s = max(1.0, float(per_s))
+        # key → (tokens, last_refill_monotonic)
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        tokens, last = self._buckets.get(key, (self._rate, now))
+        elapsed = now - last
+        tokens = min(self._rate, tokens + elapsed * (self._rate / self._per_s))
+        if tokens < 1.0:
+            return False
+        self._buckets[key] = (tokens - 1.0, now)
+        return True
+
+    def reset(self, key: str) -> None:
+        self._buckets.pop(key, None)
+
+
+_CHANNEL_RATE_LIMITER = _TokenBucketRateLimiter(rate=10.0, per_s=60.0)
 
 
 @dataclass(slots=True)
@@ -52,7 +87,21 @@ class BaseChannel(ABC):
     async def emit(self, *, session_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
         if self.on_message is None:
             return
-        await self.on_message(session_id, user_id, text, metadata or {})
+        # Rate limit per channel+session before doing any work
+        rl_key = f"{self.name}:{session_id}"
+        if not _CHANNEL_RATE_LIMITER.allow(rl_key):
+            bind_event("rate_limit", channel=self.name).warning(
+                "message rate-limited session={} user={}", session_id, user_id
+            )
+            return
+        # Ægishjálmr injection guard
+        result = scan_inbound(text, source=self.name)
+        if result.blocked:
+            bind_event("injection_guard", channel=self.name).warning(
+                "inbound message BLOCKED session={} threats={}", session_id, ",".join(result.threats)
+            )
+            return
+        await self.on_message(session_id, user_id, result.sanitized_text, metadata or {})
 
     @abstractmethod
     async def start(self) -> None:

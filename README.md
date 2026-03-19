@@ -578,6 +578,92 @@ ClawLite is a Python-first reimplementation with a focus on local deployment, pe
 
 ---
 
+## ᚹ VikingEdition — Norse Enhancements
+
+This fork (`hrabanazviking/ClawLite_VikingEdition`, branch `Development`) adds a
+suite of Norse-themed subsystems that improve security, observability, memory
+quality, and reasoning depth. All additions are backward-compatible and gated
+behind the new `gateway.viking` config block.
+
+### Persona — Sigrid
+
+The default identity is **Sigrid**, a 21-year-old Heathen Third Path devotee:
+INTP, friendly and direct, dark dry humour, expert across technology, science,
+esoterica, and the arts. Configured via `IDENTITY.md` and `SOUL.md` in the
+workspace templates. Her values are drawn from the Heathen Third Path:
+Wyrd & Orlog, Frith, Gæfa, Drengskapr, Maegen, Gestrisni.
+
+### Norse Subsystems
+
+| Module | Norse Name | Role |
+|---|---|---|
+| `core/injection_guard.py` | **Ægishjálmr** | Multi-layer inbound message scanner: invisible char stripping, NFKC normalization, 20+ injection patterns, base64/hex payload detection, output validation. Wired into `BaseChannel.emit()` and `PromptBuilder`. |
+| `core/huginn_muninn.py` | **Huginn & Muninn** | Twin-raven parallel analysis before each autonomy tick. Huginn (Thought) surfaces health anomalies and error trends; Muninn (Memory) reports stale realms and consolidation needs. Both run concurrently via `asyncio.gather()`. |
+| `core/norns.py` | **The Norns** | Structures the autonomy snapshot into three temporal phases — Urð (past), Verðandi (present), Skuld (obligations) — replacing flat JSON dumps with causally-ordered LLM prompts. |
+| `core/runestone.py` | **Runestone** | Append-only JSONL audit log with rolling SHA-256 chain integrity. Every injection block, maintenance action, and session claim is carved in. `verify_chain()` detects tampering. Exposed at `GET /runestone/tail`. |
+| `core/memory_yggdrasil.py` | **Yggdrasil** | Maps memory categories to three realms (Roots/Trunk/Branches) with retrieval weights and decay multipliers. Weights are now applied inside the retrieval scoring loop. |
+| `runtime/volva.py` | **Völva** | Background memory oracle. Runs every 30 min, reads Muninn's staleness report, triggers consolidation on oversize categories and decay pruning on stale ones. |
+| `runtime/valkyrie.py` | **Valkyrie** | Hourly session reaper. Archives sessions idle >7 days (history trimmed to 20 messages); purges sessions dead >30 days. All claims logged to Runestone. |
+| `runtime/gjallarhorn.py` | **Gjallarhorn** | Critical alert broadcaster. Sounds (via configured channel target) on: injection storms (≥5 blocks/5min), sustained Huginn `high` priority (≥3 ticks), Völva failure, autonomy down. 10-min per-reason cooldown. |
+| `jobs/queue.py` | **Einherjar** | Max-priority job queue (priority=10). Use `queue.einherjar(kind, payload)` to submit urgent tasks that run before all others. |
+| `self_evolution.py` | **Þing** | 3-parallel LLM consensus gate on self-evolution proposals. Requires 2-of-3 agreement before any patch is applied. Expanded protected-file denylist. |
+| `utils/logger.py` | **Runic Glyphs** | Elder Futhark runes prepended to every log line: ᚦ DEBUG, ᚱ INFO, ᚠ SUCCESS, ᚾ WARNING, ᛉ ERROR, ᛞ CRITICAL. |
+| `skills/skald/` | **Skald** | Narrative summarization skill. Structures raw information into story arcs (Setup → Journey → Current State → Worth Remembering) in Sigrid's voice. |
+
+### Security Layers
+
+Inbound messages pass through three gates at `BaseChannel.emit()`:
+1. **Rate limiter** — token bucket (10 msg/60s per session, configurable)
+2. **Ægishjálmr** — injection and malware scan; BLOCK drops the message
+3. **Routing** — only sanitized text reaches the agent engine
+
+Tool call arguments are scanned with `scan_output()` before `tools.execute()`.
+All WARN/BLOCK events are written to the Runestone and forwarded to Gjallarhorn.
+
+### Configuration
+
+All thresholds live under `gateway.viking` in your config file:
+
+```yaml
+gateway:
+  viking:
+    # Rate limiting
+    channel_rate_limit_messages: 10.0
+    channel_rate_limit_window_s: 60.0
+    # Gjallarhorn
+    gjallarhorn_alert_target: "telegram:YOUR_CHAT_ID"
+    gjallarhorn_block_threshold: 5
+    gjallarhorn_cooldown_s: 600.0
+    # Valkyrie
+    valkyrie_idle_days: 7.0
+    valkyrie_dead_days: 30.0
+    # Völva
+    volva_stale_hours: 48.0
+    volva_consolidation_threshold: 50
+    # Runestone
+    runestone_path: ""  # defaults to ~/.clawlite/runestone.jsonl
+```
+
+### Health Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health/norse` | Status of all Norse subsystems + Runestone chain integrity |
+| `GET /runestone/tail?n=20` | Last N audit log entries with tamper verification |
+
+### Tests
+
+99 unit tests cover all Norse modules. Run with:
+```bash
+python3 -m pytest tests/core/test_injection_guard.py \
+  tests/core/test_runestone.py tests/core/test_huginn_muninn.py \
+  tests/core/test_norns.py tests/runtime/test_valkyrie.py \
+  tests/runtime/test_gjallarhorn.py tests/runtime/test_volva.py \
+  tests/channels/test_rate_limiter.py
+```
+
+---
+
 ## 🤝 Contributing
 
 Contributions are welcome! To get started:

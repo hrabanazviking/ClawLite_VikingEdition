@@ -9,6 +9,13 @@ import secrets
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from cryptography.fernet import Fernet as _Fernet
+    _FERNET_AVAILABLE = True
+except ImportError:
+    _Fernet = None  # type: ignore[assignment,misc]
+    _FERNET_AVAILABLE = False
+
 
 def privacy_settings(
     *,
@@ -65,11 +72,22 @@ def append_privacy_audit_event(
 
 
 def encrypted_prefix() -> str:
-    return "enc:v2:"
+    """Current encryption prefix — v3 (Fernet/AES-128-CBC+HMAC) if available, else v2 (XOR)."""
+    return "enc:v3:" if _FERNET_AVAILABLE else "enc:v2:"
 
 
 def legacy_encrypted_prefix() -> str:
     return "enc:v1:"
+
+
+def _fernet_prefix() -> str:
+    return "enc:v3:"
+
+
+def _fernet_from_key(key: bytes) -> Any:
+    """Build a Fernet instance from a raw 32-byte key."""
+    fernet_key = base64.urlsafe_b64encode(key)
+    return _Fernet(fernet_key)  # type: ignore[misc]
 
 
 def xor_with_keystream(data: bytes, *, key: bytes, nonce: bytes) -> bytes:
@@ -170,12 +188,21 @@ def encrypt_text_for_category(
         key = load_or_create_privacy_key_fn()
         if key is None:
             return clean
-        nonce = secrets.token_bytes(16)
-        ciphertext = xor_with_keystream_fn(clean.encode("utf-8"), key=key, nonce=nonce)
-        tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-        encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
-        diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
-        return f"{encrypted_prefix()}{encoded}"
+        if _FERNET_AVAILABLE:
+            # v3: Fernet (AES-128-CBC + HMAC-SHA256) — audited, standard
+            f = _fernet_from_key(key)
+            token = f.encrypt(clean.encode("utf-8"))
+            encoded = base64.urlsafe_b64encode(token).decode("ascii")
+            diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
+            return f"{_fernet_prefix()}{encoded}"
+        else:
+            # v2 fallback: XOR + SHA256 counter-mode KDF + HMAC (used when cryptography package absent)
+            nonce = secrets.token_bytes(16)
+            ciphertext = xor_with_keystream_fn(clean.encode("utf-8"), key=key, nonce=nonce)
+            tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+            encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
+            diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
+            return f"enc:v2:{encoded}"
     except Exception as exc:
         diagnostics["privacy_encrypt_errors"] = int(diagnostics.get("privacy_encrypt_errors", 0)) + 1
         diagnostics["last_error"] = str(exc)
@@ -194,30 +221,43 @@ def decrypt_text_for_category(
     clean = str(text or "")
     if not clean:
         return clean
-    prefix_v2 = encrypted_prefix()
+    prefix_v3 = _fernet_prefix()
+    prefix_v2 = "enc:v2:"
     prefix_v1 = legacy_encrypted_prefix()
-    if not clean.startswith(prefix_v2) and not clean.startswith(prefix_v1):
+    if not (clean.startswith(prefix_v3) or clean.startswith(prefix_v2) or clean.startswith(prefix_v1)):
         return clean
     _ = category
     _ = settings
     try:
-        if clean.startswith(prefix_v2):
-            encoded = clean[len(prefix_v2) :]
+        key = load_or_create_privacy_key_fn()
+        if key is None:
+            return clean
+        if clean.startswith(prefix_v3):
+            # v3: Fernet (AES-128-CBC + HMAC-SHA256)
+            if not _FERNET_AVAILABLE:
+                diagnostics["privacy_decrypt_errors"] = int(diagnostics.get("privacy_decrypt_errors", 0)) + 1
+                diagnostics["last_error"] = "cryptography package not installed; cannot decrypt v3 ciphertext"
+                return clean
+            encoded = clean[len(prefix_v3):]
+            token = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            f = _fernet_from_key(key)
+            decoded = f.decrypt(token).decode("utf-8")
+        elif clean.startswith(prefix_v2):
+            # v2: XOR + SHA256 counter-mode KDF + HMAC
+            encoded = clean[len(prefix_v2):]
             payload = base64.urlsafe_b64decode(encoded.encode("ascii"))
             if len(payload) < 16 + 32:
                 raise ValueError("invalid_enc_v2_payload")
             nonce = payload[:16]
             ciphertext = payload[16:-32]
             tag = payload[-32:]
-            key = load_or_create_privacy_key_fn()
-            if key is None:
-                return clean
             expected_tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
             if not hmac.compare_digest(tag, expected_tag):
                 raise ValueError("invalid_enc_v2_tag")
             decoded = xor_with_keystream_fn(ciphertext, key=key, nonce=nonce).decode("utf-8")
         else:
-            encoded = clean[len(prefix_v1) :]
+            # v1: legacy plain base64
+            encoded = clean[len(prefix_v1):]
             decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8")
         diagnostics["privacy_decrypt_events"] = int(diagnostics.get("privacy_decrypt_events", 0)) + 1
         return decoded
@@ -255,4 +295,5 @@ __all__ = [
     "privacy_block_reason",
     "privacy_settings",
     "xor_with_keystream",
+    "_FERNET_AVAILABLE",
 ]

@@ -5,6 +5,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+from clawlite.core.memory_yggdrasil import realm_header
+
 
 def load_category_items_from_path(
     *,
@@ -83,6 +85,7 @@ def build_category_summary_text(
     return "\n".join(
         [
             f"# Category: {category}",
+            f"# Yggdrasil: {realm_header(category)}",
             "",
             f"Updated: {updated_at}",
             f"Total items: {len(rows)}",

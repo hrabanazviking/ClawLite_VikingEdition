@@ -5,6 +5,13 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+# Yggdrasil realm weights applied to retrieval scoring
+try:
+    from clawlite.core.memory_yggdrasil import retrieval_weight as _realm_weight
+except ImportError:
+    def _realm_weight(category: str) -> float:  # type: ignore[misc]
+        return 1.0
+
 
 def filter_records_to_categories(records: list[Any], categories: list[str]) -> list[Any]:
     allowed = {str(item or "").strip().lower() for item in categories if str(item or "").strip()}
@@ -168,6 +175,8 @@ def retrieve_category_hits(
         score = float(overlap) + entity_score + category_overlap + type_overlap + temporal_bonus + salience_bonus
         if score <= 0.0:
             continue
+        # Apply Yggdrasil realm retrieval weight (Branches > Trunk > Roots)
+        score *= _realm_weight(category)
 
         bucket = by_category.setdefault(
             category,
