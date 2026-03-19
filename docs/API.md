@@ -9,6 +9,7 @@ Default base URL: `http://127.0.0.1:8787`
 - `gateway.auth.mode=required`: requires token (except loopback when `allow_loopback_without_auth=true`).
 - Token can be sent via configurable header (default `Authorization`, with or without `Bearer ` prefix) or configurable query param (default `token`).
 - If a gateway token is configured, the control-plane routes (`/v1/status`, `/v1/dashboard/state`, `/v1/chat`, control mutations, approvals/grants, and `WS /v1/ws`) require that token even when the gateway is otherwise open on loopback.
+- The packaged dashboard can exchange that raw gateway token once at `POST /api/dashboard/session` and then use the derived dashboard-session credential only on dashboard-scoped aliases such as `/api/status`, `/api/dashboard/state`, `/api/diagnostics`, `/api/token`, `/api/message`, `/api/tools/catalog`, `/v1/control/*`, and `WS /ws`. Generic `/v1/*` routes and `WS /v1/ws` still require the raw gateway token.
 - `/health` only requires auth when `gateway.auth.protect_health=true` and mode is `required`.
 - `/v1/diagnostics` depends on `gateway.diagnostics.enabled` and may require auth with `gateway.diagnostics.require_auth=true`.
 
@@ -16,7 +17,7 @@ Default base URL: `http://127.0.0.1:8787`
 
 Entrypoint do dashboard local do gateway. Serve um shell HTML/CSS/JS empacotado com visão operacional para status, diagnostics, sessions, automation, tools e chat ao vivo.
 
-The packaged dashboard treats tokenized URLs as a one-time bootstrap path: it scrubs `#token=` from the address bar after load, keeps the gateway token only for the current browser tab, and seeds live chat with a per-tab `dashboard:operator:<id>` session instead of a fixed shared browser identity.
+The packaged dashboard treats tokenized URLs as a one-time bootstrap path: it scrubs `#token=` from the address bar after load, exchanges the raw gateway token for a scoped dashboard-session credential, keeps only that derived session in the current browser tab, and seeds live chat with a per-tab `dashboard:operator:<id>` session instead of a fixed shared browser identity.
 
 ## `GET /v1/dashboard/state`
 
@@ -111,7 +112,7 @@ Example response:
 }
 ```
 
-Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política de autenticação).
+Alias compatível: `GET /api/dashboard/state` (mesmo payload). When a gateway token is configured, the packaged dashboard alias also accepts the derived dashboard-session credential described above; `/v1/dashboard/state` itself still expects the raw gateway token.
 
 This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload. The dashboard handoff block intentionally redacts raw gateway secrets: it keeps `gateway_url` plus `gateway_token_masked`, but does not return `gateway_token` or `dashboard_url_with_token`.
 
@@ -1160,7 +1161,7 @@ Request:
 }
 ```
 
-Alias compatível: `POST /api/message` (mesma request/response e mesma política de autenticação).
+Alias compatível: `POST /api/message` (mesma request/response). When a gateway token is configured, the dashboard alias also accepts the derived dashboard-session credential; `POST /v1/chat` itself still expects the raw gateway token.
 
 Campos opcionais:
 - `channel`: dica explícita de canal quando a requisição HTTP não veio de um adapter já normalizado.
@@ -1181,7 +1182,7 @@ Campos de contrato estavel:
 - `contract_version`: versao do contrato HTTP do gateway.
 - `server_time`: timestamp UTC ISO-8601 gerado no servidor.
 
-Alias compatível: `GET /api/status` (mesmo payload e mesma política de autenticação).
+Alias compatível: `GET /api/status` (mesmo payload). When a gateway token is configured, the dashboard alias also accepts the derived dashboard-session credential; `GET /v1/status` itself still expects the raw gateway token.
 
 ## `GET /v1/diagnostics`
 
@@ -1207,14 +1208,24 @@ Campos baseline de contrato:
   `in_flight`, `by_method`, `by_path`, `by_status` e `latency_ms`
   (`count`, `min`, `max`, `avg`).
 
-Alias compatível: `GET /api/diagnostics` (mesmo payload e mesma política de autenticação).
+Alias compatível: `GET /api/diagnostics` (mesmo payload). When a gateway token is configured, the dashboard alias also accepts the derived dashboard-session credential; `GET /v1/diagnostics` itself stays on the raw gateway-token path when diagnostics auth is enabled.
 
 ## `GET /api/token`
 
 Diagnóstico de autenticação do gateway.
 - Nunca retorna token em texto puro.
 - Retorna apenas estado (`token_configured`) e versão mascarada determinística (`token_masked`).
-- Segue a mesma política de autenticação dos endpoints de control-plane.
+- Quando o dashboard-session flow estiver habilitado, também informa `dashboard_session_enabled`, `dashboard_session_header_name`, e `dashboard_session_query_param`.
+- Aceita tanto o gateway token bruto quanto a credencial derivada do dashboard.
+
+## `POST /api/dashboard/session`
+
+Troca o gateway token bruto por uma credencial derivada e efêmera para o dashboard empacotado.
+
+- Requer o gateway token configurado no header normal de autenticação; query-param token bootstrap não é aceito aqui.
+- Retorna um `session_token` opaco com `token_type=\"dashboard_session\"`, `expires_at`, `expires_in_s`, e os nomes de header/query aceitos pelo shell do dashboard.
+- Essa credencial derivada é aceita apenas nas superfícies de dashboard/control-plane que optam por ela (`/api/status`, `/api/dashboard/state`, `/api/diagnostics`, `/api/token`, `/api/message`, `/api/tools/catalog`, `/v1/control/*`, e `WS /ws`).
+- A mesma credencial não substitui o gateway token bruto em `/v1/status`, `/v1/chat`, `/v1/tools/*`, ou `WS /v1/ws`.
 
 ## `POST <telegram webhook path>`
 
@@ -1379,8 +1390,7 @@ desse coalescing podem ser ajustados em `gateway.websocket.coalesce_enabled`,
 `gateway.websocket.coalesce_min_chars`, `gateway.websocket.coalesce_max_chars` e
 `gateway.websocket.coalesce_profile` (`compact`, `newline`, `paragraph`, `raw`).
 
-Alias compatível: `WS /ws` (mesmo comportamento, incluindo autenticação).
-If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
+Alias compatível: `WS /ws` (mesmo comportamento de chat/streaming). When a gateway token is configured, `WS /v1/ws` still requires that raw token even on loopback, while the dashboard alias `WS /ws` also accepts the derived dashboard-session credential.
 
 ## Envelope de erro HTTP
 

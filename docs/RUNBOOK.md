@@ -22,7 +22,7 @@ Print or reopen the one-time tokenized dashboard handoff without relaunching onb
 clawlite dashboard --no-open
 ```
 
-The payload includes the current bootstrap state and the same backup, web-search, and security notes shown at the end of onboarding. After bootstrap, the browser strips `#token=` from the address bar and keeps the token only for the current tab session.
+The payload includes the current bootstrap state and the same backup, web-search, and security notes shown at the end of onboarding. After bootstrap, the browser strips `#token=` from the address bar, exchanges the raw gateway token for a scoped dashboard session, and keeps only that derived session in the current tab.
 
 If bootstrap is still pending and you want to hatch from the terminal instead of the dashboard:
 
