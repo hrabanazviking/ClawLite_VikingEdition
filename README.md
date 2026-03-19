@@ -138,7 +138,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - WebSocket `chat.send` streaming now coalesces tiny provider chunks into larger `chat.chunk` events before the final response, reducing frame spam while preserving order and accumulated text.
 - That WebSocket chunk coalescing is now tunable under `gateway.websocket` (`coalesce_enabled`, `coalesce_min_chars`, `coalesce_max_chars`, `coalesce_profile`) while keeping the previous defaults.
 - Scheduled cron turns and queued `agent_run` / `skill_exec` jobs now preserve explicit routing context (`channel`, `target` / `chat_id`, `runtime_metadata`) when that data is already present in the payload.
-- `stream_run()` now falls back to the full agent loop for live lookup turns and explicit GitHub/Docker skill-routed turns, so streaming no longer takes a text-only shortcut when the runtime already knows the answer should go through operational tools or verified lookup.
+- `stream_run()` now falls back to the full agent loop for live lookup turns, explicit GitHub/Docker skill-routed turns, and summarize requests that clearly point at a URL or file, so streaming no longer takes a text-only shortcut when the runtime already knows the answer should go through operational tools or verified lookup.
 - The prompt runtime-context block is now merged into the current user turn before provider calls, reducing provider-compatibility risk from adjacent `user` messages while preserving the same untrusted metadata semantics and raw session persistence.
 - Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`. Approval snapshots now include structured context such as exec binary/env keys/cwd and browser or web host targets.
@@ -266,7 +266,7 @@ Hybrid BM25 + vector search · FTS5 full-text · temporal decay + salience scori
 Heartbeat supervisor · persistent cron engine · autonomy wake coordinator · dead-letter queue + replay · background job queue (priority, retry, SQLite) · context window budget trimming · loop detection with bus events · bounded subagent orchestration (depth guard, retry budgets, zombie cleanup)
 
 **🌊 Streaming**
-`engine.stream_run()` async generator · `ProviderChunk` (delta/accumulated/done) · same base prompt shaping as `run()` for memory/history/runtime context · falls back to the full `run()` loop on live-lookup turns instead of staying text-only · edit-in-place streaming on Telegram and Discord
+`engine.stream_run()` async generator · `ProviderChunk` (delta/accumulated/done) · same base prompt shaping as `run()` for memory/history/runtime context · falls back to the full `run()` loop on live-lookup turns and obvious summarize URL/file routes instead of staying text-only · edit-in-place streaming on Telegram and Discord
 
 **🖥️ Operator Dashboard** — `http://localhost:8787`
 Live chat · sessions view · automation controls (cron, recovery, channels) · memory health · tools catalog · WebSocket frame preview
@@ -454,7 +454,7 @@ ClawLite has four main layers:
 
 **2. FastAPI Gateway** (`:8787`) — HTTP + WebSocket server, operator dashboard, auth, and channel dispatch. Single entry point for all traffic.
 
-**3. Agent Engine** — the core loop. On each turn it builds a prompt from memory + identity + workspace files, calls tools as needed, and streams tokens from LiteLLM (20+ providers). `run()` and `stream_run()` now share the same base prompt shaping for memory, history, and runtime context, and `stream_run()` falls back to the full `run()` loop on live-lookup turns so current-data answers do not stay on a text-only path. Loop detection, context window budgeting, and subagent orchestration all live here.
+**3. Agent Engine** — the core loop. On each turn it builds a prompt from memory + identity + workspace files, calls tools as needed, and streams tokens from LiteLLM (20+ providers). `run()` and `stream_run()` now share the same base prompt shaping for memory, history, and runtime context, and `stream_run()` falls back to the full `run()` loop on live-lookup turns plus obvious summarize URL/file routes so tool-backed answers do not stay on a text-only path. Loop detection, context window budgeting, and subagent orchestration all live here.
 
 **4. Supporting layers** always running in the background:
 - **Memory** — hybrid BM25 + vector search, FTS5, temporal decay, SQLite or pgvector

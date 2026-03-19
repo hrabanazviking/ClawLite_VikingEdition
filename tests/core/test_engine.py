@@ -2207,6 +2207,103 @@ def test_engine_stream_run_falls_back_to_full_run_for_explicit_github_skill_turn
     asyncio.run(_scenario())
 
 
+def test_engine_stream_run_falls_back_to_full_run_for_summarize_sources() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingPromptCaptureProvider("stream-summary")
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="summary-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-summary",
+                user_text="summarize docs/architecture.pdf",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "8"},
+            )
+        ]
+
+        assert provider.stream_calls == 0
+        assert chunks == [
+            ProviderChunk(text="summary-result", accumulated="summary-result", done=True)
+        ]
+        assert seen == [
+            {
+                "session_id": "cli:stream-summary",
+                "user_text": "summarize docs/architecture.pdf",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "8"},
+            }
+        ]
+
+        provider_url = FakeStreamingPromptCaptureProvider("stream-summary-url")
+        engine_url = AgentEngine(
+            provider=provider_url,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+        seen_url: list[str] = []
+
+        async def _fallback_run_url(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            del session_id, channel, chat_id, runtime_metadata
+            seen_url.append(user_text)
+            return ProviderResult(text="summary-url-result", tool_calls=[], model="fake/model")
+
+        engine_url.run = _fallback_run_url  # type: ignore[method-assign]
+
+        url_chunks = [
+            chunk
+            async for chunk in await engine_url.stream_run(
+                session_id="cli:stream-summary-url",
+                user_text="summarize https://example.com/article",
+            )
+        ]
+
+        assert provider_url.stream_calls == 0
+        assert "".join(chunk.text for chunk in url_chunks) == "summary-url-result"
+        assert seen_url == ["summarize https://example.com/article"]
+
+    asyncio.run(_scenario())
+
+
 def test_engine_stream_run_keeps_provider_stream_for_explanatory_github_and_docker_prompts() -> None:
     async def _scenario() -> None:
         github_provider = FakeStreamingPromptCaptureProvider("stream-gh")
@@ -2243,10 +2340,38 @@ def test_engine_stream_run_keeps_provider_stream_for_explanatory_github_and_dock
             )
         ]
 
+        summarize_provider = FakeStreamingPromptCaptureProvider("stream-summary")
+        summarize_engine = AgentEngine(
+            provider=summarize_provider,
+            tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["summarize"]),
+        )
+
+        summarize_chunks = [
+            chunk
+            async for chunk in await summarize_engine.stream_run(
+                session_id="cli:stream-summary-topic",
+                user_text="resuma isso em 3 linhas",
+            )
+        ]
+
+        summarize_repo_chunks = [
+            chunk
+            async for chunk in await summarize_engine.stream_run(
+                session_id="cli:stream-summary-repo",
+                user_text="summarize owner/repo in 3 bullet points",
+            )
+        ]
+
         assert "".join(chunk.text for chunk in github_chunks) == "stream-gh"
         assert github_provider.stream_calls == 1
         assert "".join(chunk.text for chunk in docker_chunks) == "stream-docker"
         assert docker_provider.stream_calls == 1
+        assert "".join(chunk.text for chunk in summarize_chunks) == "stream-summary"
+        assert "".join(chunk.text for chunk in summarize_repo_chunks) == "stream-summary"
+        assert summarize_provider.stream_calls == 2
 
     asyncio.run(_scenario())
 
@@ -2266,6 +2391,21 @@ def test_engine_stream_requires_full_run_for_live_lookup_and_explicit_skill_rout
         live_lookup_required=False,
         available_skill_names={"docker"},
     )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="summarize docs/architecture.pdf",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="summarize https://example.com/article",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert AgentEngine._stream_requires_full_run(
+        user_text="use the summarize skill on https://example.com",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
     assert not AgentEngine._stream_requires_full_run(
         user_text="how do GitHub workflows work?",
         live_lookup_required=False,
@@ -2278,6 +2418,11 @@ def test_engine_stream_requires_full_run_for_live_lookup_and_explicit_skill_rout
     )
     assert not AgentEngine._stream_requires_full_run(
         user_text="Resume isso em 3 linhas",
+        live_lookup_required=False,
+        available_skill_names={"summarize"},
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="summarize owner/repo in 3 bullet points",
         live_lookup_required=False,
         available_skill_names={"summarize"},
     )

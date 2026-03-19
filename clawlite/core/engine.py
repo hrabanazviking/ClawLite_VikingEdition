@@ -482,6 +482,18 @@ class AgentEngine:
         r"\buse\s+the\s+docker\s+(?:skill|tool)\b",
         re.IGNORECASE,
     )
+    _EXPLICIT_SUMMARIZE_SKILL_REQUEST_RE = re.compile(
+        r"\buse\s+the\s+summarize\s+(?:skill|tool)\b",
+        re.IGNORECASE,
+    )
+    _SUMMARY_SOURCE_ROOTED_PATH_RE = re.compile(
+        r"^(?:[A-Za-z]:[\\/]|/|\.{1,2}/|~/)",
+        re.IGNORECASE,
+    )
+    _SUMMARY_SOURCE_FILE_TOKEN_RE = re.compile(
+        r"^(?:[\w.-]+(?:/[\w.-]+)+|[\w.-]+)\.(?:pdf|txt|md|markdown|html?|json|csv|log|docx?|pptx?|xlsx?)$",
+        re.IGNORECASE,
+    )
     _ROUTING_HINT_HEADER = "[Routing Hint]"
     _LIVE_LOOKUP_SKILL_NAMES: frozenset[str] = frozenset({"weather", "web-search"})
 
@@ -2747,6 +2759,23 @@ class AgentEngine:
         return cls._WEB_RESEARCH_SYSTEM_NOTICE
 
     @classmethod
+    def _message_references_summary_source(cls, user_text: str) -> bool:
+        compact = " ".join(str(user_text or "").split()).strip()
+        if not compact:
+            return False
+        if cls._URL_RE.search(compact):
+            return True
+        for raw_token in compact.split():
+            token = raw_token.strip("()[]{}<>,.;:!?\"'`")
+            if not token:
+                continue
+            if cls._SUMMARY_SOURCE_ROOTED_PATH_RE.match(token):
+                return True
+            if cls._SUMMARY_SOURCE_FILE_TOKEN_RE.match(token):
+                return True
+        return False
+
+    @classmethod
     def _stream_requires_full_run(
         cls,
         *,
@@ -2784,6 +2813,17 @@ class AgentEngine:
                 or (
                     cls._DOCKER_STREAM_ROUTE_RE.search(compact)
                     and cls._DOCKER_ACTION_RE.search(compact)
+                )
+            )
+        ):
+            return True
+        if (
+            "summarize" in skill_names
+            and (
+                cls._EXPLICIT_SUMMARIZE_SKILL_REQUEST_RE.search(compact)
+                or (
+                    cls._SUMMARIZE_REQUEST_RE.search(compact)
+                    and cls._message_references_summary_source(compact)
                 )
             )
         ):

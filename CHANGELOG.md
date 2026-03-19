@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - cron dispatch and queued `agent_run` / `skill_exec` jobs now preserve explicit routing context (`channel`, `target` / `chat_id`, `runtime_metadata`) when that metadata is already present in the job payload
 - inbound channel text now also neutralizes bracketed `[Developer]` role-spoof markers before channel traffic reaches the agent loop, while keeping noisier prefixes like `Assistant:` and `Tool:` untouched for now
 - `stream_run()` now also falls back to the full `run()` loop for explicit GitHub and Docker skill-routed turns, reducing another class of streaming/text-only divergence without broadly disabling provider streaming
+- `stream_run()` now also falls back to the full `run()` loop for summarize requests that clearly reference a URL or local file when the summarize skill is available, so tool-backed summary turns no longer stay on the text-only streaming path
 - the untrusted runtime-context block is now merged into the current user turn before provider calls, avoiding another provider-compatibility edge around adjacent `user` messages without changing what gets persisted to session history
 - gateway WebSocket streaming now coalesces tiny provider chunks into fewer `chat.chunk` events before the final response, reducing frame spam without changing ordering or accumulated text semantics
 - gateway WebSocket chunk coalescing is now configurable under `gateway.websocket`, while preserving the existing default buffering behavior and `chat.chunk` contract
