@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discord policy/routing parity slice now includes DM/guild policy controls, guild/channel/role allowlists, bot gating, explicit session keys, configurable `reply_to_mode`, isolated slash sessions, deferred interaction replies, and persisted thread/channel bindings with idle/max-age expiry
 - Discord operator flows now include native `/discord-status` and `/discord-refresh` commands handled before the agent loop
 
+### Fixed
+- `AgentEngine` now marks synthesized subagent digests with the async-safe subagent API inside the live event loop, so completed digest runs no longer leak back into later turns
+- engine regressions that inspect exact tool/tool-call history now use hermetic in-memory session state instead of machine-local persisted rows
+- cron scheduler regression coverage now waits on an explicit callback event instead of a fixed sleep, removing a suite-load race in `test_cron_service_add_and_run`
+
 ## [v0.7.0-beta.0] - 2026-03-17
 
 ### Phase 7 — Advanced memory and self-improvement (`main`, 2026-03-17)

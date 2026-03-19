@@ -2265,19 +2265,26 @@ class AgentEngine:
             model=final.model,
         )
 
+        mark_async_fn = getattr(self.subagents, "mark_synthesized_async", None)
         mark_fn = getattr(self.subagents, "mark_synthesized", None)
-        if callable(mark_fn):
+        if callable(mark_async_fn) or callable(mark_fn):
             run_ids = [str(getattr(item, "run_id", "") or "").strip() for item in completed_runs]
             run_ids = [item for item in run_ids if item]
             if run_ids:
                 digest_id = hashlib.sha256(digest.encode("utf-8", errors="ignore")).hexdigest()[:12]
                 try:
-                    mark_fn(run_ids, digest_id=digest_id)
-                except TypeError:
-                    try:
-                        mark_fn(run_ids)
-                    except Exception as exc:
-                        run_log.warning("subagent digest mark failed session={} error={}", session_id or "-", exc)
+                    if callable(mark_async_fn):
+                        try:
+                            await mark_async_fn(run_ids, digest_id=digest_id)
+                        except TypeError:
+                            await mark_async_fn(run_ids)
+                    elif callable(mark_fn):
+                        try:
+                            mark_value = mark_fn(run_ids, digest_id=digest_id)
+                        except TypeError:
+                            mark_value = mark_fn(run_ids)
+                        if inspect.isawaitable(mark_value):
+                            await mark_value
                 except Exception as exc:
                     run_log.warning("subagent digest mark failed session={} error={}", session_id or "-", exc)
 

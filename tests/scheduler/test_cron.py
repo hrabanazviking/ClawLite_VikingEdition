@@ -18,14 +18,16 @@ def test_cron_service_add_and_run(tmp_path: Path) -> None:
         store = tmp_path / "cron.json"
         service = CronService(store)
         seen: list[str] = []
+        completed = asyncio.Event()
 
         async def _on_job(job):
             seen.append(job.payload.prompt)
+            completed.set()
             return "ok"
 
         await service.add_job(session_id="s1", expression="every 1", prompt="ping")
         await service.start(_on_job)
-        await asyncio.sleep(1.3)
+        await asyncio.wait_for(completed.wait(), timeout=3.0)
         await service.stop()
 
         assert seen

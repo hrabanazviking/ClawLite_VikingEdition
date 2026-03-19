@@ -1,6 +1,6 @@
 # ClawLite Status
 
-Last updated: 2026-03-18
+Last updated: 2026-03-19
 
 ## Summary
 
@@ -18,8 +18,8 @@ The current hardening slice also closes the remaining `plano.md` runtime gaps: `
 
 - Latest tag: `v0.7.0-beta.0`
 - `main` is ahead of that tag — provider onboarding was expanded with better wizard suggestions and additional OpenAI-compatible providers, and Docker now includes the next parity slice with runtime extras, an optional Redis bus profile, a rootless image, and an official setup helper
-- Full suite: `python -m pytest tests/ -q --tb=short` → **1561 passed, 1 skipped**
-- Focused runtime slice: `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → **190 passed**
+- Full suite: `python -m pytest tests/ -q --tb=short` → **1699 passed, 1 skipped**
+- Focused runtime slice: `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → **194 passed**
 - CI: pytest on Python 3.10 and 3.12, Ruff lint, autonomy contracts, and smoke coverage for YAML CLI config, local-provider probes, quickstart wizard, cron, browser bootstrap hints, and isolated self-evolution branch validation
 - Docker: official `Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md`, and `scripts/docker_setup.sh` now ship in-tree; the current parity slice also adds the `runtime` extra, env overrides for the bus backend, an optional Redis compose profile, a rootless `clawlite` image user, and CI smoke for `docker compose config` plus image build
 - Discord parity now includes approval callbacks for gated tools plus static/auto presence with native `/discord-presence` operator controls
@@ -98,8 +98,8 @@ The current hardening slice also closes the remaining `plano.md` runtime gaps: `
 ## Validation
 
 ```bash
-python -m pytest tests/ -q --tb=short  # 1561 passed, 1 skipped
-python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py  # 190 passed
+python -m pytest tests/ -q --tb=short  # 1699 passed, 1 skipped
+python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py  # 194 passed
 bash scripts/smoke_test.sh  # 7 ok / 0 failure(s)
 python -m ruff check --select=E,F,W .  # when ruff is installed
 clawlite validate config

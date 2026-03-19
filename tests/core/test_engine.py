@@ -12,7 +12,7 @@ import clawlite.core.engine as engine_module
 from clawlite.config.schema import ToolSafetyPolicyConfig
 from clawlite.core.engine import AgentEngine, InMemorySessionStore, LoopDetectionSettings, ProviderResult, ToolCall, TurnBudget
 from clawlite.core.memory import MemoryRecord
-from clawlite.core.subagent import SubagentRun
+from clawlite.core.subagent import SubagentManager, SubagentRun
 from clawlite.core.subagent_synthesizer import SubagentSynthesizer
 from clawlite.core.prompt import PromptBuilder
 from clawlite.runtime.telemetry import set_test_tracer_factory
@@ -589,6 +589,12 @@ class FakeSubagentManagerForDigest:
     def mark_synthesized(self, run_ids: list[str], *, digest_id: str = "") -> int:
         self.mark_calls.append({"run_ids": list(run_ids), "digest_id": digest_id})
         return len(run_ids)
+
+
+class FakeSubagentManagerEmpty:
+    def list_completed_unsynthesized(self, session_id: str, limit: int = 8) -> list[SubagentRun]:
+        del session_id, limit
+        return []
 
 
 class FakeSubagentManagerForDigestWithTargetSession(FakeSubagentManagerForDigest):
@@ -1320,7 +1326,12 @@ def test_engine_rejects_invalid_tool_argument_payloads_before_dispatch() -> None
     async def _scenario() -> None:
         provider = FakeInvalidToolArgumentsProvider()
         tools = ExecuteCaptureTools()
-        engine = AgentEngine(provider=provider, tools=tools)
+        engine = AgentEngine(
+            provider=provider,
+            tools=tools,
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+        )
 
         out = await engine.run(session_id="cli:bad-args", user_text="say hi")
         assert out.text == "done"
@@ -1410,7 +1421,13 @@ def test_engine_normalizes_duplicate_and_invalid_tool_call_ids() -> None:
     async def _scenario() -> None:
         provider = FakeDuplicateAndInvalidToolIdProvider()
         tools = ExecuteCaptureTools()
-        engine = AgentEngine(provider=provider, tools=tools)
+        engine = AgentEngine(
+            provider=provider,
+            tools=tools,
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            subagents=FakeSubagentManagerEmpty(),
+        )
 
         out = await engine.run(session_id="cli:dup-tool-id", user_text="say hi")
         assert out.text == "done"
@@ -2679,7 +2696,14 @@ def test_engine_truncates_tool_result_payload() -> None:
             return "x" * 200
 
         tools.execute = _long_execute  # type: ignore[method-assign]
-        engine = AgentEngine(provider=provider, tools=tools, max_tool_result_chars=32)
+        engine = AgentEngine(
+            provider=provider,
+            tools=tools,
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            subagents=FakeSubagentManagerEmpty(),
+            max_tool_result_chars=32,
+        )
         await engine.run(session_id="cli:truncate", user_text="hello")
         assert provider.calls == 2
         tool_rows = [row for row in provider.snapshots[1] if row.get("role") == "tool"]
@@ -3360,6 +3384,7 @@ def test_engine_uses_semantic_history_summary_when_enabled() -> None:
             tools=FakeTools(),
             sessions=sessions,
             memory=FakeMemory(),
+            subagents=FakeSubagentManagerEmpty(),
             prompt_builder=PromptBuilder(context_token_budget=220),
             semantic_history_summary_enabled=True,
         )
@@ -3398,6 +3423,7 @@ def test_engine_compacts_large_tool_results_before_history_injection() -> None:
             tools=LargeToolResultTools(),
             sessions=InMemorySessionStore(),
             memory=FakeMemory(),
+            subagents=FakeSubagentManagerEmpty(),
             tool_result_compaction_enabled=True,
             tool_result_compaction_threshold_chars=200,
             max_tool_result_chars=400,
@@ -3419,5 +3445,39 @@ def test_engine_compacts_large_tool_results_before_history_injection() -> None:
             any(msg.get("role") == "tool" and msg.get("content") == "compacted tool output" for msg in snapshot)
             for snapshot in non_compaction_calls
         )
+
+    asyncio.run(_scenario())
+
+
+def test_engine_marks_real_subagent_digest_async_and_does_not_repeat_it(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        manager = SubagentManager(state_path=tmp_path / "subagents")
+        run = SubagentRun(
+            run_id="run-digest-1",
+            session_id="s1",
+            task="collect context",
+            status="done",
+            result="Collected all required details.",
+            finished_at="2026-03-05T12:00:00+00:00",
+        )
+        manager._runs[run.run_id] = run
+        manager._save_state()
+
+        provider = FakeFixedTextProvider("final answer")
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=InMemorySessionStore(),
+            memory=FakeMemory(),
+            subagents=manager,
+        )
+
+        first = await engine.run(session_id="s1", user_text="hello")
+        second = await engine.run(session_id="s1", user_text="hello again")
+
+        assert first.text.startswith("final answer")
+        assert "[Subagent Digest]" in first.text
+        assert second.text == "final answer"
+        assert manager.list_completed_unsynthesized("s1") == []
 
     asyncio.run(_scenario())
