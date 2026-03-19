@@ -1276,6 +1276,8 @@ class SkillsLoader:
             return ["tool:exec", "env:OP_SERVICE_ACCOUNT_TOKEN"]
         if script_name == "docker":
             return ["tool:exec"]
+        if script_name == "tmux":
+            return ["tool:exec", "platform:linux|darwin"]
         if script_name == "apple_notes":
             return ["tool:exec", "platform:darwin"]
         if script_name == "notion":
