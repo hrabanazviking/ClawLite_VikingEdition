@@ -1056,6 +1056,7 @@ def test_tool_registry_rejects_approval_review_from_different_actor() -> None:
             pending[0]["request_id"],
             decision="approved",
             actor="telegram:99",
+            trusted_actor=True,
         )
         assert review["ok"] is False
         assert review["error"] == "approval_actor_mismatch"
@@ -1064,7 +1065,39 @@ def test_tool_registry_rejects_approval_review_from_different_actor() -> None:
     asyncio.run(_scenario())
 
 
-def test_tool_registry_rejects_approval_review_without_actor_when_request_is_bound() -> None:
+def test_tool_registry_rejects_trusted_approval_review_without_actor_when_request_is_bound() -> None:
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(RunSkillLikeTool())
+        try:
+            await reg.execute(
+                "run_skill",
+                {"name": "github"},
+                session_id="telegram:1",
+                channel="telegram",
+                user_id="1",
+                requester_id="42",
+            )
+            raise AssertionError("expected approval requirement")
+        except RuntimeError as exc:
+            assert str(exc) == "tool_requires_approval:run_skill:telegram"
+
+        pending = reg.consume_pending_approval_requests(session_id="telegram:1", channel="telegram")
+        assert len(pending) == 1
+        review = reg.review_approval_request(
+            pending[0]["request_id"],
+            decision="approved",
+            actor="",
+            trusted_actor=True,
+        )
+        assert review["ok"] is False
+        assert review["error"] == "approval_actor_required"
+        assert review["expected_actor"] == "telegram:42"
+
+    asyncio.run(_scenario())
+
+
+def test_tool_registry_rejects_untrusted_approval_review_without_actor_when_request_is_bound() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry()
         reg.register(RunSkillLikeTool())
@@ -1089,7 +1122,7 @@ def test_tool_registry_rejects_approval_review_without_actor_when_request_is_bou
             actor="",
         )
         assert review["ok"] is False
-        assert review["error"] == "approval_actor_required"
+        assert review["error"] == "approval_channel_bound"
         assert review["expected_actor"] == "telegram:42"
 
     asyncio.run(_scenario())

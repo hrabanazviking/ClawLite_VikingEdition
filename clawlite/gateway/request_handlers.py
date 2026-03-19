@@ -34,6 +34,14 @@ class GatewayRequestHandlers:
             diagnostics_auth=self.diagnostics_require_auth,
         )
 
+    def _check_sensitive_control(self, request: Request) -> None:
+        self.auth_guard.check_http(
+            request=request,
+            scope="control",
+            diagnostics_auth=self.diagnostics_require_auth,
+            require_token_if_configured=True,
+        )
+
     @staticmethod
     def _cron_counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -103,7 +111,7 @@ class GatewayRequestHandlers:
         include_grants: bool = False,
         limit: int = 50,
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         list_requests = getattr(tools, "approval_requests_snapshot", None)
         if not callable(list_requests):
@@ -160,7 +168,7 @@ class GatewayRequestHandlers:
         actor: str = "",
         note: str = "",
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         review_fn = getattr(tools, "review_approval_request", None)
         if not callable(review_fn):
@@ -170,7 +178,7 @@ class GatewayRequestHandlers:
             review_fn,
             str(request_id or "").strip(),
             decision=str(decision or "").strip().lower(),
-            actor=str(actor or "").strip(),
+            actor="control-plane",
             note=str(note or "").strip(),
         )
         if not isinstance(summary, dict):
@@ -195,7 +203,7 @@ class GatewayRequestHandlers:
         channel: str = "",
         rule: str = "",
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         revoke_fn = getattr(tools, "revoke_approval_grants", None)
         if not callable(revoke_fn):

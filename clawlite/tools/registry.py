@@ -683,6 +683,16 @@ class ToolRegistry:
             return {"ok": False, "error": "approval_request_not_found"}
         expected_actor = str(payload.get("requester_actor", "") or "").strip()
         normalized_actor = str(actor or "").strip()
+        if expected_actor and not trusted_actor:
+            return {
+                "ok": False,
+                "error": "approval_channel_bound",
+                "request_id": normalized_request_id,
+                "tool": str(payload.get("tool", "") or "").strip(),
+                "channel": str(payload.get("channel", "") or "").strip(),
+                "session_id": str(payload.get("session_id", "") or "").strip(),
+                "expected_actor": expected_actor,
+            }
         if expected_actor and not normalized_actor:
             return {
                 "ok": False,
@@ -697,16 +707,6 @@ class ToolRegistry:
             return {
                 "ok": False,
                 "error": "approval_actor_mismatch",
-                "request_id": normalized_request_id,
-                "tool": str(payload.get("tool", "") or "").strip(),
-                "channel": str(payload.get("channel", "") or "").strip(),
-                "session_id": str(payload.get("session_id", "") or "").strip(),
-                "expected_actor": expected_actor,
-            }
-        if expected_actor and not trusted_actor:
-            return {
-                "ok": False,
-                "error": "approval_channel_bound",
                 "request_id": normalized_request_id,
                 "tool": str(payload.get("tool", "") or "").strip(),
                 "channel": str(payload.get("channel", "") or "").strip(),

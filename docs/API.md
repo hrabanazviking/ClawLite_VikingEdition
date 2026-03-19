@@ -1064,6 +1064,7 @@ Alias compatível: `GET /api/tools/catalog`.
 
 Returns the live queue of approval-gated tool requests tracked by the running gateway.
 Each request includes the existing raw `arguments_preview` plus structured `approval_context` for operator UX, such as exec command metadata, env override keys, cwd, or browser/web target hosts.
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Query params:
 - `status`: `pending`, `approved`, `rejected`, or `all`
@@ -1084,13 +1085,12 @@ Alias compatível: `GET /api/tools/approvals`.
 
 ## `POST /v1/tools/approvals/{request_id}/approve`
 
-Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set. When `requester_actor` was recorded on the original request, only that same actor can review it from the native channel interaction path; generic HTTP review fails closed with `approval_actor_required`, `approval_actor_mismatch`, or `approval_channel_bound`.
+Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set. When `requester_actor` was recorded on the original request, only that same actor can review it from the native channel interaction path; generic HTTP review fails closed with `approval_channel_bound`. If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback. Generic HTTP reviews record the reviewer as `control-plane`; caller-supplied actor labels are ignored.
 
 Request body:
 
 ```json
 {
-  "actor": "ops",
   "note": "approved after review"
 }
 ```
@@ -1101,13 +1101,12 @@ For actor-bound channel requests, inspect the queue over HTTP/CLI if needed, but
 
 ## `POST /v1/tools/approvals/{request_id}/reject`
 
-Rejects one pending tool request without creating a grant.
+Rejects one pending tool request without creating a grant. If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback. Generic HTTP reviews record the reviewer as `control-plane`; caller-supplied actor labels are ignored.
 
 Request body:
 
 ```json
 {
-  "actor": "ops",
   "note": "use a safer command"
 }
 ```
@@ -1117,6 +1116,7 @@ Alias compatível: `POST /api/tools/approvals/{request_id}/reject`.
 ## `POST /v1/tools/grants/revoke`
 
 Revokes one or more active temporary tool-approval grants before their TTL expires.
+If a gateway token is configured, this endpoint requires that token even when the gateway is otherwise open on loopback.
 
 Request body:
 

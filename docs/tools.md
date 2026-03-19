@@ -155,12 +155,12 @@ The same approval queue is now inspectable over the gateway and CLI:
 ```bash
 clawlite tools approvals --include-grants
 clawlite tools approvals --include-grants --tool browser --rule browser:evaluate
-clawlite tools approve <request_id> --actor ops --note "approved after review"
-clawlite tools reject <request_id> --actor ops --note "use a safer command"
+clawlite tools approve <request_id> --note "approved after review"
+clawlite tools reject <request_id> --note "use a safer command"
 clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate
 ```
 
-`tools approvals` returns live request snapshots (`pending`, `approved`, `rejected`, or `all`) and can include active grants with their remaining TTL plus `scope` / `request_id` metadata. Each request now also carries `approval_context`, so operators can review structured fields such as the exec binary, env override keys, cwd, browser action/url/host, or `web_fetch` host without parsing the raw JSON preview alone. Actor-bound requests also expose `requester_actor`, which is the identity that must review them from the native channel interaction. The queue can also be narrowed live by `tool` and exact `rule` when only one approval class matters. `tools revoke-grant` removes one or more of those temporary grants early, so operators do not have to wait for TTL expiry when they want to close the window immediately. This mirrors the channel-native operator buttons without forcing the review to happen inside Telegram or Discord.
+`tools approvals` returns live request snapshots (`pending`, `approved`, `rejected`, or `all`) and can include active grants with their remaining TTL plus `scope` / `request_id` metadata. Each request now also carries `approval_context`, so operators can review structured fields such as the exec binary, env override keys, cwd, browser action/url/host, or `web_fetch` host without parsing the raw JSON preview alone. Actor-bound requests also expose `requester_actor`, which is the identity that must review them from the native channel interaction. The queue can also be narrowed live by `tool` and exact `rule` when only one approval class matters. `tools revoke-grant` removes one or more of those temporary grants early, so operators do not have to wait for TTL expiry when they want to close the window immediately. This mirrors the channel-native operator buttons without forcing the review to happen inside Telegram or Discord. When a gateway token is configured, these approval/grant endpoints require that token even on loopback, and generic HTTP/CLI reviews are recorded as `control-plane` rather than trusting a caller-supplied actor label.
 
 For live catalog inspection through the gateway:
 

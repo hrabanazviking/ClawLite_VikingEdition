@@ -705,12 +705,25 @@ class GatewayAuthGuard:
     def _token_matches(self, supplied_token: str) -> bool:
         return bool(self.token) and hmac.compare_digest(supplied_token, self.token)
 
-    def check_http(self, *, request: Request, scope: str, diagnostics_auth: bool) -> None:
+    def check_http(
+        self,
+        *,
+        request: Request,
+        scope: str,
+        diagnostics_auth: bool,
+        require_token_if_configured: bool = False,
+    ) -> None:
         client_host = request.client.host if request.client is not None else None
-        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         header_value = str(request.headers.get(self.header_name, "") or "")
         query_value = str(request.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
+        if require_token_if_configured and self.token:
+            if not supplied_token:
+                raise HTTPException(status_code=401, detail="gateway_auth_required")
+            if not self._token_matches(supplied_token):
+                raise HTTPException(status_code=401, detail="gateway_auth_invalid")
+            return
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         if should_require and not self._token_matches(supplied_token):
             raise HTTPException(status_code=401, detail="gateway_auth_required")
         if self.mode == "optional" and supplied_token and self.token and not self._token_matches(supplied_token):

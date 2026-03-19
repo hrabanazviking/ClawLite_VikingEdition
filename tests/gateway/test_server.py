@@ -3370,7 +3370,7 @@ def test_gateway_tools_approval_review_endpoint_updates_request(tmp_path: Path) 
     assert payload["summary"]["approval_context"] == {"tool": "browser", "action": "evaluate"}
     reviewed = registry._approval_requests["req-1"]
     assert reviewed["status"] == "approved"
-    assert reviewed["actor"] == "cli"
+    assert reviewed["actor"] == "control-plane"
     grant_keys = list(registry._approval_grants.keys())
     assert len(grant_keys) == 1
     assert grant_keys[0].startswith("exact::req-1::telegram:1::telegram::browser:evaluate")
@@ -3438,6 +3438,82 @@ def test_gateway_tools_grants_revoke_endpoint_removes_matching_grants(tmp_path: 
     assert payload["summary"]["removed_count"] == 1
     assert "telegram:1::telegram::browser:evaluate" not in registry._approval_grants
     assert "telegram:2::telegram::browser:evaluate" in registry._approval_grants
+
+
+def test_gateway_tools_approval_endpoints_require_token_when_configured_even_on_loopback(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={
+            "auth": {
+                "mode": "off",
+                "token": "secret-token",
+            },
+            "heartbeat": {"enabled": False},
+        },
+        channels={},
+    )
+    app = create_app(cfg)
+    registry = app.state.runtime.engine.tools
+    registry._approval_requests["req-1"] = {
+        "request_id": "req-1",
+        "tool": "browser",
+        "session_id": "telegram:1",
+        "channel": "telegram",
+        "matched_approval_specifiers": ["browser:evaluate"],
+        "status": "pending",
+        "created_at_monotonic": time.monotonic() - 1.0,
+        "expires_at_monotonic": time.monotonic() + 300.0,
+        "arguments_preview": '{"action":"evaluate"}',
+        "approval_context": {"tool": "browser", "action": "evaluate"},
+        "notified_count": 1,
+    }
+    registry._approval_request_order.append("req-1")
+    registry._approval_grants["telegram:1::telegram::browser:evaluate"] = time.monotonic() + 120.0
+
+    with TestClient(app) as client:
+        assert client.get("/v1/status").status_code == 200
+
+        unauthorized_list = client.get("/v1/tools/approvals")
+        assert unauthorized_list.status_code == 401
+        assert unauthorized_list.json()["error"] == "gateway_auth_required"
+
+        unauthorized_review = client.post("/v1/tools/approvals/req-1/approve", json={"actor": "ops"})
+        assert unauthorized_review.status_code == 401
+        assert unauthorized_review.json()["error"] == "gateway_auth_required"
+
+        unauthorized_revoke = client.post(
+            "/v1/tools/grants/revoke",
+            json={"session_id": "telegram:1", "channel": "telegram", "rule": "browser:evaluate"},
+        )
+        assert unauthorized_revoke.status_code == 401
+        assert unauthorized_revoke.json()["error"] == "gateway_auth_required"
+
+        invalid_list = client.get("/v1/tools/approvals", headers={"Authorization": "Bearer wrong-token"})
+        assert invalid_list.status_code == 401
+        assert invalid_list.json()["error"] == "gateway_auth_invalid"
+
+        headers = {"Authorization": "Bearer secret-token"}
+        listed = client.get("/v1/tools/approvals", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["count"] == 1
+
+        reviewed = client.post(
+            "/v1/tools/approvals/req-1/approve",
+            headers=headers,
+            json={"actor": "ops", "note": "reviewed"},
+        )
+        assert reviewed.status_code == 200
+        assert registry._approval_requests["req-1"]["actor"] == "control-plane"
+
+        revoked = client.post(
+            "/v1/tools/grants/revoke",
+            headers=headers,
+            json={"session_id": "telegram:1", "channel": "telegram", "rule": "browser:evaluate"},
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["summary"]["removed_count"] >= 1
 
 
 def test_gateway_chat_provider_error_returns_graceful_message(tmp_path: Path) -> None:

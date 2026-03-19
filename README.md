@@ -127,7 +127,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Builtin skills can now be gated with `skills.allowBundled` without blocking workspace or marketplace overrides.
 - Tool safety now supports granular specifiers such as `browser:evaluate`, `run_skill:github`, `exec:git`, `exec:shell`, and `exec:env-key:git-ssh-command`, plus approval mode via `approval_specifiers` / `approval_channels`, with `tool:*` wildcards for channel-specific policy.
 - The default approval baseline is now safer out of the box: `browser:evaluate`, `exec`, `mcp`, and `run_skill` require approval on Telegram and Discord, and approval reviews are bound to the original requester when that actor identity is available.
-- Actor-bound Telegram/Discord approval requests can still be inspected from the gateway or CLI, but the actual approve/reject step now stays on the native channel interaction instead of trusting a manually supplied actor string over the generic control plane.
+- Actor-bound Telegram/Discord approval requests can still be inspected from the gateway or CLI, but the actual approve/reject step now stays on the native channel interaction instead of trusting a manually supplied actor string over the generic control plane. Generic HTTP approval reviews now record the reviewer as `control-plane`, and the approval/grant endpoints require the configured gateway token whenever one exists, even on loopback.
 - Tool safety now also derives host-aware rules for `web_fetch` and `browser:navigate`, so operator policy can target specific destinations such as `web_fetch:host:example-com` instead of only whole-tool approvals.
 - Explicit shell wrappers like `sh -lc`, `bash -lc`, and `cmd /c` now classify as `exec:shell` and are recursively guarded under workspace restriction, so they no longer bypass `restrict_to_workspace` by hiding path access behind `$HOME`, `~`, or similar expansions.
 - `exec` and `process` now also block obvious `curl` / `wget` / PowerShell web fetches to localhost, private ranges, and metadata-style `http(s)` targets, closing a network-policy bypass that previously sat outside `web_fetch`.
@@ -544,8 +544,8 @@ clawlite skills sync                   # update managed marketplace skills via C
 clawlite skills remove <name>          # remove managed marketplace skill
 clawlite tools safety browser --session-id telegram:1 --channel telegram --args-json '{"action":"evaluate"}'
 clawlite tools approvals --include-grants --tool browser --rule browser:evaluate
-clawlite tools approve <request_id> --actor ops --note "approved after review"
-clawlite tools reject <request_id> --actor ops --note "needs a safer path"
+clawlite tools approve <request_id> --note "approved after review"
+clawlite tools reject <request_id> --note "needs a safer path"
 clawlite tools revoke-grant --session-id telegram:1 --channel telegram --rule browser:evaluate
 clawlite tools catalog --include-schema
 clawlite tools show bash
