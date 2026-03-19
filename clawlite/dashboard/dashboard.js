@@ -3,9 +3,10 @@ const auth = bootstrap.auth || {};
 const paths = bootstrap.paths || {};
 const tokenStorageKey = "clawlite.dashboard.token";
 const refreshStorageKey = "clawlite.dashboard.refreshMs";
-const defaultRefreshMs = 15000;
+const defaultRefreshMs = 30000;
 const maxFeedEntries = 18;
 const HATCH_MESSAGE = "Wake up, my friend!";
+const compactMediaQuery = window.matchMedia("(max-width: 820px)");
 
 const state = {
   activeTab: "overview",
@@ -75,6 +76,14 @@ function setCode(id, value) {
   if (node) {
     node.textContent = typeof value === "string" ? value : safeJson(value);
   }
+}
+
+function isPageHidden() {
+  return document.visibilityState === "hidden";
+}
+
+function applyCompactMode() {
+  document.body.classList.toggle("compact-mode", compactMediaQuery.matches);
 }
 
 function setBadge(id, text, tone = "") {
@@ -1216,14 +1225,35 @@ function renderRuntime() {
   renderToolsSummary();
 }
 
+function renderActivePanel() {
+  const tab = String(state.activeTab || "overview");
+  if (tab === "sessions") {
+    renderSessions();
+    return;
+  }
+  if (tab === "automation") {
+    renderAutomation();
+    renderDiscordBoard();
+    renderTelegramBoard();
+    return;
+  }
+  if (tab === "knowledge") {
+    renderKnowledge();
+    return;
+  }
+  if (tab === "runtime" || tab === "tools") {
+    renderRuntime();
+    return;
+  }
+  if (tab === "chat") {
+    setCode("ws-event-preview", state.wsPreview);
+    return;
+  }
+}
+
 function renderAll() {
   renderOverview();
-  renderSessions();
-  renderAutomation();
-  renderDiscordBoard();
-  renderTelegramBoard();
-  renderKnowledge();
-  renderRuntime();
+  renderActivePanel();
 }
 
 async function fetchJson(path, options = {}) {
@@ -1301,12 +1331,16 @@ function setActiveTab(tab) {
   document.querySelectorAll("[data-tab-panel]").forEach((node) => {
     node.classList.toggle("is-active", node.dataset.tabPanel === tab);
   });
+  renderAll();
 }
 
 function scheduleAutoRefresh() {
   window.clearInterval(state.refreshTimer);
   if (state.autoRefreshMs > 0) {
     state.refreshTimer = window.setInterval(() => {
+      if (isPageHidden()) {
+        return;
+      }
       void refreshAll("auto");
     }, state.autoRefreshMs);
   }
@@ -1355,6 +1389,10 @@ function connectWs() {
 
   socket.addEventListener("close", () => {
     updateWsStatus("offline");
+    if (isPageHidden()) {
+      recordEvent("warn", "WebSocket closed", "Reconnect deferred while the tab is hidden.", "transport");
+      return;
+    }
     recordEvent("warn", "WebSocket closed", "Attempting reconnect in 1.4s", "transport");
     window.clearTimeout(state.reconnectTimer);
     state.reconnectTimer = window.setTimeout(connectWs, 1400);
@@ -2189,9 +2227,26 @@ function bindEvents() {
       sendWsMessage();
     }
   });
+
+  document.addEventListener("visibilitychange", () => {
+    if (isPageHidden()) {
+      return;
+    }
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      connectWs();
+    }
+    void refreshAll("visibility");
+  });
+
+  if (typeof compactMediaQuery.addEventListener === "function") {
+    compactMediaQuery.addEventListener("change", applyCompactMode);
+  } else if (typeof compactMediaQuery.addListener === "function") {
+    compactMediaQuery.addListener(applyCompactMode);
+  }
 }
 
 bindEvents();
+applyCompactMode();
 bootstrapTokenFromUrl();
 setActiveTab(state.activeTab);
 renderAll();

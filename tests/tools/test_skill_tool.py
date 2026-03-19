@@ -1094,3 +1094,106 @@ def test_run_skill_session_logs_reads_jsonl_without_jq_or_rg(tmp_path: Path) -> 
         assert payload["messages"][0]["content"] == "deployment healthy"
 
     asyncio.run(_scenario())
+
+
+def test_run_skill_notion_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "notion", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "search" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_notion_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_notion_request(self, *, method, path, payload, timeout, token, notion_version, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "path": path,
+                "payload": payload,
+                "token": token,
+                "notion_version": notion_version,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "results": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("NOTION_API_KEY", "notion-secret")
+        monkeypatch.setattr(SkillTool, "_notion_request", _fake_notion_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "notion",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "roadmap",
+                },
+            },
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "POST",
+                "path": "/search",
+                "payload": {"query": "roadmap"},
+                "token": "notion-secret",
+                "notion_version": "2022-06-28",
+                "spec_name": "notion",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_notion_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("NOTION_API_KEY", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "notion",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "roadmap",
+                },
+            },
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:notion:notion_auth_missing"
+
+    asyncio.run(_scenario())

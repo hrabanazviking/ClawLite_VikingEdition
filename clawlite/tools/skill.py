@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-"""Tool bridge for executable SKILL.md entries.
-
-`SkillTool` makes discovered skills runnable at runtime without changing
-`registry.py` for each new skill:
-- `command:` runs shell commands from SKILL metadata
-- `script:` dispatches to built-in tool wrappers or external executables
-"""
-
 import asyncio
 import importlib.util
 import inspect
@@ -19,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlencode
+
+import httpx
 
 from clawlite.core.skills import SkillsLoader
 from clawlite.tools.base import Tool, ToolContext
@@ -562,7 +556,8 @@ class SkillTool(Tool):
         output_format = str(payload.get("format") or arguments.get("format") or "text").strip().lower() or "text"
         pretty = bool(payload.get("pretty", arguments.get("pretty", False)))
         days_raw = payload.get("days", arguments.get("days"))
-        days = int(days_raw) if days_raw not in {"", None} else None
+        days_text = str(days_raw or "").strip()
+        days = int(days_text) if days_text else None
         if provider not in {"codex", "claude"}:
             raise ValueError("provider must be codex or claude")
         if mode not in {"current", "all"}:
@@ -931,6 +926,270 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    @staticmethod
+    def _notion_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
+        payload = SkillTool._skill_payload(arguments)
+        for key in ("token", "api_key", "notion_api_key", "notionApiKey"):
+            text = str(payload.get(key, arguments.get(key, "")) or "").strip()
+            if text:
+                return text
+        if env_overrides:
+            text = str(env_overrides.get("NOTION_API_KEY", "") or "").strip()
+            if text:
+                return text
+        text = str(os.getenv("NOTION_API_KEY", "") or "").strip()
+        if text:
+            return text
+        raise RuntimeError("notion_auth_missing")
+
+    @staticmethod
+    def _notion_version(arguments: dict[str, Any]) -> str:
+        payload = SkillTool._skill_payload(arguments)
+        version = str(payload.get("notion_version", arguments.get("notion_version", "")) or "").strip()
+        if version:
+            return version
+        return "2022-06-28"
+
+    @staticmethod
+    def _notion_json_payload(arguments: dict[str, Any], *keys: str) -> dict[str, Any]:
+        payload = SkillTool._skill_payload(arguments)
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    async def _notion_request(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: dict[str, Any],
+        timeout: float,
+        token: str,
+        notion_version: str,
+        spec_name: str,
+    ) -> str:
+        clean_method = str(method or "").strip().upper()
+        if clean_method not in {"GET", "POST", "PATCH", "DELETE"}:
+            raise ValueError("notion_invalid_method")
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            raise ValueError("notion_path_required")
+        if not clean_path.startswith("/"):
+            clean_path = f"/{clean_path}"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": notion_version,
+            "Content-Type": "application/json",
+        }
+        url = f"https://api.notion.com/v1{clean_path}"
+
+        try:
+            async with httpx.AsyncClient(timeout=max(5.0, min(timeout, 60.0))) as client:
+                if clean_method == "GET":
+                    response = await client.get(url, headers=headers, params=payload or None)
+                elif clean_method == "POST":
+                    response = await client.post(url, headers=headers, json=payload)
+                elif clean_method == "PATCH":
+                    response = await client.patch(url, headers=headers, json=payload)
+                else:
+                    delete_content = json.dumps(payload, ensure_ascii=False) if payload else None
+                    response = await client.request("DELETE", url, headers=headers, content=delete_content)
+        except httpx.HTTPError as exc:
+            return f"skill_blocked:{spec_name}:notion_request_failed:{exc.__class__.__name__.lower()}"
+
+        try:
+            decoded = response.json()
+        except ValueError:
+            decoded = {
+                "status_code": int(response.status_code),
+                "text": str(response.text or "").strip(),
+            }
+
+        if int(response.status_code) >= 400:
+            if isinstance(decoded, dict):
+                detail = str(decoded.get("message", decoded.get("code", "notion_http_error")) or "notion_http_error").strip()
+            else:
+                detail = "notion_http_error"
+            return f"skill_blocked:{spec_name}:notion_http_error:{response.status_code}:{detail}"
+
+        return json.dumps(decoded, ensure_ascii=False)
+
+    async def _run_notion(
+        self,
+        arguments: dict[str, Any],
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        notion_version = self._notion_version(arguments)
+
+        def _resolve_data_payload() -> dict[str, Any]:
+            for key in ("data", "body", "payload"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    return dict(value)
+            return {}
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "notion_api",
+                    "default_notion_version": notion_version,
+                    "available_actions": [
+                        "search",
+                        "page_get",
+                        "page_create",
+                        "page_update",
+                        "database_query",
+                        "blocks_children",
+                        "blocks_append",
+                        "request",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            token = self._notion_token(arguments, env_overrides=env_overrides)
+        except RuntimeError as exc:
+            return f"skill_blocked:{spec_name}:{str(exc)}"
+
+        if action == "search":
+            query = str(payload.get("query", arguments.get("query", "")) or "").strip()
+            search_payload = _resolve_data_payload()
+            if query and "query" not in search_payload:
+                search_payload["query"] = query
+            return await self._notion_request(
+                method="POST",
+                path="/search",
+                payload=search_payload,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "page_get":
+            page_id = str(payload.get("page_id", payload.get("pageId", arguments.get("page_id", ""))) or "").strip()
+            if not page_id:
+                raise ValueError("page_id is required for notion page_get")
+            return await self._notion_request(
+                method="GET",
+                path=f"/pages/{page_id}",
+                payload={},
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "page_create":
+            create_payload = _resolve_data_payload()
+            if not create_payload:
+                raise ValueError("data is required for notion page_create")
+            return await self._notion_request(
+                method="POST",
+                path="/pages",
+                payload=create_payload,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "page_update":
+            page_id = str(payload.get("page_id", payload.get("pageId", arguments.get("page_id", ""))) or "").strip()
+            if not page_id:
+                raise ValueError("page_id is required for notion page_update")
+            update_payload = _resolve_data_payload()
+            if not update_payload:
+                raise ValueError("data is required for notion page_update")
+            return await self._notion_request(
+                method="PATCH",
+                path=f"/pages/{page_id}",
+                payload=update_payload,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "database_query":
+            database_id = str(payload.get("database_id", payload.get("databaseId", arguments.get("database_id", ""))) or "").strip()
+            if not database_id:
+                raise ValueError("database_id is required for notion database_query")
+            query_payload = _resolve_data_payload()
+            return await self._notion_request(
+                method="POST",
+                path=f"/databases/{database_id}/query",
+                payload=query_payload,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "blocks_children":
+            block_id = str(payload.get("block_id", payload.get("blockId", arguments.get("block_id", ""))) or "").strip()
+            if not block_id:
+                raise ValueError("block_id is required for notion blocks_children")
+            query: dict[str, Any] = {}
+            if "page_size" in payload:
+                query["page_size"] = payload.get("page_size")
+            if "start_cursor" in payload:
+                query["start_cursor"] = payload.get("start_cursor")
+            return await self._notion_request(
+                method="GET",
+                path=f"/blocks/{block_id}/children",
+                payload=query,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "blocks_append":
+            block_id = str(payload.get("block_id", payload.get("blockId", arguments.get("block_id", ""))) or "").strip()
+            if not block_id:
+                raise ValueError("block_id is required for notion blocks_append")
+            append_payload = _resolve_data_payload()
+            if not append_payload:
+                raise ValueError("data is required for notion blocks_append")
+            return await self._notion_request(
+                method="POST",
+                path=f"/blocks/{block_id}/children",
+                payload=append_payload,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        if action == "request":
+            method = str(payload.get("method", arguments.get("method", "GET")) or "GET").strip().upper()
+            path = str(payload.get("path", arguments.get("path", "")) or "").strip()
+            data = _resolve_data_payload()
+            return await self._notion_request(
+                method=method,
+                path=path,
+                payload=data,
+                timeout=timeout,
+                token=token,
+                notion_version=notion_version,
+                spec_name=spec_name,
+            )
+
+        raise ValueError("action must be one of: guide, search, page_get, page_create, page_update, database_query, blocks_children, blocks_append, request")
+
     async def _dispatch_script(
         self,
         script_name: str,
@@ -959,6 +1218,13 @@ class SkillTool(Tool):
                 spec_name=spec_name,
                 timeout=self._timeout_value(arguments),
                 env_overrides=env_overrides or {},
+            )
+        if script_name == "notion":
+            return await self._run_notion(
+                arguments,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides,
             )
 
         target_tool = self.registry.get(script_name)

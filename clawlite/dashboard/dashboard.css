@@ -17,6 +17,7 @@
   --radius-lg: 28px;
   --radius-md: 18px;
   --radius-sm: 12px;
+  --touch-target: 44px;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -199,6 +200,7 @@ select {
   padding: 12px 14px;
   font: inherit;
   transition: transform 140ms var(--ease-out), background 140ms var(--ease-out), color 140ms var(--ease-out), border-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+  min-height: var(--touch-target);
 }
 
 .nav-button {
@@ -375,6 +377,40 @@ select {
   color: var(--text);
   padding: 12px 14px;
   font: inherit;
+  min-height: var(--touch-target);
+}
+
+body.compact-mode .page-shell {
+  padding: 12px;
+}
+
+body.compact-mode .topbar,
+body.compact-mode .panel-card,
+body.compact-mode .metric-card,
+body.compact-mode .nav-card {
+  padding: 16px;
+}
+
+body.compact-mode .shell-grid,
+body.compact-mode .content-stack,
+body.compact-mode .panel.is-active,
+body.compact-mode .card-grid {
+  gap: 14px;
+}
+
+body.compact-mode .button-row {
+  flex-wrap: wrap;
+}
+
+body.compact-mode .button-row .action-button,
+body.compact-mode .button-row .ghost-button {
+  flex: 1 1 100%;
+}
+
+body.compact-mode .code-block,
+body.compact-mode .chat-log,
+body.compact-mode .event-feed {
+  max-height: 18rem;
 }
 
 .field--compact {

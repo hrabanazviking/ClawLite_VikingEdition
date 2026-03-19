@@ -41,9 +41,6 @@ class _TokenBucketRateLimiter:
         self._buckets.pop(key, None)
 
 
-_CHANNEL_RATE_LIMITER = _TokenBucketRateLimiter(rate=10.0, per_s=60.0)
-
-
 @dataclass(slots=True)
 class ChannelHealth:
     running: bool
@@ -73,6 +70,7 @@ class BaseChannel(ABC):
         self._capabilities = capabilities or ChannelCapabilities()
         self._running = False
         self._last_error = ""
+        self._rate_limiter = _TokenBucketRateLimiter(rate=10.0, per_s=60.0)
 
     @property
     def running(self) -> bool:
@@ -90,7 +88,7 @@ class BaseChannel(ABC):
             return
         # Rate limit per channel+session before doing any work
         rl_key = f"{self.name}:{session_id}"
-        if not _CHANNEL_RATE_LIMITER.allow(rl_key):
+        if not self._rate_limiter.allow(rl_key):
             bind_event("rate_limit", channel=self.name).warning(
                 "message rate-limited session={} user={}", session_id, user_id
             )

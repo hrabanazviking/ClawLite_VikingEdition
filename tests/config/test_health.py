@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import socket
-from pathlib import Path
 
 import pytest
 
 from clawlite.config.health import config_health
 from clawlite.config.schema import AppConfig
+
+
+_GETUID = getattr(os, "getuid", None)
 
 
 def _cfg_from_dict(data: dict) -> AppConfig:
@@ -47,7 +49,10 @@ def test_health_local_model_no_key_needed():
     assert api_key_issues == []
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses filesystem permission checks")
+@pytest.mark.skipif(
+    os.name == "nt" or (callable(_GETUID) and _GETUID() == 0),
+    reason="permission checks differ on Windows/root",
+)
 def test_health_unwritable_workspace(tmp_path):
     locked = tmp_path / "locked"
     locked.mkdir()

@@ -2,6 +2,8 @@
 name: notion
 description: Read, search, create, and update Notion pages and databases via the Notion API.
 always: false
+script: notion
+requirements: {"env":["NOTION_API_KEY"]}
 metadata: {"clawlite":{"emoji":"📝","auth":{"requiredEnv":["NOTION_API_KEY"]}}}
 ---
 
