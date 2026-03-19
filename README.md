@@ -645,6 +645,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 
 MIT — see [`LICENSE`](LICENSE).
 
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg)
+
 ---
 
 
