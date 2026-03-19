@@ -884,6 +884,20 @@ def test_skills_loader_diagnostics_report_marks_doc_only_as_not_runnable(tmp_pat
         encoding="utf-8",
     )
 
+    web_search_dir = tmp_path / "web-search"
+    web_search_dir.mkdir(parents=True, exist_ok=True)
+    (web_search_dir / "SKILL.md").write_text(
+        "---\nname: web-search\ndescription: web search\nscript: web_search\n---\n",
+        encoding="utf-8",
+    )
+
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir(parents=True, exist_ok=True)
+    (weather_dir / "SKILL.md").write_text(
+        "---\nname: weather\ndescription: weather\nscript: weather\n---\n",
+        encoding="utf-8",
+    )
+
     report = SkillsLoader(builtin_root=tmp_path).diagnostics_report()
     by_name = {str(row["name"]): row for row in report["skills"]}
 
@@ -891,6 +905,8 @@ def test_skills_loader_diagnostics_report_marks_doc_only_as_not_runnable(tmp_pat
     assert by_name["docs-only"]["runtime_requirements"] == []
     assert by_name["summarize"]["runnable"] is True
     assert by_name["summarize"]["runtime_requirements"] == ["provider", "tool:web_fetch|read|read_file"]
+    assert by_name["web-search"]["runtime_requirements"] == ["tool:web_search"]
+    assert by_name["weather"]["runtime_requirements"] == ["tool:web_fetch"]
 
 
 def test_fallback_hint_parsed_from_frontmatter(tmp_path: Path) -> None:

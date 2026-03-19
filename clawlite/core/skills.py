@@ -1266,6 +1266,10 @@ class SkillsLoader:
         script_name = str(spec.script or "").strip().lower()
         if script_name == "coding_agent":
             return ["tool:sessions_spawn"]
+        if script_name == "web_search":
+            return ["tool:web_search"]
+        if script_name == "weather":
+            return ["tool:web_fetch"]
         if script_name == "gh_issues":
             return ["tool:exec"]
         if script_name == "github":
