@@ -19,15 +19,15 @@
 
 </div>
 
-> ### 🤖 Built by AI · Maintained by one person
+> ### 🤖 Built by AI · Maintained by Vikings
 >
-> ClawLite is a **solo-dev project built entirely by AI (Claude)**. Every line of code, every test, every commit was written by an AI agent — the human author supervises, reviews goals, and guides direction. No team. No agency. Just one person and an AI building production software together.
+> ClawLite Viking Edition is a project built entirely by AI**. Every line of code, every test, every commit was written by an AI agent — the Viking humans supervise, reviews goals, and guides direction. Just one humans and AI building production software together.
 >
 > This is an ongoing experiment in AI-driven software development at the solo-dev scale.
 
 ---
 
-## ⚡ Why ClawLite?
+## ⚡ Why ClawLite Viking Edition?
 
 - **Truly local-first** — runs entirely on your machine; no vendor lock-in, no cloud accounts required
 - **Real channel adapters out of the box** — Telegram, Discord, Email, WhatsApp, Slack, and IRC
