@@ -1303,16 +1303,59 @@ async function refreshTokenInfo() {
   }
 }
 
+function refreshTargetsFor(reason = "manual") {
+  const tab = String(state.activeTab || "overview");
+  const sampledRefresh = reason === "auto" || reason === "visibility" || reason === "tab-switch";
+  const runtimeTab = tab === "runtime" || tab === "tools";
+  const overviewTab = tab === "overview";
+  return {
+    status: true,
+    dashboardState: true,
+    diagnostics: !sampledRefresh || overviewTab || runtimeTab,
+    tools: !sampledRefresh || runtimeTab,
+    tokenInfo: !sampledRefresh || runtimeTab,
+  };
+}
+
 async function refreshAll(reason = "manual") {
   if (state.refreshInFlight) {
     return;
   }
   state.refreshInFlight = true;
   try {
-    await Promise.all([refreshStatus(), refreshDashboardState(), refreshDiagnostics(), refreshTools(), refreshTokenInfo()]);
+    const targets = refreshTargetsFor(reason);
+    const refreshed = [];
+    const jobs = [];
+
+    const queueRefresh = (label, runner) => {
+      jobs.push(
+        runner().then(() => {
+          refreshed.push(label);
+        }),
+      );
+    };
+
+    if (targets.status) {
+      queueRefresh("status", refreshStatus);
+    }
+    if (targets.dashboardState) {
+      queueRefresh("dashboard state", refreshDashboardState);
+    }
+    if (targets.diagnostics) {
+      queueRefresh("diagnostics", refreshDiagnostics);
+    }
+    if (targets.tools) {
+      queueRefresh("tools", refreshTools);
+    }
+    if (targets.tokenInfo) {
+      queueRefresh("token metadata", refreshTokenInfo);
+    }
+
+    await Promise.all(jobs);
     state.lastSyncAt = new Date().toISOString();
     if (reason !== "auto") {
-      recordEvent("ok", "Dashboard sync complete", "Status, dashboard state, diagnostics, tools, and token metadata refreshed.", reason);
+      const detail = refreshed.length ? `${refreshed.join(", ")} refreshed.` : "No refresh targets selected.";
+      recordEvent("ok", "Dashboard sync complete", detail, reason);
     }
   } catch (error) {
     recordEvent("danger", "Dashboard sync failed", error.message, reason);
@@ -1332,6 +1375,7 @@ function setActiveTab(tab) {
     node.classList.toggle("is-active", node.dataset.tabPanel === tab);
   });
   renderAll();
+  void refreshAll("tab-switch");
 }
 
 function scheduleAutoRefresh() {
