@@ -1353,6 +1353,119 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    async def _run_tmux(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        if not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
+            return f"skill_blocked:{spec_name}:platform_not_supported"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["tmux", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        socket = str(payload.get("socket", arguments.get("socket", "")) or "").strip()
+        session = str(payload.get("session", arguments.get("session", "")) or "").strip()
+        target = str(payload.get("target", arguments.get("target", "")) or "").strip()
+
+        def _prefix() -> list[str]:
+            base = ["tmux"]
+            if socket:
+                base.extend(["-S", socket])
+            return base
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "tmux",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "platform": "linux|darwin",
+                    "available_actions": [
+                        "list_sessions",
+                        "new_session",
+                        "send_keys",
+                        "capture",
+                        "kill_session",
+                        "kill_server",
+                        "request",
+                    ],
+                    "examples": [
+                        {"action": "list_sessions", "tool_arguments": {"action": "list_sessions", "socket": "/tmp/clawlite.sock"}},
+                        {"action": "new_session", "tool_arguments": {"action": "new_session", "session": "clawlite-shell", "socket": "/tmp/clawlite.sock"}},
+                        {"action": "capture", "tool_arguments": {"action": "capture", "target": "clawlite-shell:0.0", "lines": 200}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        argv = _prefix()
+        if action == "list_sessions":
+            argv.append("list-sessions")
+        elif action == "new_session":
+            if not session:
+                raise ValueError("session is required for tmux new_session")
+            window = str(payload.get("window", arguments.get("window", "shell")) or "shell").strip()
+            argv.extend(["new", "-d", "-s", session, "-n", window])
+        elif action == "send_keys":
+            if not target:
+                raise ValueError("target is required for tmux send_keys")
+            text = str(payload.get("text", arguments.get("text", "")) or "").strip()
+            if not text:
+                raise ValueError("text is required for tmux send_keys")
+            literal = bool(payload.get("literal", arguments.get("literal", True)))
+            argv.extend(["send-keys", "-t", target])
+            if literal:
+                argv.append("-l")
+            argv.append(text)
+            send_enter = bool(payload.get("enter", arguments.get("enter", True)))
+            if send_enter:
+                argv.append("Enter")
+        elif action == "capture":
+            if not target:
+                raise ValueError("target is required for tmux capture")
+            lines = max(20, min(5000, int(payload.get("lines", arguments.get("lines", 200)) or 200)))
+            argv.extend(["capture-pane", "-p", "-J", "-t", target, "-S", f"-{lines}"])
+        elif action == "kill_session":
+            if not session:
+                raise ValueError("session is required for tmux kill_session")
+            argv.extend(["kill-session", "-t", session])
+        elif action == "kill_server":
+            argv.append("kill-server")
+        elif action == "request":
+            command = str(payload.get("command", arguments.get("command", "")) or "").strip()
+            if not command:
+                raise ValueError("command is required for tmux request")
+            argv.extend(shlex.split(command))
+        else:
+            raise ValueError("action must be one of: guide, list_sessions, new_session, send_keys, capture, kill_session, kill_server, request")
+
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=argv,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
     async def _run_apple_notes(
         self,
         arguments: dict[str, Any],
@@ -2852,6 +2965,14 @@ class SkillTool(Tool):
             )
         if script_name == "docker":
             return await self._run_docker(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "tmux":
+            return await self._run_tmux(
                 arguments,
                 ctx,
                 spec_name=spec_name,

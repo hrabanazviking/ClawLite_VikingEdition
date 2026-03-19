@@ -1007,6 +1007,86 @@ def test_run_skill_apple_notes_blocks_on_non_macos(tmp_path: Path, monkeypatch) 
     asyncio.run(_scenario())
 
 
+def test_run_skill_tmux_guide_mode_returns_structured_help(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "linux")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "tmux", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["platform"] == "linux|darwin"
+        assert "capture" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_tmux_capture_dispatches_tmux_command(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "linux")
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "tmux -S /tmp/clawlite.sock capture-pane -p -J -t clawlite-shell:0.0 -S -250": "exit=0\nstdout=pane\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "tmux",
+                "tool_arguments": {
+                    "action": "capture",
+                    "socket": "/tmp/clawlite.sock",
+                    "target": "clawlite-shell:0.0",
+                    "lines": 250,
+                },
+            },
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=pane\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_tmux_blocks_on_non_unix_platform(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "win32")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "tmux", "tool_arguments": {"action": "list_sessions"}},
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:tmux:platform_not_supported"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
