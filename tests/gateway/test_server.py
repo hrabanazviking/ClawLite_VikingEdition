@@ -6382,8 +6382,16 @@ def test_gateway_cron_delete_uses_to_thread_and_preserves_payload(tmp_path: Path
 
 def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_send() -> None:
     class _Engine:
-        async def run(self, *, session_id: str, user_text: str):
-            del session_id, user_text
+        async def run(
+            self,
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ):
+            del session_id, user_text, channel, chat_id, runtime_metadata
             await asyncio.sleep(0.05)
             return SimpleNamespace(text="late", model="fake/test")
 
@@ -6405,6 +6413,148 @@ def test_route_cron_job_timeout_returns_engine_run_timeout_and_skips_channel_sen
         runtime.channels.send.assert_not_awaited()
 
     asyncio.run(_scenario())
+
+
+def test_route_cron_job_forwards_resolved_context_to_engine_and_channel_send() -> None:
+    seen: list[dict[str, Any]] = []
+
+    class _Engine:
+        async def run(
+            self,
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ):
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return SimpleNamespace(text="done", model="fake/test")
+
+    runtime = SimpleNamespace(
+        engine=_Engine(),
+        channels=SimpleNamespace(send=AsyncMock(return_value="msg-1")),
+    )
+    job = SimpleNamespace(
+        id="job-2",
+        session_id="telegram:chat42",
+        payload=SimpleNamespace(
+            prompt="run check",
+            channel="",
+            target="",
+            runtime_metadata={"reply_to_message_id": "7"},
+        ),
+    )
+
+    async def _scenario() -> None:
+        result = await _route_cron_job(runtime, job)
+        assert result == "done"
+
+    asyncio.run(_scenario())
+
+    assert seen == [
+        {
+            "session_id": "telegram:chat42",
+            "user_text": "run check",
+            "channel": "telegram",
+            "chat_id": "chat42",
+            "runtime_metadata": {"reply_to_message_id": "7"},
+        }
+    ]
+    runtime.channels.send.assert_awaited_once_with(channel="telegram", target="chat42", text="done")
+
+
+def test_gateway_job_workers_forward_context_for_agent_and_skill_runs(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        workspace_path=str(tmp_path / "workspace"),
+        state_path=str(tmp_path / "state"),
+        scheduler=SchedulerConfig(heartbeat_interval_seconds=9999),
+        gateway={"heartbeat": {"enabled": False}},
+        channels={},
+    )
+    app = create_app(cfg)
+    seen: list[dict[str, Any]] = []
+
+    async def _capture_run(
+        *,
+        session_id: str,
+        user_text: str,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ):
+        seen.append(
+            {
+                "session_id": session_id,
+                "user_text": user_text,
+                "channel": channel,
+                "chat_id": chat_id,
+                "runtime_metadata": runtime_metadata,
+            }
+        )
+        return SimpleNamespace(text="ok", model="fake/test")
+
+    app.state.runtime.engine.run = _capture_run
+    app.state.runtime.skills_loader.load_skill_content = lambda name: "Skill body" if name == "demo" else None
+
+    with TestClient(app):
+        agent_job = app.state.runtime.job_queue.submit(
+            "agent_run",
+            {
+                "task": "run agent task",
+                "channel": "telegram",
+                "target": "42",
+                "runtime_metadata": {"reply_to_message_id": "7"},
+            },
+            session_id="telegram:42",
+        )
+        skill_job = app.state.runtime.job_queue.submit(
+            "skill_exec",
+            {
+                "skill": "demo",
+                "task": "run skill task",
+                "channel": "discord",
+                "chat_id": "99",
+                "runtime_metadata": {"custom_id": "btn-1"},
+            },
+            session_id="discord:99",
+        )
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            agent_status = app.state.runtime.job_queue.status(agent_job.id)
+            skill_status = app.state.runtime.job_queue.status(skill_job.id)
+            if agent_status is not None and skill_status is not None and agent_status.status == "done" and skill_status.status == "done":
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("timed out waiting for job workers to finish")
+
+    forwarded = [row for row in seen if row["session_id"] in {"telegram:42", "discord:99"}]
+    assert forwarded == [
+        {
+            "session_id": "telegram:42",
+            "user_text": "run agent task",
+            "channel": "telegram",
+            "chat_id": "42",
+            "runtime_metadata": {"reply_to_message_id": "7"},
+        },
+        {
+            "session_id": "discord:99",
+            "user_text": "Skill context:\nSkill body\n\nTask: run skill task",
+            "channel": "discord",
+            "chat_id": "99",
+            "runtime_metadata": {"custom_id": "btn-1"},
+        },
+    ]
 
 
 def test_gateway_heartbeat_trigger_contract_updates_state(tmp_path: Path) -> None:

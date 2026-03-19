@@ -733,12 +733,19 @@ class GatewayAuthGuard:
 
 async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch start job_id={}", job.id)
+    resolved_channel = str(getattr(job.payload, "channel", "") or "").strip() or job.session_id.split(":", 1)[0]
+    resolved_target = str(getattr(job.payload, "target", "") or "").strip() or job.session_id.split(":", 1)[-1]
+    raw_runtime_metadata = getattr(job.payload, "runtime_metadata", None)
+    runtime_metadata = dict(raw_runtime_metadata) if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata else None
     try:
         result = await _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=job.session_id,
             user_text=job.payload.prompt,
             timeout_s=GATEWAY_CRON_ENGINE_TIMEOUT_S,
+            channel=resolved_channel or None,
+            chat_id=resolved_target or None,
+            runtime_metadata=runtime_metadata,
         )
     except RuntimeError as exc:
         if str(exc) == "engine_run_timeout":
@@ -749,13 +756,11 @@ async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
             )
             return "engine_run_timeout"
         raise
-    channel = job.payload.channel.strip() or job.session_id.split(":", 1)[0]
-    target = job.payload.target.strip() or job.session_id.split(":", 1)[-1]
-    if channel and target:
+    if resolved_channel and resolved_target:
         try:
-            await runtime.channels.send(channel=channel, target=target, text=result.text)
+            await runtime.channels.send(channel=resolved_channel, target=resolved_target, text=result.text)
         except Exception:
-            bind_event("channel.send", session=job.session_id, channel=channel).error("cron dispatch send failed job_id={} target={}", job.id, target)
+            bind_event("channel.send", session=job.session_id, channel=resolved_channel).error("cron dispatch send failed job_id={} target={}", job.id, resolved_target)
             return "cron_send_skipped"
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch finished job_id={}", job.id)
     return result.text
@@ -2361,6 +2366,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         kind = str(getattr(job, "kind", "") or "").strip()
         payload = dict(getattr(job, "payload", {}) or {})
         session_id = str(getattr(job, "session_id", "") or "").strip() or "jobs:system"
+        payload_channel = str(payload.get("channel", "") or "").strip() or None
+        raw_chat_id = payload.get("chat_id")
+        if raw_chat_id is None:
+            raw_chat_id = payload.get("target")
+        payload_chat_id = None
+        if isinstance(raw_chat_id, (str, int)) and not isinstance(raw_chat_id, bool):
+            payload_chat_id = str(raw_chat_id).strip() or None
+        raw_runtime_metadata = payload.get("runtime_metadata")
+        payload_runtime_metadata = dict(raw_runtime_metadata) if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata else None
         if kind == "agent_run":
             task_text = str(payload.get("task", "") or "").strip()
             if not task_text:
@@ -2371,6 +2385,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 session_id=session_id,
                 user_text=task_text,
                 timeout_s=timeout_s,
+                channel=payload_channel,
+                chat_id=payload_chat_id,
+                runtime_metadata=payload_runtime_metadata,
             )
             return str(getattr(result, "text", "") or "").strip() or "ok"
         if kind == "skill_exec":
@@ -2388,6 +2405,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 session_id=session_id,
                 user_text=combined_text,
                 timeout_s=timeout_s,
+                channel=payload_channel,
+                chat_id=payload_chat_id,
+                runtime_metadata=payload_runtime_metadata,
             )
             return str(getattr(result, "text", "") or "").strip() or "ok"
         raise ValueError(f"unsupported job kind: {kind!r} — use agent_run, skill_exec, or custom")

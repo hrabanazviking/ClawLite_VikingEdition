@@ -298,6 +298,7 @@ Notes:
 
 - `message.action` defaults to `send`.
 - Telegram-only `message` actions are `reply`, `edit`, `delete`, `react`, and `create_topic`.
+- Scheduled `cron` turns now reuse their resolved `channel` / `target` as engine context, so the agent sees the same safe runtime hints before the eventual outbound send.
 - `discord_admin` expects a configured `channels.discord.token`; server mutations also require matching Discord bot permissions.
 - `mcp` accepts namespaced tools like `server::tool`.
 - `run_skill` can execute command-based skills, script shims, and tool-backed skills.
