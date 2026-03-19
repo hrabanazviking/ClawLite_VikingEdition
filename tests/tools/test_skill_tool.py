@@ -1514,3 +1514,110 @@ def test_run_skill_trello_blocks_without_auth(monkeypatch, tmp_path: Path) -> No
         assert out == "skill_blocked:trello:trello_auth_missing"
 
     asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "spotify", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "search" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_spotify_request(self, *, method, token, path, params, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "token": token,
+                "path": path,
+                "params": params,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"tracks": {"items": []}})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("SPOTIFY_ACCESS_TOKEN", "spotify-access")
+        monkeypatch.setattr(SkillTool, "_spotify_request", _fake_spotify_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "spotify",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "radiohead",
+                    "type": "track",
+                    "limit": 5,
+                },
+            },
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert "tracks" in payload
+        assert calls == [
+            {
+                "method": "GET",
+                "token": "spotify-access",
+                "path": "/search",
+                "params": {"q": "radiohead", "type": "track", "limit": 5},
+                "payload": {},
+                "spec_name": "spotify",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("SPOTIFY_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+        monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "spotify",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "radiohead",
+                },
+            },
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:spotify:spotify_auth_missing"
+
+    asyncio.run(_scenario())
