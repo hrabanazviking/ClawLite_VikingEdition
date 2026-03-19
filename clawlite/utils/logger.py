@@ -22,6 +22,24 @@ _ACTION_STYLE = {
     "BACKGROUND": ("dim", "\x1b[90m"),
 }
 
+# Elder Futhark rune glyphs — one per log level
+# ᚦ Thurisaz  — threshold/hidden (DEBUG)
+# ᚱ Raidho    — journey/news/movement (INFO)
+# ᚠ Fehu      — wealth/success/fulfillment (SUCCESS)
+# ᚾ Naudiz    — need/constraint/caution (WARNING)
+# ᛉ Algiz     — danger/defense (ERROR)
+# ᛞ Dagaz     — end of cycle / catastrophe (CRITICAL)
+# ᛜ Ingwaz    — internal/quiet work (BACKGROUND)
+_RUNE_GLYPH = {
+    "DEBUG":      "ᚦ",
+    "INFO":       "ᚱ",
+    "SUCCESS":    "ᚠ",
+    "WARNING":    "ᚾ",
+    "ERROR":      "ᛉ",
+    "CRITICAL":   "ᛞ",
+    "BACKGROUND": "ᛜ",
+}
+
 _ACRONYM_MAP = {
     "api": "API",
     "cli": "CLI",
@@ -103,10 +121,12 @@ def sidebar_text_lines(record: dict[str, Any], *, enable_color: bool = False) ->
     color = _ACTION_STYLE[action][1] if enable_color else ""
 
     def _line(content: str) -> str:
+        rune = _RUNE_GLYPH.get(action, "ᚱ")
         bar = "┃"
         if color:
+            rune = f"{color}{rune}{_ANSI_RESET}"
             bar = f"{color}{bar}{_ANSI_RESET}"
-        return f"[{timestamp}] {bar} [{module}]: {content}"
+        return f"[{timestamp}] {rune} {bar} [{module}]: {content}"
 
     lines = [_line(part) for part in message_lines]
     for detail in _extract_exception_lines(record.get("exception")):
@@ -127,8 +147,11 @@ class SidebarLogger:
 
     def _render_line(self, *, timestamp: str, module: str, message: str, action: str) -> Text:
         style = _ACTION_STYLE.get(action, _ACTION_STYLE["INFO"])[0]
+        rune = _RUNE_GLYPH.get(action, "ᚱ")
         line = Text()
         line.append(f"[{timestamp}]", style="dim")
+        line.append(" ")
+        line.append(rune, style=style)
         line.append(" ")
         line.append("┃", style=style)
         line.append(" ")
