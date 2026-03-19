@@ -156,11 +156,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 
 ## ⭐ Star History
 
-<div align="center">
-  <a href="https://star-history.com/#eobarretooo/ClawLite&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=eobarretooo/ClawLite&type=Date" width="100%" />
-  </a>
-</div>
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg)
 
 ---
 
