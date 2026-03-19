@@ -102,6 +102,7 @@ Important behavior:
 - `restrict_to_workspace` applies to file tools, `exec`, `process`, and `apply_patch`.
 - `tools.safety` can allow, require approval, or block tools/specifiers per channel or per agent.
 - `exec` has deny-pattern guards even when workspace restriction is off.
+- `exec` and `process` now recursively inspect explicit shell wrappers such as `sh -lc`, `bash -lc`, and `cmd /c` under workspace restriction instead of trusting the wrapper boundary.
 - `web_fetch` blocks private and local targets by default.
 - `mcp` only allows `http` and `https`, and it denies private/local addresses unless explicitly allowed.
 
@@ -144,7 +145,7 @@ clawlite tools safety browser --session-id telegram:1 --channel telegram --args-
 
 The preview returns a `decision` of `allow`, `approval`, or `block`.
 
-For `exec`, ClawLite now also derives approval-friendly specifiers from shell meta syntax, env override keys, and explicit cwd overrides. That lets operators write tighter rules such as `exec:shell` or `exec:env-key:git-ssh-command` instead of approving every `exec` call. The runtime also rejects dangerous env override pivots like `PATH`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`, `GIT_CONFIG_*`, and `GIT_SSH_COMMAND`.
+For `exec`, ClawLite now also derives approval-friendly specifiers from shell meta syntax, explicit shell wrappers (`sh -lc`, `bash -lc`, `cmd /c`), env override keys, and explicit cwd overrides. That lets operators write tighter rules such as `exec:shell` or `exec:env-key:git-ssh-command` instead of approving every `exec` call. The runtime also rejects dangerous env override pivots like `PATH`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`, `GIT_CONFIG_*`, and `GIT_SSH_COMMAND`, and under `restrict_to_workspace` it now recursively guards nested shell commands instead of treating the wrapper as a safe boundary.
 
 On live Telegram and Discord turns, approval-gated tool calls now attach native approve/reject controls to the reply. Approving creates a temporary grant scoped to the reviewed request fingerprint plus the same session, channel, and matched safety specifier; the operator then retries the original request manually.
 

@@ -468,6 +468,39 @@ def test_tool_registry_derives_exec_shell_env_and_cwd_specifiers() -> None:
     assert payload["blocked"] is True
 
 
+def test_tool_registry_derives_exec_shell_specifier_for_explicit_shell_wrapper() -> None:
+    reg = ToolRegistry(
+        safety=ToolSafetyPolicyConfig(
+            enabled=True,
+            risky_tools=[],
+            risky_specifiers=["exec:shell"],
+            blocked_channels=["telegram"],
+            allowed_channels=[],
+        )
+    )
+
+    payload = reg.safety_decision(
+        "exec",
+        {
+            "command": "sh -lc 'cat $HOME/.bashrc'",
+        },
+        session_id="telegram:1",
+        channel="telegram",
+    )
+
+    assert payload["derived_specifiers"] == [
+        "exec",
+        "exec:sh",
+        "exec:cmd",
+        "exec:cmd:sh",
+        "exec:shell",
+        "exec:shell-meta",
+    ]
+    assert payload["matched_specifiers"] == ["exec:shell"]
+    assert payload["blocked"] is True
+    assert payload["approval_context"]["shell_wrapper"] is True
+
+
 def test_tool_registry_exec_can_require_approval_for_specific_env_key() -> None:
     async def _scenario() -> None:
         reg = ToolRegistry(

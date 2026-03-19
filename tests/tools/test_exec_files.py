@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -133,6 +134,33 @@ def test_exec_tool_restrict_to_workspace_blocks_outside_path(tmp_path: Path) -> 
             ToolContext(session_id="s"),
         )
         assert "blocked_by_workspace_guard" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_restrict_to_workspace_blocks_explicit_shell_home_expansion(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        out = await ExecTool(workspace_path=tmp_path, restrict_to_workspace=True).run(
+            {"command": "sh -lc 'cat $HOME/.bashrc'"},
+            ToolContext(session_id="s"),
+        )
+        assert "blocked_by_workspace_guard:shell_path_outside_workspace:$HOME/.bashrc" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_restrict_to_workspace_allows_explicit_shell_pwd_inside_workspace(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        target = tmp_path / "inside.txt"
+        target.write_text("workspace-ok\n", encoding="utf-8")
+        env = {"PWD": str(tmp_path)}
+        with patch.dict(os.environ, env, clear=False):
+            out = await ExecTool(workspace_path=tmp_path, restrict_to_workspace=True).run(
+                {"command": "sh -lc 'cat $PWD/inside.txt'"},
+                ToolContext(session_id="s"),
+            )
+        assert "exit=0" in out
+        assert "workspace-ok" in out
 
     asyncio.run(_scenario())
 

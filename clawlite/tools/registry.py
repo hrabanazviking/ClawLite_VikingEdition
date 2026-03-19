@@ -74,6 +74,10 @@ class ToolResultCache:
 
 class ToolRegistry:
     _EXEC_SHELL_META_RE = re.compile(r"(^|[^\\])(?:\|\||&&|[|<>;`])")
+    _EXEC_POSIX_SHELL_BINARIES = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+    _EXEC_WINDOWS_SHELL_BINARIES = frozenset({"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+    _EXEC_POSIX_SHELL_FLAGS = frozenset({"-c", "-lc"})
+    _EXEC_WINDOWS_SHELL_FLAGS = frozenset({"/c", "-c", "-command"})
 
     _APPROVAL_REQUEST_LIMIT = 256
 
@@ -247,6 +251,26 @@ class ToolRegistry:
         return "$(" in command
 
     @classmethod
+    def _exec_uses_explicit_shell_wrapper(cls, raw_command: Any) -> bool:
+        command = str(raw_command or "").strip()
+        if not command:
+            return False
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return False
+        if not argv:
+            return False
+        binary = cls._command_specifier(argv[0])
+        if binary in cls._EXEC_POSIX_SHELL_BINARIES:
+            return any(str(token).lower() in cls._EXEC_POSIX_SHELL_FLAGS for token in argv[1:-1])
+        if binary in {"cmd", "cmd.exe"}:
+            return any(str(token).lower() == "/c" for token in argv[1:-1])
+        if binary in cls._EXEC_WINDOWS_SHELL_BINARIES:
+            return any(str(token).lower() in cls._EXEC_WINDOWS_SHELL_FLAGS for token in argv[1:-1])
+        return False
+
+    @classmethod
     def _exec_env_key_fragments(cls, raw_env: Any) -> list[str]:
         if not isinstance(raw_env, dict):
             return []
@@ -306,7 +330,9 @@ class ToolRegistry:
                 _add(command_fragment)
                 _add_direct(f"{normalized_tool}:cmd")
                 _add_direct(f"{normalized_tool}:cmd:{command_fragment}")
-            if cls._exec_needs_shell_wrapper(arguments.get("command")):
+            if cls._exec_needs_shell_wrapper(arguments.get("command")) or cls._exec_uses_explicit_shell_wrapper(
+                arguments.get("command")
+            ):
                 _add_direct(f"{normalized_tool}:shell")
                 _add_direct(f"{normalized_tool}:shell-meta")
             env_fragments = cls._exec_env_key_fragments(arguments.get("env"))
@@ -466,7 +492,8 @@ class ToolRegistry:
                 "tool": normalized_tool,
                 "command_text": command_text,
                 "command_binary": binary,
-                "shell_wrapper": cls._exec_needs_shell_wrapper(arguments.get("command")),
+                "shell_wrapper": cls._exec_needs_shell_wrapper(arguments.get("command"))
+                or cls._exec_uses_explicit_shell_wrapper(arguments.get("command")),
                 "env_keys": env_keys,
                 "cwd": cwd,
             }

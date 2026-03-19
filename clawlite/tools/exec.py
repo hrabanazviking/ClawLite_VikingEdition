@@ -64,6 +64,13 @@ class ExecTool(Tool):
         "LD_",
         "NPM_CONFIG_",
     )
+    _POSIX_SHELL_BINARIES = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+    _WINDOWS_SHELL_BINARIES = frozenset({"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+    _POSIX_SHELL_COMMAND_FLAGS = frozenset({"-c", "-lc"})
+    _WINDOWS_SHELL_COMMAND_FLAGS = frozenset({"/c", "-c", "-command"})
+    _SHELL_PATH_RE = re.compile(
+        r"(~(?:[/\\][^\s\"'|><;]+)+|(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%[A-Za-z_][A-Za-z0-9_]*%)(?:[/\\][^\s\"'|><;]+)+)"
+    )
 
     def __init__(
         self,
@@ -215,7 +222,114 @@ class ExecTool(Tool):
             return None, f"blocked_by_workspace_guard:cwd_outside_workspace:{text}"
         return resolved, None
 
-    def _guard_command(self, command: str, argv: list[str], cwd: Path) -> str | None:
+    @staticmethod
+    def _binary_name(raw: object) -> str:
+        value = str(raw or "").strip().strip("\"'")
+        if not value:
+            return ""
+        parts = [part for part in re.split(r"[\\/]", value) if part]
+        return (parts[-1] if parts else value).lower()
+
+    @classmethod
+    def _extract_explicit_shell_command(cls, argv: list[str]) -> str:
+        if not argv:
+            return ""
+        binary = cls._binary_name(argv[0])
+        if binary in cls._POSIX_SHELL_BINARIES:
+            for index, token in enumerate(argv[1:], start=1):
+                if str(token).lower() in cls._POSIX_SHELL_COMMAND_FLAGS and index + 1 < len(argv):
+                    return str(argv[index + 1] or "")
+            return ""
+        if binary == "cmd" or binary == "cmd.exe":
+            for index, token in enumerate(argv[1:], start=1):
+                if str(token).lower() == "/c" and index + 1 < len(argv):
+                    return " ".join(str(item or "") for item in argv[index + 1:])
+            return ""
+        if binary in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            for index, token in enumerate(argv[1:], start=1):
+                if str(token).lower() in cls._WINDOWS_SHELL_COMMAND_FLAGS and index + 1 < len(argv):
+                    return " ".join(str(item or "") for item in argv[index + 1:])
+        return ""
+
+    @classmethod
+    def _shell_like_paths(cls, command: str) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for match in cls._SHELL_PATH_RE.findall(str(command or "")):
+            value = str(match or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+        return out
+
+    @staticmethod
+    def _resolve_shell_like_path(raw: str, *, cwd: Path) -> Path | None:
+        value = str(raw or "").strip().strip("\"'")
+        if not value:
+            return None
+
+        candidate: Path | None = None
+        if value.startswith("~"):
+            suffix = value[1:].lstrip("/\\")
+            candidate = Path.home() / suffix if suffix else Path.home()
+        elif value.startswith("${"):
+            end = value.find("}")
+            if end <= 2:
+                return None
+            variable = value[2:end]
+            suffix = value[end + 1 :]
+            base = str(cwd) if variable == "PWD" else os.environ.get(variable, "")
+            if not base or not suffix.startswith(("/", "\\")):
+                return None
+            candidate = Path(base) / suffix.lstrip("/\\")
+        elif value.startswith("$"):
+            match = re.match(r"^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$", value)
+            if match is None:
+                return None
+            variable = match.group(1)
+            suffix = match.group(2)
+            base = str(cwd) if variable == "PWD" else os.environ.get(variable, "")
+            if not base or not suffix.startswith(("/", "\\")):
+                return None
+            candidate = Path(base) / suffix.lstrip("/\\")
+        elif value.startswith("%"):
+            match = re.match(r"^%([A-Za-z_][A-Za-z0-9_]*)%(.*)$", value)
+            if match is None:
+                return None
+            variable = match.group(1)
+            suffix = match.group(2)
+            base = os.environ.get(variable, "")
+            if not base or not suffix.startswith(("/", "\\")):
+                return None
+            candidate = Path(base) / suffix.lstrip("/\\")
+
+        if candidate is None:
+            return None
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            return candidate.expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _guard_explicit_shell_command(self, shell_command: str, cwd: Path, *, recursion_depth: int) -> str | None:
+        if self.restrict_to_workspace:
+            workspace = self.workspace_path
+            for raw in self._shell_like_paths(shell_command):
+                resolved = self._resolve_shell_like_path(raw, cwd=cwd)
+                if resolved is None:
+                    return f"blocked_by_workspace_guard:unresolved_shell_path:{raw}"
+                if resolved != workspace and workspace not in resolved.parents:
+                    return f"blocked_by_workspace_guard:shell_path_outside_workspace:{raw}"
+        try:
+            nested_argv = shlex.split(shell_command)
+        except ValueError:
+            return "invalid_command_syntax"
+        if not nested_argv or recursion_depth >= 4:
+            return None
+        return self._guard_command(shell_command, nested_argv, cwd, recursion_depth=recursion_depth + 1)
+
+    def _guard_command(self, command: str, argv: list[str], cwd: Path, *, recursion_depth: int = 0) -> str | None:
         cmd = command.strip()
         if not cmd:
             return "blocked_by_policy:empty_command"
@@ -270,6 +384,12 @@ class ExecTool(Tool):
                         continue
                     if resolved != workspace and workspace not in resolved.parents:
                         return f"blocked_by_workspace_guard:path_outside_workspace:{value}"
+
+        shell_command = self._extract_explicit_shell_command(argv)
+        if shell_command:
+            nested_error = self._guard_explicit_shell_command(shell_command, cwd, recursion_depth=recursion_depth)
+            if nested_error:
+                return nested_error
 
         return None
 
