@@ -65,6 +65,16 @@ An AI agent that genuinely works in any Python environment — including mobile/
 - **Security:** Never use `shell=True` in new code
 - **Tests:** Every test involving gateway + multiagent MUST use `_patch_db()` to isolate the database
 
+## Planning Protocol
+
+- Discovery-first workflow is mandatory for implementation sessions:
+  1. inspect relevant code/docs,
+  2. update planning artifacts,
+  3. present findings and plan,
+  4. then implement code changes.
+- Planning artifacts must follow `.planning/PLANNING_DATA_SCHEMA.md`.
+- Improvements are additive-first and compatibility-preserving by default.
+
 ## Key Decisions
 
 | Decision | Rationale | Outcome |

@@ -56,3 +56,8 @@ Progress: [░░░░░░░░░░] 0% (v0.6)
 Last session: 2026-03-16
 Stopped at: Roadmap v0.6 created — awaiting `/gsd:plan-phase 8`
 Resume file: None
+
+Continuity files:
+- `.planning/ASSISTANT_CONTINUITY_INSTRUCTIONS.md`
+- `.planning/SESSION_CONTEXT.md`
+- `.planning/PLANNING_DATA_SCHEMA.md`
