@@ -469,6 +469,11 @@ ClawLite has four main layers:
 
 ---
 
+<<<<<<< HEAD
+=======
+![[https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg)]([https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg)
+
+>>>>>>> parent of ac0e6e9 (Update README.md)
 ## 🛠️ Development
 
 ```bash
