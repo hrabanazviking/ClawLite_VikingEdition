@@ -156,7 +156,17 @@ class SessionStoreProtocol:
     def read(self, session_id: str, limit: int = 20) -> list[dict[str, str]]:  # pragma: no cover
         raise NotImplementedError
 
-    def append(self, session_id: str, role: str, content: str) -> None:  # pragma: no cover
+    def read_messages(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:  # pragma: no cover
+        raise NotImplementedError
+
+    def append(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -178,13 +188,38 @@ class ToolRegistryProtocol:
 
 class InMemorySessionStore(SessionStoreProtocol):
     def __init__(self) -> None:
-        self._rows: dict[str, list[dict[str, str]]] = {}
+        self._rows: dict[str, list[dict[str, Any]]] = {}
 
     def read(self, session_id: str, limit: int = 20) -> list[dict[str, str]]:
-        return self._rows.get(session_id, [])[-limit:]
+        rows = self.read_messages(session_id, limit=limit)
+        return [
+            {"role": str(row.get("role", "")), "content": str(row.get("content", ""))}
+            for row in rows
+            if str(row.get("content", "")).strip()
+        ]
 
-    def append(self, session_id: str, role: str, content: str) -> None:
-        self._rows.setdefault(session_id, []).append({"role": role, "content": content})
+    def read_messages(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._rows.get(session_id, [])[-limit:]]
+
+    def append(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        row: dict[str, Any] = {"role": role, "content": content}
+        metadata_payload = dict(metadata or {})
+        if isinstance(metadata_payload.get("tool_calls"), list) and metadata_payload.get("tool_calls"):
+            row["tool_calls"] = list(metadata_payload["tool_calls"])
+        tool_call_id = str(metadata_payload.get("tool_call_id", "") or "").strip()
+        tool_name = str(metadata_payload.get("name", "") or "").strip()
+        if tool_call_id:
+            row["tool_call_id"] = tool_call_id
+        if tool_name:
+            row["name"] = tool_name
+        self._rows.setdefault(session_id, []).append(row)
 
 
 class AgentEngine:
@@ -356,7 +391,16 @@ class AgentEngine:
         "- Use web_search and/or web_fetch before making factual claims.\n"
         "- If the web tools fail or return incomplete results, say that clearly instead of guessing."
     )
-    _WEATHER_REQUEST_RE = re.compile(r"\b(?:weather|forecast|temperature|clima|tempo|previs[aã]o)\b", re.IGNORECASE)
+    _LIVE_LOOKUP_RETRY_NOTICE = (
+        "[Verification Required]\n"
+        "- Your previous draft answered without completing a live lookup.\n"
+        "- Do not guess. Use the relevant live tools now, then answer with verified results.\n"
+        "- If live lookup fails, say that clearly instead of fabricating the answer."
+    )
+    _WEATHER_REQUEST_RE = re.compile(
+        r"\b(?:weather|forecast|temperature|temperatura|clima|tempo|previs[aã]o)\b",
+        re.IGNORECASE,
+    )
     _SUMMARIZE_REQUEST_RE = re.compile(
         r"\b(?:summari[sz]e|summary|resuma|resumir|sumarize|sumarizar)\b",
         re.IGNORECASE,
@@ -364,6 +408,7 @@ class AgentEngine:
     _GITHUB_REQUEST_RE = re.compile(r"\b(?:github|pull request|prs?\b|issues?\b|workflows?)\b", re.IGNORECASE)
     _DOCKER_REQUEST_RE = re.compile(r"\b(?:docker|compose|container(?:es)?|image(?:ns)?)\b", re.IGNORECASE)
     _ROUTING_HINT_HEADER = "[Routing Hint]"
+    _LIVE_LOOKUP_SKILL_NAMES: frozenset[str] = frozenset({"weather", "web-search"})
 
     def __init__(
         self,
@@ -984,6 +1029,139 @@ class AgentEngine:
                 }
             )
         return rows
+
+    @staticmethod
+    def _tool_call_skill_name_from_arguments(raw_arguments: Any) -> str:
+        try:
+            arguments = AgentEngine._tool_call_arguments({"arguments": raw_arguments})
+        except ValueError:
+            return ""
+        return str(arguments.get("name", "") or "").strip().lower()
+
+    def _read_session_history_messages(self, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+        read_messages_fn = getattr(self.sessions, "read_messages", None)
+        if callable(read_messages_fn):
+            try:
+                rows = read_messages_fn(session_id, limit=limit)
+                if isinstance(rows, list):
+                    return list(rows)
+            except TypeError:
+                pass
+        read_fn = getattr(self.sessions, "read", None)
+        if not callable(read_fn):
+            return []
+        rows = read_fn(session_id, limit=limit)
+        return list(rows) if isinstance(rows, list) else []
+
+    @staticmethod
+    def _current_turn_messages(messages: list[dict[str, Any]], *, turn_start_index: int) -> list[dict[str, Any]]:
+        start = max(0, int(turn_start_index) + 1)
+        return messages[start:]
+
+    @classmethod
+    def _tool_result_indicates_success(cls, *, tool_name: str, content: Any) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        if text.startswith(("tool_error:", "skill_blocked:", "skill_requires_approval:")):
+            return False
+        if tool_name in cls._WEB_TOOL_NAMES:
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+            return isinstance(payload, dict) and payload.get("ok") is True
+        return True
+
+    @classmethod
+    def _current_turn_has_live_lookup_evidence(cls, messages: list[dict[str, Any]]) -> bool:
+        if cls._extract_web_source_urls(messages):
+            return True
+
+        pending_live_skill_call_ids: set[str] = set()
+        for message in messages:
+            role = str(message.get("role", "")).strip()
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if not isinstance(tool_calls, list):
+                    continue
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function = tool_call.get("function")
+                    if not isinstance(function, dict):
+                        continue
+                    tool_name = str(function.get("name", "") or "").strip()
+                    if tool_name in cls._WEB_TOOL_NAMES:
+                        pending_live_skill_call_ids.add(str(tool_call.get("id", "")).strip())
+                        continue
+                    if tool_name != "run_skill":
+                        continue
+                    skill_name = cls._tool_call_skill_name_from_arguments(function.get("arguments"))
+                    if skill_name in cls._LIVE_LOOKUP_SKILL_NAMES:
+                        pending_live_skill_call_ids.add(str(tool_call.get("id", "")).strip())
+                continue
+
+            if role != "tool":
+                continue
+            tool_name = str(message.get("name", "") or "").strip()
+            if tool_name in cls._WEB_TOOL_NAMES and cls._tool_result_indicates_success(
+                tool_name=tool_name,
+                content=message.get("content"),
+            ):
+                return True
+            if tool_name != "run_skill":
+                continue
+            tool_call_id = str(message.get("tool_call_id", "") or "").strip()
+            if tool_call_id and tool_call_id in pending_live_skill_call_ids and cls._tool_result_indicates_success(
+                tool_name=tool_name,
+                content=message.get("content"),
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _turn_requires_live_lookup(
+        cls,
+        *,
+        user_text: str,
+    ) -> bool:
+        compact = " ".join(str(user_text or "").split()).strip()
+        if not compact:
+            return False
+        return bool(
+            cls._message_requests_web_research(compact)
+            or cls._WEATHER_REQUEST_RE.search(compact)
+        )
+
+    @classmethod
+    def _has_live_lookup_capability(
+        cls,
+        *,
+        tool_names: set[str],
+        skill_names: set[str],
+    ) -> bool:
+        return bool(
+            tool_names.intersection(cls._WEB_TOOL_NAMES)
+            or cls._LIVE_LOOKUP_SKILL_NAMES.intersection(skill_names)
+        )
+
+    @classmethod
+    def _live_lookup_failure_message(
+        cls,
+        *,
+        tool_names: set[str],
+        skill_names: set[str],
+    ) -> str:
+        if tool_names.intersection(cls._WEB_TOOL_NAMES) or cls._LIVE_LOOKUP_SKILL_NAMES.intersection(skill_names):
+            return (
+                "I need to complete a live lookup before answering this accurately, "
+                "but I did not obtain a verified result in this turn."
+            )
+        return (
+            "I need live lookup capability to answer this accurately, "
+            "but no web or weather tool is available in this runtime."
+        )
 
     @staticmethod
     def _resolve_runtime_context(session_id: str, channel: str | None, chat_id: str | None) -> tuple[str, str]:
@@ -2420,7 +2598,7 @@ class AgentEngine:
                 return
 
             # Provider supports streaming: build history and delegate
-            history = self.sessions.read(session_id, limit=self.memory_window)
+            history = self._read_session_history_messages(session_id, limit=self.memory_window)
             messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_text}]
             accumulated = ""
             async for chunk in stream_fn(messages=messages):
@@ -2435,10 +2613,24 @@ class AgentEngine:
 
         return _gen()
 
-    def _append_session_message(self, session_id: str, role: str, content: str) -> None:
+    def _append_session_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        require_metadata_support: bool = False,
+    ) -> None:
         append_fn = getattr(self.sessions, "append", None)
         if not callable(append_fn):
             return
+        try:
+            append_fn(session_id, role, content, metadata=metadata)
+            return
+        except TypeError:
+            if require_metadata_support:
+                return
         append_fn(session_id, role, content)
 
     async def _run_serialized(
@@ -2458,7 +2650,7 @@ class AgentEngine:
         turn_started_at = time.perf_counter()
         budget = self._resolve_turn_budget(turn_budget)
         progress_counter = [0]
-        history = self.sessions.read(session_id, limit=self.memory_window)
+        history = self._read_session_history_messages(session_id, limit=self.memory_window)
         memory_policy = await self._memory_integration_policy_async(actor="agent", session_id=session_id)
         proactive_snippets: list[str] = []
         _proactive = getattr(self, "proactive_loader", None)
@@ -2490,6 +2682,11 @@ class AgentEngine:
             for item in self.skills_loader.discover(include_unavailable=False)
             if str(item.name or "").strip()
         }
+        live_lookup_required = self._turn_requires_live_lookup(user_text=user_text)
+        live_lookup_capability = self._has_live_lookup_capability(
+            tool_names=available_tool_names,
+            skill_names=available_skill_names,
+        )
 
         prompt = self.prompt_builder.build(
             user_text=user_text,
@@ -2541,6 +2738,7 @@ class AgentEngine:
         if prompt.runtime_context:
             messages.append({"role": "user", "content": prompt.runtime_context})
         messages.append({"role": "user", "content": user_text})
+        current_turn_start_index = len(messages) - 1
         # Context window budget trim
         _cwm_budget = getattr(self, "_context_budget_chars", 0)
         if _cwm_budget > 0:
@@ -2568,6 +2766,7 @@ class AgentEngine:
         failure_fingerprint_counts: dict[str, int] = {}
         diagnostic_switched_fingerprints: set[str] = set()
         loop_recovery_used = False
+        live_lookup_retry_used = False
 
         await self._emit_progress(
             progress_hook=progress_hook,
@@ -2754,6 +2953,18 @@ class AgentEngine:
                         "content": step.text or "",
                         "tool_calls": self._assistant_tool_calls(step.tool_calls, tool_call_ids=normalized_tool_call_ids),
                     }
+                )
+                self._append_session_message(
+                    session_id,
+                    "assistant",
+                    step.text or "",
+                    metadata={
+                        "tool_calls": self._assistant_tool_calls(
+                            step.tool_calls,
+                            tool_call_ids=normalized_tool_call_ids,
+                        )
+                    },
+                    require_metadata_support=True,
                 )
                 self._prune_messages_for_turn(
                     messages,
@@ -3080,6 +3291,13 @@ class AgentEngine:
                             "content": normalized_result,
                         }
                     )
+                    self._append_session_message(
+                        session_id,
+                        "tool",
+                        normalized_result,
+                        metadata={"tool_call_id": call_id, "name": name},
+                        require_metadata_support=True,
+                    )
                     self._prune_messages_for_turn(
                         messages,
                         base_count=base_message_count,
@@ -3166,6 +3384,45 @@ class AgentEngine:
                     break
                 continue
 
+            if live_lookup_required:
+                current_turn_messages = self._current_turn_messages(
+                    messages,
+                    turn_start_index=current_turn_start_index,
+                )
+                if not self._current_turn_has_live_lookup_evidence(current_turn_messages):
+                    if live_lookup_capability and not live_lookup_retry_used and iteration < (budget.max_iterations or 1):
+                        live_lookup_retry_used = True
+                        messages.append({"role": "system", "content": self._LIVE_LOOKUP_RETRY_NOTICE})
+                        self._prune_messages_for_turn(
+                            messages,
+                            base_count=base_message_count,
+                            max_dynamic=dynamic_message_cap,
+                        )
+                        await self._emit_progress(
+                            progress_hook=progress_hook,
+                            event=ProgressEvent(
+                                stage="diagnostic_switch",
+                                session_id=session_id,
+                                iteration=iteration,
+                                message="live lookup verification retry injected",
+                                metadata={"live_lookup_required": True, "retry": True},
+                            ),
+                            counter=progress_counter,
+                            limit=budget.max_progress_events or 1,
+                        )
+                        continue
+                    final = ProviderResult(
+                        text=self._live_lookup_failure_message(
+                            tool_names=available_tool_names,
+                            skill_names=available_skill_names,
+                        ),
+                        tool_calls=[],
+                        model="engine/verification-required",
+                    )
+                    graceful_error = True
+                    turn_outcome = "verification_required"
+                    break
+
             final = ProviderResult(text=step.text, tool_calls=[], model=step.model)
             break
 
@@ -3198,7 +3455,13 @@ class AgentEngine:
             model=final.model,
         )
         final = ProviderResult(
-            text=self._postprocess_final_output(output_text=final.text, messages=messages),
+            text=self._postprocess_final_output(
+                output_text=final.text,
+                messages=self._current_turn_messages(
+                    messages,
+                    turn_start_index=current_turn_start_index,
+                ),
+            ),
             tool_calls=list(final.tool_calls),
             model=final.model,
         )

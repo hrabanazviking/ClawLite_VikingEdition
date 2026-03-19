@@ -227,3 +227,34 @@ def test_bootstrap_install_workspace_preserves_existing_gateway_auth_token(tmp_p
     assert summary["ok"] is True
     assert summary["token_seeded"] is False
     assert saved.gateway.auth.token == "existing-token"
+
+
+def test_workspace_runtime_health_migrates_legacy_default_user_profile(tmp_path: Path) -> None:
+    loader = WorkspaceLoader(workspace_path=tmp_path / "ws")
+    loader.bootstrap()
+
+    user_path = tmp_path / "ws" / "USER.md"
+    user_path.write_text(
+        "\n".join(
+            [
+                "# User Profile",
+                "",
+                "Name: Owner",
+                "What to call them: (optional)",
+                "Pronouns: (optional)",
+                "Timezone: UTC",
+                "Context: Personal operations and software projects",
+                "Preferences: Clear answers, direct actions, concise updates",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = loader.ensure_runtime_files()
+    prompt = loader.user_profile_prompt()
+
+    assert report["critical_files"]["USER.md"]["repaired"] is True
+    assert report["critical_files"]["USER.md"]["issue"] == "legacy_template"
+    assert "Owner" not in user_path.read_text(encoding="utf-8")
+    assert "(optional)" not in user_path.read_text(encoding="utf-8")
+    assert "Owner" not in prompt

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+import copy
 import gc
 import json
 from pathlib import Path
@@ -9,12 +10,13 @@ from typing import Any
 
 import clawlite.core.engine as engine_module
 from clawlite.config.schema import ToolSafetyPolicyConfig
-from clawlite.core.engine import AgentEngine, LoopDetectionSettings, ProviderResult, ToolCall, TurnBudget
+from clawlite.core.engine import AgentEngine, InMemorySessionStore, LoopDetectionSettings, ProviderResult, ToolCall, TurnBudget
 from clawlite.core.memory import MemoryRecord
 from clawlite.core.subagent import SubagentRun
 from clawlite.core.subagent_synthesizer import SubagentSynthesizer
 from clawlite.core.prompt import PromptBuilder
 from clawlite.runtime.telemetry import set_test_tracer_factory
+from clawlite.session.store import SessionStore
 from clawlite.tools.base import Tool, ToolContext
 from clawlite.tools.registry import ToolRegistry
 from clawlite.utils.logging import bind_event
@@ -54,7 +56,7 @@ class FakeProviderWithMessageCapture:
 
     async def complete(self, *, messages, tools):
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="need tools",
@@ -84,7 +86,7 @@ class FakePromptCaptureProvider:
 
     async def complete(self, *, messages, tools):
         del tools
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         return ProviderResult(text="ok", tool_calls=[], model="fake/model")
 
 
@@ -133,6 +135,38 @@ class FakeWebSearchTools:
 
     def schema(self):
         return [{"name": "web_search", "description": "search web", "arguments": {"query": "string"}}]
+
+
+class FakeLiveLookupRetryProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.calls += 1
+        self.snapshots.append(copy.deepcopy(messages))
+        if self.calls == 1:
+            return ProviderResult(text="Suzano, SP está com 24°C no momento.", tool_calls=[], model="fake/model")
+        if self.calls == 2:
+            return ProviderResult(
+                text="checking live weather",
+                tool_calls=[ToolCall(name="web_search", arguments={"query": "Suzano SP weather current"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="Suzano, SP está com 24°C no momento.", tool_calls=[], model="fake/model")
+
+
+class FakeLiveLookupFailureProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.snapshots: list[list[dict[str, Any]]] = []
+
+    async def complete(self, *, messages, tools):
+        del tools
+        self.calls += 1
+        self.snapshots.append(copy.deepcopy(messages))
+        return ProviderResult(text="Suzano, SP está com 24°C no momento.", tool_calls=[], model="fake/model")
 
 
 class FakeSkillsLoader:
@@ -748,7 +782,7 @@ class FakeLongToolProvider:
 
     async def complete(self, *, messages, tools):
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="calling tool",
@@ -955,7 +989,7 @@ class FakeBlockedToolProvider:
 
     async def complete(self, *, messages, tools):
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="use risky tool",
@@ -973,7 +1007,7 @@ class FakeJsonStringToolProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="use tool with json string args",
@@ -991,7 +1025,7 @@ class FakeInvalidToolArgumentsProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="use tool with broken args",
@@ -1009,7 +1043,7 @@ class FakeUnknownToolNameProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="use unknown tool",
@@ -1027,7 +1061,7 @@ class FakeInvalidToolNameProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return ProviderResult(
                 text="use malformed tool name",
@@ -1045,7 +1079,7 @@ class FakeDictProviderPayloadProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return {
                 "text": "use dict payload",
@@ -1083,7 +1117,7 @@ class FakeDuplicateAndInvalidToolIdProvider:
     async def complete(self, *, messages, tools):
         del tools
         self.calls += 1
-        self.snapshots.append(messages)
+        self.snapshots.append(copy.deepcopy(messages))
         if self.calls == 1:
             return {
                 "text": "use duplicate ids",
@@ -1175,6 +1209,8 @@ def test_engine_run_emits_engine_and_provider_spans() -> None:
             engine = AgentEngine(
                 provider=FakeProvider(),
                 tools=FakeTools(),
+                memory=FakeMemory(),
+                sessions=InMemorySessionStore(),
             )
             out = await engine.run(session_id="abc", user_text="say hi")
         finally:
@@ -1200,6 +1236,8 @@ def test_engine_runs_tool_roundtrip() -> None:
         engine = AgentEngine(
             provider=FakeProvider(),
             tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
         )
         out = await engine.run(session_id="abc", user_text="say hi")
         assert out.text == "final answer"
@@ -1218,7 +1256,7 @@ def test_engine_accepts_tool_arguments_from_json_string_payload() -> None:
     async def _scenario() -> None:
         provider = FakeJsonStringToolProvider()
         tools = ExecuteCaptureTools()
-        engine = AgentEngine(provider=provider, tools=tools)
+        engine = AgentEngine(provider=provider, tools=tools, memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:json-args", user_text="say hi")
         assert out.text == "done"
@@ -1258,7 +1296,7 @@ def test_engine_rejects_unknown_tool_names_before_dispatch() -> None:
     async def _scenario() -> None:
         provider = FakeUnknownToolNameProvider()
         tools = ExecuteCaptureTools()
-        engine = AgentEngine(provider=provider, tools=tools)
+        engine = AgentEngine(provider=provider, tools=tools, memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:unknown-tool", user_text="say hi")
         assert out.text == "done"
@@ -1276,7 +1314,7 @@ def test_engine_rejects_invalid_tool_names_before_dispatch() -> None:
     async def _scenario() -> None:
         provider = FakeInvalidToolNameProvider()
         tools = ExecuteCaptureTools()
-        engine = AgentEngine(provider=provider, tools=tools)
+        engine = AgentEngine(provider=provider, tools=tools, memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:invalid-tool-name", user_text="say hi")
         assert out.text == "done"
@@ -3106,7 +3144,7 @@ def test_engine_softens_unverified_web_claims_without_web_tools() -> None:
         provider = FakeFixedTextProvider(
             "Pesquisei na internet e aqui vai o resumo objetivo: OpenClaw e um projeto de agentes."
         )
-        engine = AgentEngine(provider=provider, tools=FakeTools())
+        engine = AgentEngine(provider=provider, tools=FakeTools(), memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:web-claim", user_text="o que e openclaw?")
         assert "Pesquisei na internet" not in out.text
@@ -3118,10 +3156,10 @@ def test_engine_softens_unverified_web_claims_without_web_tools() -> None:
 def test_engine_injects_web_research_notice_for_explicit_internet_requests() -> None:
     async def _scenario() -> None:
         provider = FakePromptCaptureProvider()
-        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools())
+        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools(), memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:web-intent", user_text="pesquise na internet sobre openclaw")
-        assert out.text == "ok"
+        assert "verified result" in out.text
         assert provider.snapshots
         system_messages = [row["content"] for row in provider.snapshots[0] if row.get("role") == "system"]
         assert any("[Web Research Requirement]" in str(item) for item in system_messages)
@@ -3132,7 +3170,7 @@ def test_engine_injects_web_research_notice_for_explicit_internet_requests() -> 
 def test_engine_skips_web_research_notice_for_normal_requests() -> None:
     async def _scenario() -> None:
         provider = FakePromptCaptureProvider()
-        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools())
+        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools(), memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:no-web-intent", user_text="explique o que e openclaw")
         assert out.text == "ok"
@@ -3149,11 +3187,13 @@ def test_engine_injects_routing_hint_for_weather_skill() -> None:
         engine = AgentEngine(
             provider=provider,
             tools=FakeTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
             skills_loader=FakeSkillsLoader(names=["weather"]),
         )
 
         out = await engine.run(session_id="cli:weather-routing", user_text="qual o clima em sao paulo?")
-        assert out.text == "ok"
+        assert "verified result" in out.text
         system_messages = [row["content"] for row in provider.snapshots[0] if row.get("role") == "system"]
         assert any("[Routing Hint]" in str(item) for item in system_messages)
         assert any("weather skill" in str(item) for item in system_messages)
@@ -3164,12 +3204,105 @@ def test_engine_injects_routing_hint_for_weather_skill() -> None:
 def test_engine_appends_sources_after_real_web_tool_usage() -> None:
     async def _scenario() -> None:
         provider = FakeWebToolProvider()
-        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools())
+        engine = AgentEngine(provider=provider, tools=FakeWebSearchTools(), memory=FakeMemory(), sessions=InMemorySessionStore())
 
         out = await engine.run(session_id="cli:web-sources", user_text="pesquise openclaw")
         assert out.text.startswith("OpenClaw is an autonomous assistant stack.")
         assert "Sources:" in out.text
         assert "https://openclaw.ai/" in out.text
         assert "https://github.com/openclaw" in out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_retries_live_lookup_requests_when_provider_answers_without_tool_use() -> None:
+    async def _scenario() -> None:
+        provider = FakeLiveLookupRetryProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["weather"]),
+        )
+
+        out = await engine.run(
+            session_id="cli:live-lookup-retry",
+            user_text="qual a temperatura em Suzano, SP agora?",
+        )
+
+        assert provider.calls == 3
+        assert out.text.startswith("Suzano, SP está com 24°C")
+        assert "Sources:" in out.text
+        retry_system_messages = [
+            row["content"]
+            for row in provider.snapshots[1]
+            if row.get("role") == "system"
+        ]
+        assert any("[Verification Required]" in str(item) for item in retry_system_messages)
+
+    asyncio.run(_scenario())
+
+
+def test_engine_fails_closed_when_live_lookup_request_still_has_no_tool_evidence() -> None:
+    async def _scenario() -> None:
+        provider = FakeLiveLookupFailureProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+            skills_loader=FakeSkillsLoader(names=["weather"]),
+        )
+
+        out = await engine.run(
+            session_id="cli:live-lookup-fail",
+            user_text="qual a temperatura em Suzano, SP agora?",
+        )
+
+        assert provider.calls == 2
+        assert "verified result" in out.text
+        assert "24°C" not in out.text
+
+    asyncio.run(_scenario())
+
+
+def test_engine_persists_and_replays_legal_tool_history_from_session_store(tmp_path: Path) -> None:
+    async def _scenario() -> None:
+        sessions = SessionStore(root=tmp_path / "sessions")
+        first_engine = AgentEngine(
+            provider=FakeProvider(),
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+        first = await first_engine.run(session_id="cli:history-tools", user_text="say hi")
+        assert first.text == "final answer"
+
+        capture = FakePromptCaptureProvider()
+        second_engine = AgentEngine(
+            provider=capture,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+        second = await second_engine.run(session_id="cli:history-tools", user_text="continue")
+        assert second.text == "ok"
+
+        assert capture.snapshots
+        history_assistant_rows = [
+            row
+            for row in capture.snapshots[0]
+            if row.get("role") == "assistant" and isinstance(row.get("tool_calls"), list)
+        ]
+        history_tool_rows = [
+            row
+            for row in capture.snapshots[0]
+            if row.get("role") == "tool" and row.get("tool_call_id")
+        ]
+        assert history_assistant_rows
+        assert history_tool_rows
+        assert history_assistant_rows[0]["tool_calls"][0]["function"]["name"] == "echo"
+        assert history_tool_rows[0]["name"] == "echo"
 
     asyncio.run(_scenario())

@@ -8,7 +8,11 @@ from typing import Any, Iterable
 
 from loguru import logger
 
-from clawlite.workspace.user_profile import WorkspaceUserProfile, load_user_profile_from_path
+from clawlite.workspace.user_profile import (
+    WorkspaceUserProfile,
+    load_user_profile_from_path,
+    parse_user_profile_markdown,
+)
 
 TEMPLATE_FILES = (
     "IDENTITY.md",
@@ -156,6 +160,40 @@ class WorkspaceLoader:
             logger.warning("workspace backup failed path={} error={}", path, exc)
             return ""
 
+    @staticmethod
+    def _legacy_user_profile_needs_migration(path: Path) -> bool:
+        if path.name != "USER.md" or not path.exists():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        if not text.strip():
+            return False
+
+        profile = parse_user_profile_markdown(text, source_path=str(path))
+        if any(
+            [
+                profile.name,
+                profile.preferred_name,
+                profile.pronouns,
+                profile.timezone,
+                profile.context,
+                profile.preferences,
+            ]
+        ):
+            return False
+
+        normalized = " ".join(text.lower().split())
+        markers = (
+            "name: owner",
+            "what to call them: (optional)",
+            "timezone: utc",
+            "context: personal operations and software projects",
+            "preferences: clear answers, direct actions, concise updates",
+        )
+        return sum(1 for marker in markers if marker in normalized) >= 3
+
     def ensure_runtime_files(self, *, variables: dict[str, str] | None = None) -> dict[str, Any]:
         values = dict(DEFAULT_VARS)
         values.update({k: str(v) for k, v in (variables or {}).items()})
@@ -169,6 +207,8 @@ class WorkspaceLoader:
         for filename in RUNTIME_CRITICAL_FILES:
             path = self.workspace / filename
             issue, error = self._runtime_file_issue(path)
+            if not issue and filename == "USER.md" and self._legacy_user_profile_needs_migration(path):
+                issue = "legacy_template"
             repaired = False
             backup_path = ""
             status = "ok"

@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from clawlite.workspace.loader import WorkspaceLoader
 
@@ -15,7 +15,7 @@ class PromptArtifacts:
     system_prompt: str
     memory_section: str
     history_summary: str
-    history_messages: list[dict[str, str]]
+    history_messages: list[dict[str, Any]]
     runtime_context: str
     skills_context: str
 
@@ -117,14 +117,28 @@ class PromptBuilder:
         return "[Memory]\n" + "\n".join(f"- {item}" for item in clean)
 
     @staticmethod
-    def _normalize_history(history: Iterable[dict[str, str]]) -> list[dict[str, str]]:
-        rows: list[dict[str, str]] = []
+    def _normalize_history(history: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
         for row in history:
             role = str(row.get("role", "")).strip()
             content = str(row.get("content", "")).strip()
-            if role not in {"system", "user", "assistant", "tool"} or not content:
+            if role not in {"system", "user", "assistant", "tool"}:
                 continue
-            rows.append({"role": role, "content": content})
+            normalized: dict[str, Any] = {"role": role, "content": content}
+            if role == "assistant":
+                tool_calls = row.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    normalized["tool_calls"] = list(tool_calls)
+            elif role == "tool":
+                tool_call_id = str(row.get("tool_call_id", "") or "").strip()
+                tool_name = str(row.get("name", "") or "").strip()
+                if tool_call_id:
+                    normalized["tool_call_id"] = tool_call_id
+                if tool_name:
+                    normalized["name"] = tool_name
+            if not content and "tool_calls" not in normalized and "tool_call_id" not in normalized:
+                continue
+            rows.append(normalized)
         return rows
 
     @staticmethod
@@ -160,10 +174,10 @@ class PromptBuilder:
         return text[:room].rstrip() + suffix
 
     @classmethod
-    def _shape_history(cls, history: list[dict[str, str]], token_limit: int) -> list[dict[str, str]]:
+    def _shape_history(cls, history: list[dict[str, Any]], token_limit: int) -> list[dict[str, Any]]:
         if token_limit <= 0:
             return []
-        kept: list[dict[str, str]] = []
+        kept: list[dict[str, Any]] = []
         used = 0
         for row in reversed(history):
             cost = cls._estimate_tokens(str(row.get("content", ""))) + 4
@@ -173,9 +187,18 @@ class PromptBuilder:
                 truncated = cls._truncate_text(str(row.get("content", "")), max(1, token_limit - 4))
                 if not truncated:
                     continue
-                kept.append({"role": str(row.get("role", "user")), "content": truncated})
+                normalized = {"role": str(row.get("role", "user")), "content": truncated}
+                if isinstance(row.get("tool_calls"), list) and row.get("tool_calls"):
+                    normalized["tool_calls"] = list(row["tool_calls"])
+                tool_call_id = str(row.get("tool_call_id", "") or "").strip()
+                tool_name = str(row.get("name", "") or "").strip()
+                if tool_call_id:
+                    normalized["tool_call_id"] = tool_call_id
+                if tool_name:
+                    normalized["name"] = tool_name
+                kept.append(normalized)
                 break
-            kept.append(row)
+            kept.append(dict(row))
             used += cost
         kept.reverse()
         return kept
@@ -240,11 +263,11 @@ class PromptBuilder:
         skills_text: str,
         memory_items: list[str],
         skills_context: str,
-        history_rows: list[dict[str, str]],
+        history_rows: list[dict[str, Any]],
         runtime_context: str,
         user_text: str,
         token_budget: int,
-    ) -> tuple[str, list[str], str, str, list[dict[str, str]]]:
+    ) -> tuple[str, list[str], str, str, list[dict[str, Any]]]:
         total_budget = max(512, int(token_budget))
         reserved = cls._estimate_tokens(runtime_context) + cls._estimate_tokens(user_text) + 32
         available = max(128, total_budget - reserved)

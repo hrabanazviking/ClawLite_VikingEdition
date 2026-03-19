@@ -112,8 +112,43 @@ TELEGRAM_ALLOWED_UPDATES = [
     "edited_channel_post",
 ]
 
+
+def _sanitize_telegram_text(text: str) -> str:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw:
+        return ""
+    out: list[str] = []
+    for ch in raw.replace("\ufffd", ""):
+        if ch in {"\n", "\t"}:
+            out.append(ch)
+            continue
+        if unicodedata.category(ch).startswith("C"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _split_long_telegram_segment(text: str, *, max_len: int) -> list[str]:
+    remaining = str(text or "")
+    parts: list[str] = []
+    while len(remaining) > max_len:
+        window = remaining[: max_len + 1]
+        split_at = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
+        if split_at <= 0 or split_at < max_len // 2:
+            split_at = max_len
+        part = remaining[:split_at]
+        if not part:
+            part = remaining[:max_len]
+            split_at = len(part)
+        parts.append(part)
+        remaining = remaining[split_at:]
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
 def split_message(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
-    content = text or ""
+    content = _sanitize_telegram_text(text)
     if len(content) <= max_len:
         return [content]
     parts: list[str] = []
@@ -127,11 +162,7 @@ def split_message(text: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
         if len(line) <= max_len:
             current = line
             continue
-        start = 0
-        while start < len(line):
-            end = start + max_len
-            parts.append(line[start:end])
-            start = end
+        parts.extend(_split_long_telegram_segment(line, max_len=max_len))
         current = ""
     if current:
         parts.append(current)
@@ -228,7 +259,7 @@ def _expand_inline_list_runs(text: str) -> str:
 
 
 def _normalize_telegram_markdown(text: str) -> str:
-    normalized = str(text or "").replace("\r\n", "\n").strip()
+    normalized = _sanitize_telegram_text(text).strip()
     if not normalized:
         return ""
 
@@ -3096,11 +3127,12 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     def _render_outbound_text(text: str, *, parse_mode: str) -> tuple[str, str | None]:
+        sanitized = _sanitize_telegram_text(text)
         if parse_mode == "html":
-            return text, "HTML"
+            return sanitized, "HTML"
         if parse_mode == "plain":
-            return text, None
-        return markdown_to_telegram_html(text), "HTML"
+            return sanitized, None
+        return markdown_to_telegram_html(sanitized), "HTML"
 
     @staticmethod
     def _normalize_outbound_media_items(
@@ -3813,25 +3845,48 @@ class TelegramChannel(BaseChannel):
 
         accumulated = ""
         last_edit_time = 0.0
-        last_sent_text = "…"
+        last_sent_source = "…"
+
+        async def _edit_stream_text(source_text: str) -> bool:
+            payload_text, payload_parse_mode = self._render_outbound_text(
+                source_text[:4096],
+                parse_mode="markdown",
+            )
+            try:
+                await self.bot.edit_message_text(
+                    text=payload_text,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    parse_mode=payload_parse_mode,
+                )
+                return True
+            except Exception as exc:
+                if payload_parse_mode and _is_formatting_error(exc):
+                    plain_text, _ = self._render_outbound_text(
+                        source_text[:4096],
+                        parse_mode="plain",
+                    )
+                    await self.bot.edit_message_text(
+                        text=plain_text,
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                    )
+                    return True
+                raise
 
         async for chunk in chunks:
             if chunk.text:
-                accumulated = chunk.accumulated or (accumulated + chunk.text)
+                accumulated = _sanitize_telegram_text(chunk.accumulated or (accumulated + chunk.text))
             now = time.monotonic()
             should_edit = (
-                accumulated != last_sent_text
+                accumulated != last_sent_source
                 and (chunk.done or (now - last_edit_time) >= min_edit_interval_s)
                 and accumulated.strip()
             )
             if should_edit:
                 try:
-                    await self.bot.edit_message_text(
-                        text=accumulated[:4096],
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                    )
-                    last_sent_text = accumulated
+                    await _edit_stream_text(accumulated)
+                    last_sent_source = accumulated
                     last_edit_time = now
                 except Exception:
                     pass
@@ -3839,13 +3894,9 @@ class TelegramChannel(BaseChannel):
                 break
 
         # Final edit to ensure complete text is shown
-        if accumulated and accumulated != last_sent_text:
+        if accumulated and accumulated != last_sent_source:
             try:
-                await self.bot.edit_message_text(
-                    text=accumulated[:4096],
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                )
+                await _edit_stream_text(accumulated)
             except Exception:
                 pass
 

@@ -77,6 +77,7 @@ What it supports:
 - Inline approval/review buttons for approval-gated tools and self-evolution review.
 - Telegram-specific message actions through the `message` tool: reply, edit, delete, react, and create topic.
 - Outbound markdown cleanup for inline lists, headings, and simple pipe tables before Telegram HTML rendering.
+- Streaming edits use the same HTML renderer path as normal outbound sends, and fall back to plain text if Telegram rejects formatted markup.
 
 Important config keys:
 
@@ -140,6 +141,7 @@ Notes:
 - `group_overrides` can override policy per chat and per topic.
 - Inline keyboards are also used for operator review flows such as approval-gated tools and self-evolution review.
 - The renderer normalizes “flat” inline lists like `Passos: 1. ... 2. ...` into readable multi-line output before send/edit.
+- Outbound send/edit sanitizes replacement characters and control bytes before Telegram rendering so malformed `��` artifacts do not leak through.
 
 `group_overrides` example:
 

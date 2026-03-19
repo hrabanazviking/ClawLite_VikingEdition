@@ -70,6 +70,7 @@ The runtime reads these files into the raw system prompt in this order:
 
 `USER.md` is parsed separately into a structured user-profile hint, so the assistant can adapt to timezone, language, preferences, and working style without leaking raw placeholder text into the live system prompt.
 Legacy defaults such as `Owner` or `(optional)` are ignored at runtime.
+If an older workspace still contains the legacy default `USER.md` template, runtime health repair rewrites it to the current blank-safe template so those placeholders stop contaminating future turns.
 
 ### Red Lines
 

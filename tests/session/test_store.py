@@ -173,3 +173,104 @@ def test_session_store_prune_expired_is_noop_when_ttl_disabled(tmp_path: Path) -
     assert store.list_sessions() == ["telegram:1"]
     diag = store.diagnostics()
     assert diag["ttl_prune_runs"] == 0
+
+
+def test_session_store_read_messages_preserves_legal_tool_history(tmp_path: Path) -> None:
+    store = SessionStore(root=tmp_path / "sessions")
+    tool_calls = [
+        {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "echo", "arguments": '{"text":"hello"}'},
+        }
+    ]
+
+    store.append("telegram:tool", "user", "run echo")
+    store.append(
+        "telegram:tool",
+        "assistant",
+        "",
+        metadata={"tool_calls": tool_calls},
+    )
+    store.append(
+        "telegram:tool",
+        "tool",
+        "echo:hello:telegram:tool",
+        metadata={"tool_call_id": "call_0", "name": "echo"},
+    )
+    store.append("telegram:tool", "assistant", "done")
+
+    rows = store.read_messages("telegram:tool", limit=10)
+
+    assert rows[1]["role"] == "assistant"
+    assert rows[1]["tool_calls"][0]["id"] == "call_0"
+    assert rows[2] == {
+        "role": "tool",
+        "content": "echo:hello:telegram:tool",
+        "tool_call_id": "call_0",
+        "name": "echo",
+    }
+
+
+def test_session_store_read_messages_drops_orphan_tool_results_and_incomplete_tool_calls(tmp_path: Path) -> None:
+    store = SessionStore(root=tmp_path / "sessions")
+    target = store._path("telegram:repair")
+    target.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "session_id": "telegram:repair",
+                        "role": "user",
+                        "content": "hello",
+                        "ts": "t1",
+                        "metadata": {},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "telegram:repair",
+                        "role": "tool",
+                        "content": "orphan",
+                        "ts": "t2",
+                        "metadata": {"tool_call_id": "missing", "name": "echo"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "telegram:repair",
+                        "role": "assistant",
+                        "content": "",
+                        "ts": "t3",
+                        "metadata": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_0",
+                                    "type": "function",
+                                    "function": {"name": "echo", "arguments": '{"text":"hello"}'},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "session_id": "telegram:repair",
+                        "role": "assistant",
+                        "content": "fallback answer",
+                        "ts": "t4",
+                        "metadata": {},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = store.read_messages("telegram:repair", limit=10)
+
+    assert rows == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "fallback answer"},
+    ]

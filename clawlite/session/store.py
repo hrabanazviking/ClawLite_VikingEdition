@@ -101,16 +101,17 @@ class SessionStore:
     ) -> None:
         clean_role = str(role or "").strip().lower()
         clean_content = str(content or "").strip()
+        metadata_payload = dict(metadata or {})
         if clean_role not in {"system", "user", "assistant", "tool"}:
             raise ValueError("invalid role")
-        if not clean_content:
+        if not clean_content and not self._metadata_allows_empty_content(metadata_payload):
             return
 
         msg = SessionMessage(
             session_id=str(session_id),
             role=clean_role,
             content=clean_content,
-            metadata=dict(metadata or {}),
+            metadata=metadata_payload,
         )
         path = self._path(msg.session_id)
         payload = json.dumps(asdict(msg), ensure_ascii=False) + "\n"
@@ -146,10 +147,162 @@ class SessionStore:
             os.fsync(handle.fileno())
 
     def read(self, session_id: str, limit: int = 20) -> list[dict[str, str]]:
+        rows = self.read_messages(session_id, limit=limit)
+        simplified: list[dict[str, str]] = []
+        for row in rows:
+            role = str(row.get("role", "")).strip()
+            content = str(row.get("content", "")).strip()
+            if not role or not content:
+                continue
+            simplified.append({"role": role, "content": content})
+        return simplified
+
+    @staticmethod
+    def _metadata_allows_empty_content(metadata: dict[str, Any]) -> bool:
+        if not isinstance(metadata, dict) or not metadata:
+            return False
+        tool_calls = metadata.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            return True
+        return bool(str(metadata.get("tool_call_id", "")).strip())
+
+    @staticmethod
+    def _normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            call_id = str(item.get("id", "")).strip()
+            function = item.get("function")
+            if not call_id or not isinstance(function, dict):
+                continue
+            name = str(function.get("name", "")).strip()
+            arguments = function.get("arguments", "{}")
+            if not name:
+                continue
+            rows.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": str(arguments or "{}"),
+                    },
+                }
+            )
+        return rows
+
+    @classmethod
+    def _payload_to_message_row(cls, payload: dict[str, Any]) -> dict[str, Any] | None:
+        role = str(payload.get("role", "")).strip()
+        content = str(payload.get("content", "") or "").strip()
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if role not in {"system", "user", "assistant", "tool"}:
+            return None
+
+        row: dict[str, Any] = {"role": role, "content": content}
+        if role == "assistant":
+            tool_calls = cls._normalize_tool_calls(
+                metadata.get("tool_calls", payload.get("tool_calls"))
+            )
+            if tool_calls:
+                row["tool_calls"] = tool_calls
+        elif role == "tool":
+            tool_call_id = str(
+                metadata.get("tool_call_id", payload.get("tool_call_id", "")) or ""
+            ).strip()
+            tool_name = str(metadata.get("name", payload.get("name", "")) or "").strip()
+            if tool_call_id:
+                row["tool_call_id"] = tool_call_id
+            if tool_name:
+                row["name"] = tool_name
+
+        if not str(row.get("content", "")).strip() and not cls._metadata_allows_empty_content(metadata):
+            return None
+        return row
+
+    @classmethod
+    def _filter_assistant_tool_calls(
+        cls,
+        row: dict[str, Any],
+        *,
+        allowed_ids: set[str],
+    ) -> dict[str, Any] | None:
+        raw_tool_calls = row.get("tool_calls")
+        if not isinstance(raw_tool_calls, list):
+            return None
+        filtered = [
+            item
+            for item in raw_tool_calls
+            if isinstance(item, dict) and str(item.get("id", "")).strip() in allowed_ids
+        ]
+        if not filtered:
+            return None
+        updated = dict(row)
+        updated["tool_calls"] = filtered
+        return updated
+
+    @classmethod
+    def _legalize_transcript_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        pending_assistant: dict[str, Any] | None = None
+        pending_allowed_ids: set[str] = set()
+        pending_results: list[dict[str, Any]] = []
+
+        def flush_pending() -> None:
+            nonlocal pending_assistant, pending_allowed_ids, pending_results
+            if pending_assistant and pending_results:
+                realized_ids = {
+                    str(item.get("tool_call_id", "")).strip()
+                    for item in pending_results
+                    if str(item.get("tool_call_id", "")).strip()
+                }
+                filtered_assistant = cls._filter_assistant_tool_calls(
+                    pending_assistant,
+                    allowed_ids=realized_ids,
+                )
+                if filtered_assistant is not None:
+                    out.append(filtered_assistant)
+                    out.extend(pending_results)
+            pending_assistant = None
+            pending_allowed_ids = set()
+            pending_results = []
+
+        for row in rows:
+            role = str(row.get("role", "")).strip()
+            tool_calls = row.get("tool_calls")
+            if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+                flush_pending()
+                pending_assistant = dict(row)
+                pending_allowed_ids = {
+                    str(item.get("id", "")).strip()
+                    for item in tool_calls
+                    if isinstance(item, dict) and str(item.get("id", "")).strip()
+                }
+                pending_results = []
+                continue
+
+            if role == "tool":
+                tool_call_id = str(row.get("tool_call_id", "")).strip()
+                if pending_assistant and tool_call_id and tool_call_id in pending_allowed_ids:
+                    pending_results.append(dict(row))
+                continue
+
+            flush_pending()
+            out.append(dict(row))
+
+        flush_pending()
+        return out
+
+    def read_messages(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
         path = self._path(session_id)
         if not path.exists():
             return []
-        rows: list[dict[str, str]] = []
+        rows: list[dict[str, Any]] = []
         valid_lines: list[str] = []
         corrupt_lines = 0
         for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -162,17 +315,18 @@ class SessionStore:
                 corrupt_lines += 1
                 continue
             valid_lines.append(raw)
-            role = str(payload.get("role", "")).strip()
-            content = str(payload.get("content", "")).strip()
-            if not role or not content:
+            if not isinstance(payload, dict):
                 continue
-            rows.append({"role": role, "content": content})
+            row = self._payload_to_message_row(payload)
+            if row is not None:
+                rows.append(row)
 
         if corrupt_lines:
             self._diagnostics["read_corrupt_lines"] = int(self._diagnostics["read_corrupt_lines"]) + corrupt_lines
             self._repair_file(path, valid_lines)
 
-        return rows[-max(1, int(limit or 1)) :]
+        legalized = self._legalize_transcript_rows(rows)
+        return legalized[-max(1, int(limit or 1)) :]
 
     def _repair_file(self, path: Path, valid_lines: list[str]) -> None:
         try:

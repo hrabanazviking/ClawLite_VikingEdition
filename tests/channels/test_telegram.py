@@ -2271,6 +2271,14 @@ def test_telegram_markdown_formats_heading_and_table_into_clean_html() -> None:
     assert "Nome    ClawLite" in rendered
 
 
+def test_telegram_markdown_strips_replacement_and_control_chars() -> None:
+    rendered = markdown_to_telegram_html("Oi!\ufffd\ufffd\n\x00# Titulo")
+
+    assert "\ufffd" not in rendered
+    assert "\x00" not in rendered
+    assert "<b>Titulo</b>" in rendered
+
+
 def test_telegram_module_import_does_not_call_setup_logging() -> None:
     source = Path(telegram_module.__file__).read_text(encoding="utf-8")
     assert "from clawlite.utils.logging import setup_logging" not in source
@@ -5788,3 +5796,40 @@ def test_telegram_send_streaming_edits_message() -> None:
     assert len(sent_texts) == 1  # initial placeholder
     assert len(edited_texts) >= 1
     assert edited_texts[-1] == "Hi there"
+
+
+def test_telegram_send_streaming_renders_markdown_html() -> None:
+    import asyncio
+
+    sent_texts: list[str] = []
+    edits: list[dict[str, Any]] = []
+
+    from clawlite.core.engine import ProviderChunk
+    from clawlite.channels.telegram import TelegramChannel
+
+    async def fake_chunks():
+        yield ProviderChunk(text="**Hi** ", accumulated="**Hi** ", done=False)
+        yield ProviderChunk(text="there", accumulated="**Hi** there", done=True)
+
+    ch = TelegramChannel.__new__(TelegramChannel)
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            sent_texts.append(text)
+
+            class Msg:
+                message_id = 42
+
+            return Msg()
+
+        async def edit_message_text(self, text, chat_id, message_id, **kwargs):
+            edits.append({"text": text, "kwargs": kwargs})
+
+    ch.bot = FakeBot()
+
+    asyncio.run(ch.send_streaming(chat_id="123", chunks=fake_chunks()))
+
+    assert len(sent_texts) == 1
+    assert edits
+    assert edits[-1]["text"] == "<b>Hi</b> there"
+    assert edits[-1]["kwargs"]["parse_mode"] == "HTML"
