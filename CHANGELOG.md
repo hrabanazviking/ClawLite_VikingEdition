@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `stream_run()` now reuses the same base prompt shaping as `run()` for memory, history, and allowlisted runtime metadata, instead of streaming from raw session rows only
+- prompt runtime context now includes a few more safe structural channel hints such as message IDs, Slack thread timestamps, Telegram forum state, Discord DM state, signed callback/button ids, and single media-type markers without exposing raw channel payloads
 - `AgentEngine` now marks synthesized subagent digests with the async-safe subagent API inside the live event loop, so completed digest runs no longer leak back into later turns
 - engine regressions that inspect exact tool/tool-call history now use hermetic in-memory session state instead of machine-local persisted rows
 - cron scheduler regression coverage now waits on an explicit callback event instead of a fixed sleep, removing a suite-load race in `test_cron_service_add_and_run`

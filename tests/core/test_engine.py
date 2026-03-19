@@ -1942,10 +1942,17 @@ def test_engine_injects_allowlisted_runtime_metadata_into_prompt_context() -> No
             channel="telegram",
             chat_id="42",
             runtime_metadata={
+                "message_id": "m-42",
                 "message_thread_id": 13,
+                "thread_ts": "1700.3",
                 "reply_to_text": "parent context",
                 "command": "focus",
                 "command_args": "session-1",
+                "is_dm": True,
+                "is_forum": True,
+                "callback_signed": True,
+                "custom_id": "approve:123",
+                "media_type": "voice",
                 "bridge_payload": {"raw": "ignore me"},
             },
         )
@@ -1958,10 +1965,17 @@ def test_engine_injects_allowlisted_runtime_metadata_into_prompt_context() -> No
         ]
         assert runtime_messages
         runtime_context = runtime_messages[0]
+        assert "Message ID: m-42" in runtime_context
         assert "Thread ID: 13" in runtime_context
+        assert "Thread TS: 1700.3" in runtime_context
         assert "Reply-To Text: parent context" in runtime_context
         assert "Command: focus" in runtime_context
         assert "Command Args: session-1" in runtime_context
+        assert "Is DM: true" in runtime_context
+        assert "Is Forum: true" in runtime_context
+        assert "Callback Signed: true" in runtime_context
+        assert "Custom ID: approve:123" in runtime_context
+        assert "Media Type: voice" in runtime_context
         assert "bridge_payload" not in runtime_context
         assert "ignore me" not in runtime_context
 

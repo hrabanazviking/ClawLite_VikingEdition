@@ -307,10 +307,17 @@ def test_prompt_builder_runtime_context_includes_allowlisted_metadata_only() -> 
         channel="telegram",
         chat_id="42",
         runtime_metadata={
+            "message_id": "m-42",
             "message_thread_id": 13,
+            "thread_ts": "1700.3",
             "reply_to_text": "  parent request with extra spacing  ",
             "command": "deploy",
             "command_args": "--force now",
+            "is_dm": True,
+            "is_forum": True,
+            "callback_signed": True,
+            "custom_id": "approve:123",
+            "media_type": "audio",
             "media_types": ["photo", "voice"],
             "media_present": True,
             "bridge_payload": {"raw": "should stay out"},
@@ -318,10 +325,17 @@ def test_prompt_builder_runtime_context_includes_allowlisted_metadata_only() -> 
         },
     )
 
+    assert "Message ID: m-42" in context
     assert "Thread ID: 13" in context
+    assert "Thread TS: 1700.3" in context
     assert "Reply-To Text: parent request with extra spacing" in context
     assert "Command: deploy" in context
     assert "Command Args: --force now" in context
+    assert "Is DM: true" in context
+    assert "Is Forum: true" in context
+    assert "Callback Signed: true" in context
+    assert "Custom ID: approve:123" in context
+    assert "Media Type: audio" in context
     assert "Media Types: photo, voice" in context
     assert "Media Present: true" in context
     assert "bridge_payload" not in context
