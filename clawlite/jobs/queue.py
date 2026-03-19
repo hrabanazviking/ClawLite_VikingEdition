@@ -15,6 +15,11 @@ def _utc_now() -> str:
 JobStatus = Literal["queued", "running", "done", "failed", "cancelled"]
 WorkerFn = Callable[["Job"], Awaitable[str]]
 
+# Einherjar — Odin's chosen warriors, selected for Valhalla to fight at Ragnarök.
+# Jobs submitted to the Einherjar queue are chosen for immediate execution at
+# maximum priority. Use for urgent, high-confidence tasks that cannot wait.
+EINHERJAR_PRIORITY = 10
+
 
 @dataclass
 class Job:
@@ -32,6 +37,11 @@ class Job:
     max_retries: int = 0
     retry_count: int = 0
     cancellation_requested: bool = False
+
+    @property
+    def is_einherjar(self) -> bool:
+        """True if this job was chosen for the Einherjar queue (max priority)."""
+        return self.priority >= EINHERJAR_PRIORITY
 
 
 class JobQueue:
@@ -250,6 +260,27 @@ class JobQueue:
             "pending_jobs": pending_count,
             "running_jobs": running_count,
         }
+
+    def einherjar(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        session_id: str = "",
+        max_retries: int = 1,
+    ) -> Job:
+        """
+        Submit a job to the Einherjar queue — maximum priority, chosen for
+        immediate execution. Named after Odin's elite warriors selected for
+        Valhalla. Use for urgent tasks that must run before all others.
+        """
+        return self.submit(
+            kind,
+            payload,
+            priority=EINHERJAR_PRIORITY,
+            session_id=session_id,
+            max_retries=max_retries,
+        )
 
     def restore_from_journal(self) -> int:
         """Reload queued jobs from journal. Returns count restored."""
