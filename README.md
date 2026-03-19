@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🦊 ClawLite
+![https://github.com/hrabanazviking/ClawLite_VikingEdition/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg)
+
+# ClawLite - Viking Edition
 
 **A local-first Python autonomous agent — persistent memory, 20+ LLM providers,<br>real chat channels, and a 24/7 self-healing runtime. No cloud required.**
 
@@ -17,15 +19,17 @@
 
 </div>
 
-> ### 🤖 Built by AI · Maintained by one person
+> ### 🤖 Built by AI · Maintained by Vikings
 >
-> ClawLite is a **solo-dev project built entirely by AI (Claude)**. Every line of code, every test, every commit was written by an AI agent — the human author supervises, reviews goals, and guides direction. No team. No agency. Just one person and an AI building production software together.
+> ClawLite Viking Edition is a project built entirely by AI**. Every line of code, every test, every commit was written by an AI agent — the Viking humans supervise, reviews goals, and guides direction. Just one humans and AI building production software together.
 >
 > This is an ongoing experiment in AI-driven software development at the solo-dev scale.
 
 ---
 
-## ⚡ Why ClawLite?
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/514fdf8c-0e74-4605-9807-709c223a4c5c.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/514fdf8c-0e74-4605-9807-709c223a4c5c.jpg)
+
+## ⚡ Why ClawLite Viking Edition?
 
 - **Truly local-first** — runs entirely on your machine; no vendor lock-in, no cloud accounts required
 - **Real channel adapters out of the box** — Telegram, Discord, Email, WhatsApp, Slack, and IRC
@@ -115,48 +119,94 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 
 ---
 
-## 📈 Current Status
+## ᚹ VikingEdition — Norse Enhancements
 
-- `v0.7.0-beta.0` is out, and it closes robustness phases 1-7 plus the full `plano.md` milestone on the beta track.
-- `main` is now focused on soak-testing, documentation polish, and the next roadmap items rather than another large hardening pass.
-- Local-provider startup, cron/jobs boundaries, browser lifecycle, skill networking policy, and Telegram runtime internals are hardened on `main`.
-- The current Discord parity slice now includes DM/guild policy controls, guild/channel/role allowlists, bot gating, explicit session routing, configurable `reply_to_mode`, isolated native slash-command sessions, deferred interaction replies, static presence plus `auto_presence`, persistent `/focus` / `/unfocus` bindings, native `/discord-presence` controls, and automatic idle/max-age expiry for stale Discord focus bindings.
-- The biggest runtime monoliths were split by responsibility: `clawlite/gateway/server.py` is down to about `3.3k` lines and `clawlite/core/memory.py` to about `4.4k`.
-- Packaging is now split into extras: base install stays leaner, while `.[browser]`, `.[telegram]`, and `.[media]` enable optional runtimes.
-- Skills now honor OpenClaw-style `skills.entries.<skill>` overrides for `enabled`, `env`, and `apiKey`, including profile overlays such as `config.prod.yaml`.
-- Builtin skills can now be gated with `skills.allowBundled` without blocking workspace or marketplace overrides.
-- Tool safety now supports granular specifiers such as `browser:evaluate`, `run_skill:github`, `exec:git`, `exec:shell`, and `exec:env-key:git-ssh-command`, plus approval mode via `approval_specifiers` / `approval_channels`, with `tool:*` wildcards for channel-specific policy.
-- Tool safety now also derives host-aware rules for `web_fetch` and `browser:navigate`, so operator policy can target specific destinations such as `web_fetch:host:example-com` instead of only whole-tool approvals.
-- Explicit shell wrappers like `sh -lc`, `bash -lc`, and `cmd /c` now classify as `exec:shell` and are recursively guarded under workspace restriction, so they no longer bypass `restrict_to_workspace` by hiding path access behind `$HOME`, `~`, or similar expansions.
-- Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
-- Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`. Approval snapshots now include structured context such as exec binary/env keys/cwd and browser or web host targets.
-- Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks, with optional `--status` / `--source` / `--query` filters for operator triage.
-- Managed skills now expose richer local lifecycle state in the CLI, including aggregate `status_counts` plus resolved marketplace state after `install`, `update`, `sync`, and `remove`. `skills search` also includes matching locally managed skills for quick operator triage.
-- `clawlite skills config <name>` now gives the operator a direct path to inspect or update `skills.entries.<skillKey>` in the active config/profile, including `apiKey`, per-skill `env`, and `enabled` overrides without editing JSON/YAML manually.
-- Workspace defaults no longer inject fake user profile values like `Owner`, and explicit “search on the internet / latest” requests now add a web-research requirement so the engine is pushed toward `web_search` / `web_fetch` before answering.
-- Telegram outbound rendering now cleans up inline numbered lists, markdown headings, and pipe tables into more readable channel-safe HTML.
-- Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
-- Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
-- OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.
-- File-backed `gemini-oauth` and `qwen-oauth` providers now refresh expired access tokens once on `401`, persist the renewed token back into the local CLI auth file, and retry the request automatically.
-- The onboarding wizard now suggests provider-specific model ids, expected base URLs, and OAuth re-login hints before it probes the selected provider.
-- Wizard coverage now also includes `azure-openai`, `aihubmix`, `siliconflow`, and `cerebras`, matching the current OpenClaw/nanobot parity slice for OpenAI-compatible providers.
-- Prompt/context hardening on `main` now includes larger history budget allocation, optional semantic compression for trimmed history, optional oversized tool-result compaction, workspace prompt file byte ceilings, and explicit per-tool timeout overrides through `tools.timeouts.<tool>`.
-- The cron control plane now exposes richer operational state: `/v1/cron/status`, expanded `/v1/cron/list`, per-job inspection, and native enable/disable controls on top of the existing scheduler.
-- Runtime scale-out and observability are now in place as opt-in surfaces: Redis bus backend, OTLP telemetry hooks, session TTL, history compaction, `sqlite-vec`, and `memory_compact`.
-- Latest validation on `main`: `python -m pytest tests -q --tb=short` → `1699 passed, 1 skipped`; `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → `194 passed`; `bash scripts/smoke_test.sh` → `7 ok / 0 failure(s)`.
-- Tracking docs: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md).
-- The next major execution track is the OpenClaw parity push for Docker, Discord, tools, and skills.
+This fork (`hrabanazviking/ClawLite_VikingEdition`, branch `Development`) adds a
+suite of Norse-themed subsystems that improve security, observability, memory
+quality, and reasoning depth. All additions are backward-compatible and gated
+behind the new `gateway.viking` config block.
 
+### Persona — Sigrid
+
+The default identity is **Sigrid**, a 21-year-old Heathen Third Path devotee:
+INTP, friendly and direct, dark dry humour, expert across technology, science,
+esoterica, and the arts. Configured via `IDENTITY.md` and `SOUL.md` in the
+workspace templates. Her values are drawn from the Heathen Third Path:
+Wyrd & Orlog, Frith, Gæfa, Drengskapr, Maegen, Gestrisni.
+
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_18.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_18.jpg)
+
+### Norse Subsystems
+
+| Module | Norse Name | Role |
+|---|---|---|
+| `core/injection_guard.py` | **Ægishjálmr** | Multi-layer inbound message scanner: invisible char stripping, NFKC normalization, 20+ injection patterns, base64/hex payload detection, output validation. Wired into `BaseChannel.emit()` and `PromptBuilder`. |
+| `core/huginn_muninn.py` | **Huginn & Muninn** | Twin-raven parallel analysis before each autonomy tick. Huginn (Thought) surfaces health anomalies and error trends; Muninn (Memory) reports stale realms and consolidation needs. Both run concurrently via `asyncio.gather()`. |
+| `core/norns.py` | **The Norns** | Structures the autonomy snapshot into three temporal phases — Urð (past), Verðandi (present), Skuld (obligations) — replacing flat JSON dumps with causally-ordered LLM prompts. |
+| `core/runestone.py` | **Runestone** | Append-only JSONL audit log with rolling SHA-256 chain integrity. Every injection block, maintenance action, and session claim is carved in. `verify_chain()` detects tampering. Exposed at `GET /runestone/tail`. |
+| `core/memory_yggdrasil.py` | **Yggdrasil** | Maps memory categories to three realms (Roots/Trunk/Branches) with retrieval weights and decay multipliers. Weights are now applied inside the retrieval scoring loop. |
+| `runtime/volva.py` | **Völva** | Background memory oracle. Runs every 30 min, reads Muninn's staleness report, triggers consolidation on oversize categories and decay pruning on stale ones. |
+| `runtime/valkyrie.py` | **Valkyrie** | Hourly session reaper. Archives sessions idle >7 days (history trimmed to 20 messages); purges sessions dead >30 days. All claims logged to Runestone. |
+| `runtime/gjallarhorn.py` | **Gjallarhorn** | Critical alert broadcaster. Sounds (via configured channel target) on: injection storms (≥5 blocks/5min), sustained Huginn `high` priority (≥3 ticks), Völva failure, autonomy down. 10-min per-reason cooldown. |
+| `jobs/queue.py` | **Einherjar** | Max-priority job queue (priority=10). Use `queue.einherjar(kind, payload)` to submit urgent tasks that run before all others. |
+| `self_evolution.py` | **Þing** | 3-parallel LLM consensus gate on self-evolution proposals. Requires 2-of-3 agreement before any patch is applied. Expanded protected-file denylist. |
+| `utils/logger.py` | **Runic Glyphs** | Elder Futhark runes prepended to every log line: ᚦ DEBUG, ᚱ INFO, ᚠ SUCCESS, ᚾ WARNING, ᛉ ERROR, ᛞ CRITICAL. |
+| `skills/skald/` | **Skald** | Narrative summarization skill. Structures raw information into story arcs (Setup → Journey → Current State → Worth Remembering) in Sigrid's voice. |
+
+### Security Layers
+
+Inbound messages pass through three gates at `BaseChannel.emit()`:
+1. **Rate limiter** — token bucket (10 msg/60s per session, configurable)
+2. **Ægishjálmr** — injection and malware scan; BLOCK drops the message
+3. **Routing** — only sanitized text reaches the agent engine
+
+Tool call arguments are scanned with `scan_output()` before `tools.execute()`.
+All WARN/BLOCK events are written to the Runestone and forwarded to Gjallarhorn.
+
+### Configuration
+
+All thresholds live under `gateway.viking` in your config file:
+
+```yaml
+gateway:
+  viking:
+    # Rate limiting
+    channel_rate_limit_messages: 10.0
+    channel_rate_limit_window_s: 60.0
+    # Gjallarhorn
+    gjallarhorn_alert_target: "telegram:YOUR_CHAT_ID"
+    gjallarhorn_block_threshold: 5
+    gjallarhorn_cooldown_s: 600.0
+    # Valkyrie
+    valkyrie_idle_days: 7.0
+    valkyrie_dead_days: 30.0
+    # Völva
+    volva_stale_hours: 48.0
+    volva_consolidation_threshold: 50
+    # Runestone
+    runestone_path: ""  # defaults to ~/.clawlite/runestone.jsonl
+```
+
+### Health Endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health/norse` | Status of all Norse subsystems + Runestone chain integrity |
+| `GET /runestone/tail?n=20` | Last N audit log entries with tamper verification |
+
+### Tests
+
+99 unit tests cover all Norse modules. Run with:
+```bash
+python3 -m pytest tests/core/test_injection_guard.py \
+  tests/core/test_runestone.py tests/core/test_huginn_muninn.py \
+  tests/core/test_norns.py tests/runtime/test_valkyrie.py \
+  tests/runtime/test_gjallarhorn.py tests/runtime/test_volva.py \
+  tests/channels/test_rate_limiter.py
+```
 ---
 
-## ⭐ Star History
-
-<div align="center">
-  <a href="https://star-history.com/#eobarretooo/ClawLite&Date">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=eobarretooo/ClawLite&type=Date" width="100%" />
-  </a>
-</div>
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg)
 
 ---
 
@@ -469,11 +519,8 @@ ClawLite has four main layers:
 
 ---
 
-<<<<<<< HEAD
-=======
-![[https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg)]([https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg)
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_1.jpg)
 
->>>>>>> parent of ac0e6e9 (Update README.md)
 ## 🛠️ Development
 
 ```bash
@@ -583,92 +630,6 @@ ClawLite is a Python-first reimplementation with a focus on local deployment, pe
 
 ---
 
-## ᚹ VikingEdition — Norse Enhancements
-
-This fork (`hrabanazviking/ClawLite_VikingEdition`, branch `Development`) adds a
-suite of Norse-themed subsystems that improve security, observability, memory
-quality, and reasoning depth. All additions are backward-compatible and gated
-behind the new `gateway.viking` config block.
-
-### Persona — Sigrid
-
-The default identity is **Sigrid**, a 21-year-old Heathen Third Path devotee:
-INTP, friendly and direct, dark dry humour, expert across technology, science,
-esoterica, and the arts. Configured via `IDENTITY.md` and `SOUL.md` in the
-workspace templates. Her values are drawn from the Heathen Third Path:
-Wyrd & Orlog, Frith, Gæfa, Drengskapr, Maegen, Gestrisni.
-
-### Norse Subsystems
-
-| Module | Norse Name | Role |
-|---|---|---|
-| `core/injection_guard.py` | **Ægishjálmr** | Multi-layer inbound message scanner: invisible char stripping, NFKC normalization, 20+ injection patterns, base64/hex payload detection, output validation. Wired into `BaseChannel.emit()` and `PromptBuilder`. |
-| `core/huginn_muninn.py` | **Huginn & Muninn** | Twin-raven parallel analysis before each autonomy tick. Huginn (Thought) surfaces health anomalies and error trends; Muninn (Memory) reports stale realms and consolidation needs. Both run concurrently via `asyncio.gather()`. |
-| `core/norns.py` | **The Norns** | Structures the autonomy snapshot into three temporal phases — Urð (past), Verðandi (present), Skuld (obligations) — replacing flat JSON dumps with causally-ordered LLM prompts. |
-| `core/runestone.py` | **Runestone** | Append-only JSONL audit log with rolling SHA-256 chain integrity. Every injection block, maintenance action, and session claim is carved in. `verify_chain()` detects tampering. Exposed at `GET /runestone/tail`. |
-| `core/memory_yggdrasil.py` | **Yggdrasil** | Maps memory categories to three realms (Roots/Trunk/Branches) with retrieval weights and decay multipliers. Weights are now applied inside the retrieval scoring loop. |
-| `runtime/volva.py` | **Völva** | Background memory oracle. Runs every 30 min, reads Muninn's staleness report, triggers consolidation on oversize categories and decay pruning on stale ones. |
-| `runtime/valkyrie.py` | **Valkyrie** | Hourly session reaper. Archives sessions idle >7 days (history trimmed to 20 messages); purges sessions dead >30 days. All claims logged to Runestone. |
-| `runtime/gjallarhorn.py` | **Gjallarhorn** | Critical alert broadcaster. Sounds (via configured channel target) on: injection storms (≥5 blocks/5min), sustained Huginn `high` priority (≥3 ticks), Völva failure, autonomy down. 10-min per-reason cooldown. |
-| `jobs/queue.py` | **Einherjar** | Max-priority job queue (priority=10). Use `queue.einherjar(kind, payload)` to submit urgent tasks that run before all others. |
-| `self_evolution.py` | **Þing** | 3-parallel LLM consensus gate on self-evolution proposals. Requires 2-of-3 agreement before any patch is applied. Expanded protected-file denylist. |
-| `utils/logger.py` | **Runic Glyphs** | Elder Futhark runes prepended to every log line: ᚦ DEBUG, ᚱ INFO, ᚠ SUCCESS, ᚾ WARNING, ᛉ ERROR, ᛞ CRITICAL. |
-| `skills/skald/` | **Skald** | Narrative summarization skill. Structures raw information into story arcs (Setup → Journey → Current State → Worth Remembering) in Sigrid's voice. |
-
-### Security Layers
-
-Inbound messages pass through three gates at `BaseChannel.emit()`:
-1. **Rate limiter** — token bucket (10 msg/60s per session, configurable)
-2. **Ægishjálmr** — injection and malware scan; BLOCK drops the message
-3. **Routing** — only sanitized text reaches the agent engine
-
-Tool call arguments are scanned with `scan_output()` before `tools.execute()`.
-All WARN/BLOCK events are written to the Runestone and forwarded to Gjallarhorn.
-
-### Configuration
-
-All thresholds live under `gateway.viking` in your config file:
-
-```yaml
-gateway:
-  viking:
-    # Rate limiting
-    channel_rate_limit_messages: 10.0
-    channel_rate_limit_window_s: 60.0
-    # Gjallarhorn
-    gjallarhorn_alert_target: "telegram:YOUR_CHAT_ID"
-    gjallarhorn_block_threshold: 5
-    gjallarhorn_cooldown_s: 600.0
-    # Valkyrie
-    valkyrie_idle_days: 7.0
-    valkyrie_dead_days: 30.0
-    # Völva
-    volva_stale_hours: 48.0
-    volva_consolidation_threshold: 50
-    # Runestone
-    runestone_path: ""  # defaults to ~/.clawlite/runestone.jsonl
-```
-
-### Health Endpoints
-
-| Endpoint | Description |
-|---|---|
-| `GET /health/norse` | Status of all Norse subsystems + Runestone chain integrity |
-| `GET /runestone/tail?n=20` | Last N audit log entries with tamper verification |
-
-### Tests
-
-99 unit tests cover all Norse modules. Run with:
-```bash
-python3 -m pytest tests/core/test_injection_guard.py \
-  tests/core/test_runestone.py tests/core/test_huginn_muninn.py \
-  tests/core/test_norns.py tests/runtime/test_valkyrie.py \
-  tests/runtime/test_gjallarhorn.py tests/runtime/test_volva.py \
-  tests/channels/test_rate_limiter.py
-```
-
----
-
 ## 🤝 Contributing
 
 Contributions are welcome! To get started:
@@ -686,12 +647,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 
 MIT — see [`LICENSE`](LICENSE).
 
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/clawlite/workspace/templates/agent_pictures/agent_picture_6.jpg)
+
 ---
 
-<div align="center">
 
-Built with ❤️ for developers who want their AI assistant to run on their own terms.
-
-**[⭐ Star on GitHub](https://github.com/eobarretooo/ClawLite)** · **[🐛 Report a Bug](https://github.com/eobarretooo/ClawLite/issues)** · **[💡 Request a Feature](https://github.com/eobarretooo/ClawLite/issues)**
-
-</div>
