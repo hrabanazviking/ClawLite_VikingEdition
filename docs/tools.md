@@ -81,8 +81,8 @@ The runtime-level tool config lives under `tools` in `~/.clawlite/config.json`:
       "enabled": true,
       "risky_tools": ["browser", "exec", "run_skill", "web_fetch", "web_search", "mcp"],
       "risky_specifiers": [],
-      "approval_specifiers": [],
-      "approval_channels": [],
+      "approval_specifiers": ["browser:evaluate", "exec", "mcp", "run_skill"],
+      "approval_channels": ["discord", "telegram"],
       "approval_grant_ttl_s": 900.0,
       "blocked_channels": [],
       "allowed_channels": [],
@@ -148,7 +148,7 @@ The preview returns a `decision` of `allow`, `approval`, or `block`.
 
 For `exec`, ClawLite now also derives approval-friendly specifiers from shell meta syntax, explicit shell wrappers (`sh -lc`, `bash -lc`, `cmd /c`), env override keys, and explicit cwd overrides. That lets operators write tighter rules such as `exec:shell` or `exec:env-key:git-ssh-command` instead of approving every `exec` call. The runtime also rejects dangerous env override pivots like `PATH`, `NODE_OPTIONS`, `DYLD_*`, `LD_*`, `GIT_CONFIG_*`, and `GIT_SSH_COMMAND`, and under `restrict_to_workspace` it now recursively guards nested shell commands instead of treating the wrapper as a safe boundary. It also blocks obvious `curl` / `wget` / PowerShell fetches to local, private, metadata, and other internal-only `http(s)` targets, plus clear runtime fetch payloads such as `python -c`, `python -m urllib.request`, `node -e`, or `node -p` that call network clients against those same destinations. That inline-runtime and fetch guard now resolves common transparent launch wrappers like `/usr/bin/env`, `env -i`, `env -S`, `command --`, `nohup`, `nice`, `timeout`, and `stdbuf`, so `exec`/`process` cannot sidestep the stricter network policy already enforced by `web_fetch`.
 
-On live Telegram and Discord turns, approval-gated tool calls now attach native approve/reject controls to the reply. Approving creates a temporary grant scoped to the reviewed request fingerprint plus the same session, channel, and matched safety specifier; the operator then retries the original request manually.
+On live Telegram and Discord turns, approval-gated tool calls now attach native approve/reject controls to the reply. Approving creates a temporary grant scoped to the reviewed request fingerprint plus the same session, channel, and matched safety specifier; the operator then retries the original request manually. When requester identity is available from the inbound channel/runtime metadata, the review is also bound to that same actor, so another user in the same chat cannot approve someone else's risky tool call.
 
 The same approval queue is now inspectable over the gateway and CLI:
 
@@ -298,6 +298,8 @@ Notes:
 
 - `message.action` defaults to `send`.
 - Telegram-only `message` actions are `reply`, `edit`, `delete`, `react`, and `create_topic`.
+- Discord currently supports `send` plus button rows bridged as `discord_components`.
+- Channels without explicit capability support stay on a conservative send-only contract and reject unsupported `action`, `buttons`, or `media` arguments instead of pretending they work.
 - Scheduled `cron` turns now reuse their resolved `channel` / `target` as engine context, so the agent sees the same safe runtime hints before the eventual outbound send.
 - `discord_admin` expects a configured `channels.discord.token`; server mutations also require matching Discord bot permissions.
 - `mcp` accepts namespaced tools like `server::tool`.

@@ -1076,7 +1076,7 @@ Query params:
 
 Response baseline:
 - `count`: number of returned approval requests
-- `requests`: request snapshots with `request_id`, `tool`, `session_id`, `channel`, `matched_approval_specifiers`, `status`, and remaining TTL fields such as `expires_in_s`
+- `requests`: request snapshots with `request_id`, `tool`, `session_id`, `channel`, optional `requester_actor`, `matched_approval_specifiers`, `status`, and remaining TTL fields such as `expires_in_s`
 - `grant_count`: number of returned active grants
 - `grants`: active grants with `session_id`, `channel`, `rule`, `scope`, optional `request_id`, and `expires_in_s`
 
@@ -1084,7 +1084,7 @@ Alias compatível: `GET /api/tools/approvals`.
 
 ## `POST /v1/tools/approvals/{request_id}/approve`
 
-Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set.
+Approves one pending tool request and creates the temporary grant bound to the reviewed request fingerprint plus the same session, channel, and matched specifier set. When `requester_actor` was recorded on the original request, only that same actor can review it; mismatches fail closed with `approval_actor_mismatch`.
 
 Request body:
 
@@ -1160,7 +1160,7 @@ Campos opcionais:
 - `chat_id`: identificador do alvo/chat a preservar no contexto do turno.
 - `runtime_metadata`: objeto JSON opcional com metadata inbound adicional. O gateway só aceita objeto e ignora outros tipos; o prompt do agente continua vendo apenas a allowlist segura/untrusted já documentada.
 
-Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), preservando o fluxo normal de envio e inline keyboard.
+Nota operacional: o tool `message` suporta acoes Telegram (`send`, `reply`, `edit`, `delete`, `react`, `create_topic`) via argumentos de `action` e bridge de metadata (`_telegram_action*`), enquanto Discord permanece em `send` com suporte a botões via `discord_components`. Canais sem capability explícita permanecem no contrato conservador de `send`.
 
 ## `GET /v1/status`
 

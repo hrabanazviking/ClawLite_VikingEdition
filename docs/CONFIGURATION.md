@@ -363,8 +363,8 @@ Each server under `tools.mcp.servers`:
 | `enabled` | `true` | Enables runtime tool safety enforcement |
 | `risky_tools` | `["browser","exec","run_skill","web_fetch","web_search","mcp"]` | Whole-tool risky baseline |
 | `risky_specifiers` | `[]` | Granular risky operations like `browser:evaluate` or `run_skill:github` |
-| `approval_specifiers` | `[]` | Tool/specifier rules that should require approval instead of running immediately |
-| `approval_channels` | `[]` | Channels where approval-gated rules should pause/fail closed |
+| `approval_specifiers` | `["browser:evaluate","exec","mcp","run_skill"]` | Tool/specifier rules that should require approval instead of running immediately |
+| `approval_channels` | `["discord","telegram"]` | Channels where approval-gated rules should pause/fail closed |
 | `approval_grant_ttl_s` | `900.0` | Lifetime in seconds for a temporary grant after an operator approves a tool request |
 | `blocked_channels` | `[]` | Channels where risky entries are blocked |
 | `allowed_channels` | `[]` | Channels that can still use risky entries even when blocked elsewhere |
@@ -391,7 +391,7 @@ Example:
 }
 ```
 
-`risky_tools` blocks the whole tool. `risky_specifiers` is more precise and supports `tool:*` wildcards. `approval_specifiers` uses the same matcher, but returns an approval-required result instead of running immediately. On Telegram and Discord, those requests now surface native approve/reject controls, and approval grants only apply to the same session/channel/specifier for `approval_grant_ttl_s` seconds. For `exec`, derived specifiers include the resolved command token (`exec:git`, `exec:cmd:git`), shell-wrapper usage (`exec:shell` / `exec:shell-meta`), env override keys (`exec:env-key:git-ssh-command`), and explicit cwd overrides (`exec:cwd`).
+`risky_tools` blocks the whole tool. `risky_specifiers` is more precise and supports `tool:*` wildcards. `approval_specifiers` uses the same matcher, but returns an approval-required result instead of running immediately. On Telegram and Discord, those requests now surface native approve/reject controls, approval grants only apply to the same session/channel/specifier for `approval_grant_ttl_s` seconds, and when the runtime knows the original requester identity the approval review is bound to that same actor. For `exec`, derived specifiers include the resolved command token (`exec:git`, `exec:cmd:git`), shell-wrapper usage (`exec:shell` / `exec:shell-meta`), env override keys (`exec:env-key:git-ssh-command`), and explicit cwd overrides (`exec:cwd`).
 
 ---
 
