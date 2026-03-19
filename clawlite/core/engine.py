@@ -89,6 +89,7 @@ class ProviderChunk:
     done: bool          # True on last chunk
     error: str | None = None
     degraded: bool = False  # True when stream failed mid-way and was recovered
+    requires_full_run: bool = False
 
 
 @dataclass(slots=True)
@@ -3073,7 +3074,11 @@ class AgentEngine:
                     completed = False
                     cancelled = False
                     final_error = ""
-                    stream_iter = stream_fn(messages=messages)
+                    visible_text_emitted = False
+                    stream_kwargs: dict[str, Any] = {"messages": messages}
+                    if prepared.tool_schema and self._accepts_parameter(stream_fn, "tools"):
+                        stream_kwargs["tools"] = prepared.tool_schema
+                    stream_iter = stream_fn(**stream_kwargs)
                     try:
                         while True:
                             if self._stop_requested(session_id=session_id, stop_event=None):
@@ -3127,7 +3132,12 @@ class AgentEngine:
                                 break
                             if chunk is None:
                                 continue
+                            if chunk.requires_full_run and not visible_text_emitted:
+                                await queue.put(("fallback", None))
+                                return
                             accumulated = chunk.accumulated or (accumulated + chunk.text)
+                            if chunk.text or accumulated:
+                                visible_text_emitted = True
                             if chunk.error:
                                 final_error = str(chunk.error)
                             await queue.put(("chunk", chunk))
@@ -3168,6 +3178,7 @@ class AgentEngine:
                     await queue.put(("done", None))
 
             producer = asyncio.create_task(_producer())
+            fallback_requested = False
             try:
                 while True:
                     kind, payload = await queue.get()
@@ -3176,19 +3187,21 @@ class AgentEngine:
                         yield payload
                         continue
                     if kind == "fallback":
-                        result = await self.run(
-                            session_id=session_id,
-                            user_text=user_text,
-                            channel=channel,
-                            chat_id=chat_id,
-                            runtime_metadata=runtime_metadata,
-                        )
-                        yield ProviderChunk(text=result.text, accumulated=result.text, done=True)
-                        return
+                        fallback_requested = True
+                        continue
                     if kind == "error":
                         assert isinstance(payload, Exception)
                         raise payload
                     if kind == "done":
+                        if fallback_requested:
+                            result = await self.run(
+                                session_id=session_id,
+                                user_text=user_text,
+                                channel=channel,
+                                chat_id=chat_id,
+                                runtime_metadata=runtime_metadata,
+                            )
+                            yield ProviderChunk(text=result.text, accumulated=result.text, done=True)
                         break
             finally:
                 if not producer.done():

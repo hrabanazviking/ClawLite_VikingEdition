@@ -250,6 +250,18 @@ class FakeStreamingWebToolProvider(FakeWebToolProvider):
         yield ProviderChunk(text="ream", accumulated="stream", done=True)
 
 
+class FakeStreamingToolSignalProvider:
+    def __init__(self) -> None:
+        self.stream_calls = 0
+        self.tools_seen: list[dict[str, Any]] | None = None
+
+    async def stream(self, *, messages, tools=None, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        self.stream_calls += 1
+        self.tools_seen = list(tools or [])
+        yield ProviderChunk(text="", accumulated="", done=True, requires_full_run=True)
+
+
 class FakeWebSearchTools:
     async def execute(
         self,
@@ -2919,6 +2931,65 @@ def test_engine_stream_run_falls_back_to_full_run_for_explicit_web_search_reques
                 "channel": "telegram",
                 "chat_id": "42",
                 "runtime_metadata": {"reply_to_message_id": "9"},
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_when_provider_stream_requires_full_run_before_text() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingToolSignalProvider()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            memory=FakeMemory(),
+            sessions=InMemorySessionStore(),
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _fallback_run(
+            *,
+            session_id: str,
+            user_text: str,
+            channel: str | None = None,
+            chat_id: str | None = None,
+            runtime_metadata: dict[str, Any] | None = None,
+        ) -> ProviderResult:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "user_text": user_text,
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "runtime_metadata": runtime_metadata,
+                }
+            )
+            return ProviderResult(text="tool-result", tool_calls=[], model="fake/model")
+
+        engine.run = _fallback_run  # type: ignore[method-assign]
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream-tools",
+                user_text="search for OpenClaw docs",
+                channel="telegram",
+                chat_id="42",
+                runtime_metadata={"reply_to_message_id": "10"},
+            )
+        ]
+
+        assert provider.stream_calls == 1
+        assert provider.tools_seen == FakeWebSearchTools().schema()
+        assert chunks == [ProviderChunk(text="tool-result", accumulated="tool-result", done=True)]
+        assert seen == [
+            {
+                "session_id": "cli:stream-tools",
+                "user_text": "search for OpenClaw docs",
+                "channel": "telegram",
+                "chat_id": "42",
+                "runtime_metadata": {"reply_to_message_id": "10"},
             }
         ]
 
