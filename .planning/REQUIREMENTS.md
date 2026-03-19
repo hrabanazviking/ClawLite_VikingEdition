@@ -1,93 +1,93 @@
 # Requirements: ClawLite
 
-**Defined:** 2026-03-16
-**Milestone:** v0.6 — Robustez
-**Core Value:** Um agente AI que funciona de verdade em qualquer ambiente Python — incluindo mobile/Termux — sem dependências que compilem código nativo.
+**Defined:** 2026-03-16  
+**Milestone:** v0.6 — Robustness  
+**Core Value:** An AI agent that genuinely works in any Python environment — including mobile/Termux — without dependencies that require compiling native code.
 
 ## v0.6 Requirements
 
 ### Core / Bugs
 
-- [ ] **CORE-01**: Sistema não sofre memory leak de session locks após sessões encerrarem
-- [ ] **CORE-02**: Worker de multi-agente executa comandos sem shell=True (sem risco de injeção)
-- [ ] **CORE-03**: setup_logging() não é chamado no module-level (sem efeito colateral no import)
-- [ ] **CORE-04**: Engine executa tool calls independentes em paralelo (não sequencialmente)
+- [ ] **CORE-01**: The system does not leak session locks after sessions end
+- [ ] **CORE-02**: The multi-agent worker executes commands without `shell=True` (no injection risk)
+- [ ] **CORE-03**: `setup_logging()` is not called at module level (no import-time side effects)
+- [ ] **CORE-04**: The engine executes independent tool calls in parallel (not sequentially)
 
 ### Providers
 
-- [ ] **PROV-01**: Quando circuit breaker abre, agente roteia automaticamente para próximo provider configurado
-- [ ] **PROV-02**: Operador pode configurar múltiplas API keys por provider com quota e cooldown individual
-- [ ] **PROV-03**: Sistema rastreia custo estimado e tokens consumidos por provider, sessão e agente
-- [ ] **PROV-04**: Catalog inclui providers Bedrock (AWS), Qwen e Mistral como opções nativas
+- [ ] **PROV-01**: When a circuit breaker opens, the agent automatically routes to the next configured provider
+- [ ] **PROV-02**: Operators can configure multiple API keys per provider with individual quotas and cooldowns
+- [ ] **PROV-03**: The system tracks estimated cost and consumed tokens by provider, session, and agent
+- [ ] **PROV-04**: The catalog includes Bedrock (AWS), Qwen, and Mistral as native provider options
 
 ### MCP
 
-- [ ] **MCP-01**: Agente pode usar servidores MCP locais via stdio transport (subprocess + pipes)
-- [ ] **MCP-02**: Agente pode consumir servidores MCP via SSE transport (streaming de resultados)
-- [ ] **MCP-03**: Sistema descobre e lista tools disponíveis de um servidor MCP via handshake de inicialização
-- [ ] **MCP-04**: ClawLite expõe suas próprias tools como servidor MCP para clientes externos
+- [ ] **MCP-01**: The agent can use local MCP servers via stdio transport (subprocess + pipes)
+- [ ] **MCP-02**: The agent can consume MCP servers through SSE transport (streaming results)
+- [ ] **MCP-03**: The system discovers and lists the tools available from an MCP server via the initialization handshake
+- [ ] **MCP-04**: ClawLite exposes its own tools as an MCP server for external clients
 
 ### Gateway / Channels
 
-- [ ] **GW-01**: Gateway aplica rate limiting por IP e por token em /api/message
-- [ ] **GW-02**: Tools e channels reportam latência real e erros em health checks (não sempre ok=True)
-- [ ] **GW-03**: Canais Signal, Matrix e IRC são funcionais para envio e recebimento de mensagens
-- [ ] **GW-04**: Cada subagente tem thread de contexto própria — sem colisão entre runs paralelos
+- [ ] **GW-01**: The gateway enforces rate limiting by IP and by token on `/api/message`
+- [ ] **GW-02**: Tools and channels report real latency and real errors in health checks (not always `ok=True`)
+- [ ] **GW-03**: Signal, Matrix, and IRC channels are functional for both sending and receiving messages
+- [ ] **GW-04**: Each subagent has its own context thread — no collisions between parallel runs
 
 ### Cron / Jobs
 
-- [ ] **CRON-01**: Cron job pode ser disparado por evento HTTP (webhook trigger) além de tempo
-- [ ] **CRON-02**: Job que falha é reexecutado com backoff configurável (retry policy por job)
-- [ ] **CRON-03**: Job B pode ser configurado para iniciar somente após Job A completar com sucesso
-- [ ] **CRON-04**: Dashboard web exibe jobs agendados, histórico de execuções e próximas rodadas
+- [ ] **CRON-01**: A cron job can be triggered by an HTTP event (webhook trigger) in addition to time
+- [ ] **CRON-02**: A failed job is retried with configurable backoff (retry policy per job)
+- [ ] **CRON-03**: Job B can be configured to start only after Job A completes successfully
+- [ ] **CRON-04**: The web dashboard displays scheduled jobs, execution history, and upcoming runs
 
 ### Memory
 
-- [ ] **MEM-01**: Sistema gera embeddings localmente sem depender de API remota (modelo local leve)
-- [ ] **MEM-02**: Operador pode exportar e importar memória completa entre workspaces/dispositivos
-- [ ] **MEM-03**: Engine comprime working memory automaticamente quando token budget está acima de 80%
-- [ ] **MEM-04**: Memória suporta grafo de relações entre entidades (pessoas, projetos, conceitos)
+- [ ] **MEM-01**: The system generates embeddings locally without relying on a remote API (lightweight local model)
+- [ ] **MEM-02**: Operators can export and import the full memory between workspaces/devices
+- [ ] **MEM-03**: The engine automatically compresses working memory when the token budget exceeds 80%
+- [ ] **MEM-04**: Memory supports a graph of relationships between entities (people, projects, concepts)
 
 ### Skills / Tools
 
-- [ ] **SKILL-01**: Skills podem ser recarregadas em runtime sem reiniciar o agente
-- [ ] **TOOL-01**: Agente pode executar operações git (status, diff, commit, log) via tool nativa sem shell
-- [ ] **TOOL-02**: Agente pode executar queries SQL em banco SQLite ou Postgres via tool nativa
-- [ ] **SKILL-02**: Operador pode instalar versão específica de uma skill (ex: clawhub@1.2.0)
+- [ ] **SKILL-01**: Skills can be reloaded at runtime without restarting the agent
+- [ ] **TOOL-01**: The agent can perform git operations (`status`, `diff`, `commit`, `log`) through a native tool without using the shell
+- [ ] **TOOL-02**: The agent can execute SQL queries against SQLite or Postgres through a native tool
+- [ ] **SKILL-02**: Operators can install a specific version of a skill (for example, `clawhub@1.2.0`)
 
 ## v2 Requirements (Deferred)
 
 ### Channels
 
-- **CHAN-01**: Canal QQ funcional
-- **CHAN-02**: Canal DingTalk funcional
-- **CHAN-03**: Canal Feishu funcional
-- **CHAN-04**: STT/TTS sem dependência de ffmpeg (alternativa portátil ao pydub)
+- **CHAN-01**: Functional QQ channel
+- **CHAN-02**: Functional DingTalk channel
+- **CHAN-03**: Functional Feishu channel
+- **CHAN-04**: STT/TTS without an ffmpeg dependency (portable alternative to pydub)
 
 ### Memory
 
-- **MEM-05**: Particionamento/archiving de SQLite para bases com milhões de registros
-- **MEM-06**: Redis como backend opcional de memória distribuída
+- **MEM-05**: SQLite partitioning/archiving for databases with millions of records
+- **MEM-06**: Redis as an optional distributed memory backend
 
 ### Providers
 
-- **PROV-05**: Ensemble multi-modelo — votação entre providers para respostas críticas
-- **PROV-06**: Streaming nativo de tool results (partial results durante execução)
+- **PROV-05**: Multi-model ensemble — provider voting for critical responses
+- **PROV-06**: Native streaming of tool results (partial results during execution)
 
 ### Skills / Tools
 
-- **TOOL-03**: Skill sandboxing — isolamento de recursos por skill
-- **SKILL-03**: Skill marketplace local com index de skills disponíveis
+- **TOOL-03**: Skill sandboxing — resource isolation per skill
+- **SKILL-03**: Local skill marketplace with an index of available skills
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Apps nativos iOS/Android/macOS/Windows | Fora do escopo Python/Termux |
-| Pydantic v2 | maturin/Rust não compila no Termux |
-| Dependências com compilação C/Rust | Quebra no ambiente Android |
-| WebRTC / chamadas de voz | Dependências binárias incompatíveis |
-| OAuth flow para providers | Complexidade alta, casos de uso raramente precisam |
+| Native iOS/Android/macOS/Windows apps | Outside the Python/Termux scope |
+| Pydantic v2 | maturin/Rust does not compile on Termux |
+| Dependencies requiring C/Rust compilation | Break the Android environment |
+| WebRTC / voice calls | Incompatible binary dependencies |
+| OAuth flow for providers | High complexity, and use cases rarely require it |
 
 ## Traceability
 
@@ -128,5 +128,5 @@
 - Unmapped: 0 ✓
 
 ---
-*Requirements defined: 2026-03-16*
+*Requirements defined: 2026-03-16*  
 *Last updated: 2026-03-16 after ROADMAP.md creation (Phases 8-17)*
