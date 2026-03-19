@@ -2,6 +2,8 @@
 name: trello
 description: Manage Trello boards, lists, and cards via the Trello REST API.
 always: false
+script: trello
+requirements: {"env":["TRELLO_API_KEY","TRELLO_TOKEN"]}
 metadata: {"clawlite":{"emoji":"📋","auth":{"requiredEnv":["TRELLO_API_KEY","TRELLO_TOKEN"]}}}
 ---
 

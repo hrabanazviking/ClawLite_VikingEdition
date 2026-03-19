@@ -2,6 +2,8 @@
 name: spotify
 description: Control Spotify playback, search tracks/albums/playlists, and manage queues via the Spotify Web API.
 always: false
+script: spotify
+requirements: {"env":["SPOTIFY_CLIENT_ID","SPOTIFY_CLIENT_SECRET"]}
 metadata: {"clawlite":{"emoji":"🎵","auth":{"requiredEnv":["SPOTIFY_CLIENT_ID","SPOTIFY_CLIENT_SECRET"],"optionalEnv":["SPOTIFY_ACCESS_TOKEN"]}}}
 ---
 

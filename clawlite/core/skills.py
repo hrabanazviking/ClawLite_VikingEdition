@@ -1274,6 +1274,10 @@ class SkillsLoader:
             return ["env:JIRA_BASE_URL", "env:JIRA_EMAIL", "env:JIRA_API_TOKEN"]
         if script_name == "linear":
             return ["env:LINEAR_API_KEY"]
+        if script_name == "trello":
+            return ["env:TRELLO_API_KEY", "env:TRELLO_TOKEN"]
+        if script_name == "spotify":
+            return ["env:SPOTIFY_CLIENT_ID", "env:SPOTIFY_CLIENT_SECRET", "env:SPOTIFY_ACCESS_TOKEN(optional)"]
         if script_name == "summarize":
             return ["provider", "tool:web_fetch|read|read_file"]
         return []
