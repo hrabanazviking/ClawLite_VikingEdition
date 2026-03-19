@@ -154,8 +154,6 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 
 ---
 
-## ⭐ Star History
-
 ![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/edb96e96-ef90-4ce0-a342-d0adc4d76960.jpg)
 
 ---
@@ -683,10 +681,4 @@ MIT — see [`LICENSE`](LICENSE).
 
 ---
 
-<div align="center">
 
-Built with ❤️ for developers who want their AI assistant to run on their own terms.
-
-**[⭐ Star on GitHub](https://github.com/eobarretooo/ClawLite)** · **[🐛 Report a Bug](https://github.com/eobarretooo/ClawLite/issues)** · **[💡 Request a Feature](https://github.com/eobarretooo/ClawLite/issues)**
-
-</div>
