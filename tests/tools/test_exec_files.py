@@ -217,6 +217,69 @@ def test_exec_tool_allows_public_fetch_when_local_urls_only_appear_in_proxy_or_p
             assert guard_error is None
 
 
+def test_exec_tool_blocks_internal_network_fetch_in_python_inline_runtime() -> None:
+    async def _scenario() -> None:
+        out = await ExecTool().run(
+            {
+                "command": (
+                    "python3 -c \"import requests; "
+                    "requests.get('http://169.254.169.254/latest/meta-data')\""
+                )
+            },
+            ToolContext(session_id="s"),
+        )
+        assert "exit=-1" in out
+        assert "stderr=blocked_by_policy:internal_url:169.254.169.254" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_blocks_internal_network_fetch_in_env_wrapped_python_inline_runtime() -> None:
+    async def _scenario() -> None:
+        out = await ExecTool().run(
+            {
+                "command": (
+                    "env PYTHONUNBUFFERED=1 python3 -c \"import requests; "
+                    "requests.get('http://169.254.169.254/latest/meta-data')\""
+                )
+            },
+            ToolContext(session_id="s"),
+        )
+        assert "exit=-1" in out
+        assert "stderr=blocked_by_policy:internal_url:169.254.169.254" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_blocks_localhost_network_fetch_in_node_inline_runtime() -> None:
+    async def _scenario() -> None:
+        out = await ExecTool().run(
+            {"command": "node -e \"fetch('http://localhost:3000/health')\""},
+            ToolContext(session_id="s"),
+        )
+        assert "exit=-1" in out
+        assert "stderr=blocked_by_policy:internal_url:localhost" in out
+
+    asyncio.run(_scenario())
+
+
+def test_exec_tool_allows_inline_runtime_url_string_without_network_hint() -> None:
+    tool = ExecTool()
+    command = "python3 -c \"print('http://localhost:8000/health')\""
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error is None
+
+
+def test_exec_tool_allows_urllib_parse_without_network_call() -> None:
+    tool = ExecTool()
+    command = (
+        "python3 -c \"import urllib.parse; "
+        "print(urllib.parse.urlparse('http://localhost:8000/health'))\""
+    )
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error is None
+
+
 def test_exec_tool_default_policy_blocks_dangerous_command() -> None:
     async def _scenario() -> None:
         out = await ExecTool().run(
