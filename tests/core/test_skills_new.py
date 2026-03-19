@@ -5,6 +5,15 @@ from pathlib import Path
 
 def test_all_new_skills_have_valid_frontmatter() -> None:
     new_skills = [
+        "memory",
+        "skald",
+        "skill-creator",
+        "cron",
+        "tmux",
+        "clawhub",
+        "hub",
+        "github",
+        "gh-issues",
         "notion",
         "obsidian",
         "github-issues",
@@ -23,3 +32,4 @@ def test_all_new_skills_have_valid_frontmatter() -> None:
         assert "name:" in content, f"Missing 'name:' in {skill_md}"
         assert "description:" in content, f"Missing 'description:' in {skill_md}"
         assert "always:" in content, f"Missing 'always:' in {skill_md}"
+        assert "script:" in content, f"Missing 'script:' in {skill_md}"
