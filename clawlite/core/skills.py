@@ -29,6 +29,33 @@ _ACTIVE_CONFIG_CACHE: dict[str, object] = {
     "payload": {},
 }
 
+SCRIPT_RUNTIME_REQUIREMENTS: dict[str, list[str]] = {
+    "coding_agent": ["tool:sessions_spawn"],
+    "web_search": ["tool:web_search"],
+    "weather": ["tool:web_fetch"],
+    "gh_issues": ["tool:exec"],
+    "github": ["tool:exec"],
+    "clawhub": ["tool:exec"],
+    "onepassword": ["tool:exec", "env:OP_SERVICE_ACCOUNT_TOKEN"],
+    "memory": ["tool:memory_recall|memory_search|memory_get|memory_learn|memory_forget|memory_analyze"],
+    "cron": ["tool:cron"],
+    "docker": ["tool:exec"],
+    "tmux": ["tool:exec", "platform:linux|darwin"],
+    "apple_notes": ["tool:exec", "platform:darwin"],
+    "obsidian": ["env:OBSIDIAN_VAULT"],
+    "skald": ["provider"],
+    "skill_creator": ["tool:write|write_file(optional)"],
+    "notion": ["env:NOTION_API_KEY"],
+    "jira": ["env:JIRA_BASE_URL", "env:JIRA_EMAIL", "env:JIRA_API_TOKEN"],
+    "linear": ["env:LINEAR_API_KEY"],
+    "trello": ["env:TRELLO_API_KEY", "env:TRELLO_TOKEN"],
+    "spotify": ["env:SPOTIFY_CLIENT_ID", "env:SPOTIFY_CLIENT_SECRET", "env:SPOTIFY_ACCESS_TOKEN(optional)"],
+    "summarize": ["provider", "tool:web_fetch|read|read_file"],
+    "healthcheck": ["config(optional)", "network(optional)"],
+    "model_usage": ["bin:codexbar(optional when provider=codex)"],
+    "session_logs": ["state:sessions"],
+}
+
 
 def _resolved_home() -> Path:
     home_env = str(os.getenv("HOME", "") or "").strip()
@@ -1264,49 +1291,7 @@ class SkillsLoader:
         if spec.execution_kind != "script":
             return []
         script_name = str(spec.script or "").strip().lower()
-        if script_name == "coding_agent":
-            return ["tool:sessions_spawn"]
-        if script_name == "web_search":
-            return ["tool:web_search"]
-        if script_name == "weather":
-            return ["tool:web_fetch"]
-        if script_name == "gh_issues":
-            return ["tool:exec"]
-        if script_name == "github":
-            return ["tool:exec"]
-        if script_name == "clawhub":
-            return ["tool:exec"]
-        if script_name == "onepassword":
-            return ["tool:exec", "env:OP_SERVICE_ACCOUNT_TOKEN"]
-        if script_name == "memory":
-            return ["tool:memory_recall|memory_search|memory_get|memory_learn|memory_forget|memory_analyze"]
-        if script_name == "cron":
-            return ["tool:cron"]
-        if script_name == "docker":
-            return ["tool:exec"]
-        if script_name == "tmux":
-            return ["tool:exec", "platform:linux|darwin"]
-        if script_name == "apple_notes":
-            return ["tool:exec", "platform:darwin"]
-        if script_name == "obsidian":
-            return ["env:OBSIDIAN_VAULT"]
-        if script_name == "skald":
-            return ["provider"]
-        if script_name == "skill_creator":
-            return ["tool:write|write_file(optional)"]
-        if script_name == "notion":
-            return ["env:NOTION_API_KEY"]
-        if script_name == "jira":
-            return ["env:JIRA_BASE_URL", "env:JIRA_EMAIL", "env:JIRA_API_TOKEN"]
-        if script_name == "linear":
-            return ["env:LINEAR_API_KEY"]
-        if script_name == "trello":
-            return ["env:TRELLO_API_KEY", "env:TRELLO_TOKEN"]
-        if script_name == "spotify":
-            return ["env:SPOTIFY_CLIENT_ID", "env:SPOTIFY_CLIENT_SECRET", "env:SPOTIFY_ACCESS_TOKEN(optional)"]
-        if script_name == "summarize":
-            return ["provider", "tool:web_fetch|read|read_file"]
-        return []
+        return list(SCRIPT_RUNTIME_REQUIREMENTS.get(script_name, []))
 
     def always_on(self, *, only_available: bool = True) -> list[SkillSpec]:
         rows = self.discover(include_unavailable=not only_available)
