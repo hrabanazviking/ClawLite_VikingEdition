@@ -1045,6 +1045,8 @@ class SkillTool(Tool):
                     "skill": spec_name,
                     "backend": "notion_api",
                     "default_notion_version": notion_version,
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {"required_env": ["NOTION_API_KEY"]},
                     "available_actions": [
                         "search",
                         "page_get",
@@ -1054,6 +1056,11 @@ class SkillTool(Tool):
                         "blocks_children",
                         "blocks_append",
                         "request",
+                    ],
+                    "examples": [
+                        {"action": "search", "tool_arguments": {"action": "search", "query": "incident runbook"}},
+                        {"action": "page_get", "tool_arguments": {"action": "page_get", "page_id": "<page_id>"}},
+                        {"action": "database_query", "tool_arguments": {"action": "database_query", "database_id": "<db_id>", "data": {"page_size": 10}}},
                     ],
                 },
                 ensure_ascii=False,
@@ -1300,6 +1307,8 @@ class SkillTool(Tool):
                     "mode": "guide",
                     "skill": spec_name,
                     "backend": "jira_rest_v3",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {"required_env": ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]},
                     "available_actions": [
                         "issue_get",
                         "search",
@@ -1308,6 +1317,11 @@ class SkillTool(Tool):
                         "transition_issue",
                         "comment_add",
                         "request",
+                    ],
+                    "examples": [
+                        {"action": "search", "tool_arguments": {"action": "search", "jql": "project = CORE", "max_results": 20}},
+                        {"action": "issue_get", "tool_arguments": {"action": "issue_get", "issue_key": "CORE-123"}},
+                        {"action": "comment_add", "tool_arguments": {"action": "comment_add", "issue_key": "CORE-123", "text": "Investigating now."}},
                     ],
                 },
                 ensure_ascii=False,
@@ -1516,7 +1530,14 @@ class SkillTool(Tool):
                     "skill": spec_name,
                     "backend": "linear_graphql",
                     "endpoint": endpoint,
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {"required_env": ["LINEAR_API_KEY"]},
                     "available_actions": ["issues_list", "issue_create", "issue_update", "request"],
+                    "examples": [
+                        {"action": "issues_list", "tool_arguments": {"action": "issues_list", "first": 20, "state": "In Progress"}},
+                        {"action": "issue_create", "tool_arguments": {"action": "issue_create", "title": "Fix auth bug", "team_id": "<team_id>"}},
+                        {"action": "request", "tool_arguments": {"action": "request", "query": "query { viewer { id name } }"}},
+                    ],
                 },
                 ensure_ascii=False,
             )
@@ -1707,6 +1728,8 @@ class SkillTool(Tool):
                     "mode": "guide",
                     "skill": spec_name,
                     "backend": "trello_rest_v1",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {"required_env": ["TRELLO_API_KEY", "TRELLO_TOKEN"]},
                     "available_actions": [
                         "boards_list",
                         "board_lists",
@@ -1718,6 +1741,11 @@ class SkillTool(Tool):
                         "card_comment",
                         "card_archive",
                         "request",
+                    ],
+                    "examples": [
+                        {"action": "boards_list", "tool_arguments": {"action": "boards_list", "fields": "id,name,url"}},
+                        {"action": "card_create", "tool_arguments": {"action": "card_create", "list_id": "<list_id>", "name": "Follow up"}},
+                        {"action": "card_move", "tool_arguments": {"action": "card_move", "card_id": "<card_id>", "list_id": "<target_list_id>"}},
                     ],
                 },
                 ensure_ascii=False,
@@ -2053,6 +2081,11 @@ class SkillTool(Tool):
                     "mode": "guide",
                     "skill": spec_name,
                     "backend": "spotify_web_api",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {
+                        "required_env": ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"],
+                        "optional_env": ["SPOTIFY_ACCESS_TOKEN"],
+                    },
                     "available_actions": [
                         "playback_state",
                         "play",
@@ -2066,6 +2099,11 @@ class SkillTool(Tool):
                         "playlist_get",
                         "queue_add",
                         "request",
+                    ],
+                    "examples": [
+                        {"action": "search", "tool_arguments": {"action": "search", "query": "radiohead", "type": "track", "limit": 5}},
+                        {"action": "playback_state", "tool_arguments": {"action": "playback_state"}},
+                        {"action": "queue_add", "tool_arguments": {"action": "queue_add", "uri": "spotify:track:<track_id>"}},
                     ],
                 },
                 ensure_ascii=False,

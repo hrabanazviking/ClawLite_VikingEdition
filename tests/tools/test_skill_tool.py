@@ -1113,6 +1113,9 @@ def test_run_skill_notion_guide_mode_returns_structured_help(tmp_path: Path) -> 
         payload = json.loads(out)
         assert payload["status"] == "ok"
         assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert payload["auth"]["required_env"] == ["NOTION_API_KEY"]
+        assert len(payload["examples"]) >= 2
         assert "search" in payload["available_actions"]
         assert "request" in payload["available_actions"]
 
@@ -1216,6 +1219,9 @@ def test_run_skill_jira_guide_mode_returns_structured_help(tmp_path: Path) -> No
         payload = json.loads(out)
         assert payload["status"] == "ok"
         assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "JIRA_BASE_URL" in payload["auth"]["required_env"]
+        assert len(payload["examples"]) >= 2
         assert "issue_get" in payload["available_actions"]
         assert "request" in payload["available_actions"]
 
@@ -1326,6 +1332,9 @@ def test_run_skill_linear_guide_mode_returns_structured_help(tmp_path: Path) -> 
         payload = json.loads(out)
         assert payload["status"] == "ok"
         assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert payload["auth"]["required_env"] == ["LINEAR_API_KEY"]
+        assert len(payload["examples"]) >= 2
         assert "issues_list" in payload["available_actions"]
         assert "request" in payload["available_actions"]
 
@@ -1427,6 +1436,9 @@ def test_run_skill_trello_guide_mode_returns_structured_help(tmp_path: Path) -> 
         payload = json.loads(out)
         assert payload["status"] == "ok"
         assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "TRELLO_API_KEY" in payload["auth"]["required_env"]
+        assert len(payload["examples"]) >= 2
         assert "boards_list" in payload["available_actions"]
         assert "request" in payload["available_actions"]
 
@@ -1533,6 +1545,10 @@ def test_run_skill_spotify_guide_mode_returns_structured_help(tmp_path: Path) ->
         payload = json.loads(out)
         assert payload["status"] == "ok"
         assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "SPOTIFY_CLIENT_ID" in payload["auth"]["required_env"]
+        assert "SPOTIFY_ACCESS_TOKEN" in payload["auth"]["optional_env"]
+        assert len(payload["examples"]) >= 2
         assert "search" in payload["available_actions"]
         assert "request" in payload["available_actions"]
 
