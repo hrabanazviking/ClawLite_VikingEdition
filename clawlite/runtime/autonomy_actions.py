@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from json import JSONDecodeError
@@ -370,7 +371,7 @@ class AutonomyActionController:
     def _denylisted(cls, action: str) -> bool:
         lowered = str(action or "").strip().lower()
         for token in cls.DENYLIST_TOKENS:
-            if token in lowered:
+            if re.search(r"\b" + re.escape(token) + r"\b", lowered):
                 return True
         return False
 

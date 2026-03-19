@@ -281,13 +281,37 @@ def _join_base(base_url: str, path: str) -> str:
     return f"{base}{suffix}"
 
 
+_PLACEHOLDER_TOKENS = frozenset({
+    "change-me-to-a-long-random-token",
+    "changeme",
+    "change_me",
+    "your-token-here",
+    "secret",
+    "token",
+})
+
+
 def ensure_gateway_token(config: AppConfig) -> str:
     current = str(config.gateway.auth.token or "").strip()
-    if current:
-        return current
-    generated = uuid.uuid4().hex
-    config.gateway.auth.token = generated
-    return generated
+    is_placeholder = (
+        not current
+        or current.lower() in _PLACEHOLDER_TOKENS
+        or len(current) < 16
+    )
+    if is_placeholder:
+        import secrets as _secrets
+        generated = _secrets.token_urlsafe(32)
+        config.gateway.auth.token = generated
+        if current and current.lower() in _PLACEHOLDER_TOKENS:
+            import warnings
+            warnings.warn(
+                f"[ClawLite] Gateway token was set to the placeholder value '{current}'. "
+                "A secure random token has been generated and saved. "
+                "Update your .env or config file to persist the new token.",
+                stacklevel=2,
+            )
+        return generated
+    return current
 
 
 def _dashboard_url_with_token(gateway_url: str, token: str) -> str:

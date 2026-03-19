@@ -39,7 +39,25 @@ from clawlite.utils.logging import bind_event
 MAX_FILES_PER_RUN = 3
 MAX_LINES_DELTA = 200          # total added+removed across changed files
 _SELF_FILE = Path(__file__).resolve()
-_DENYLIST_NAMES = frozenset({"self_evolution.py", "autonomy.py", "gateway", "config"})
+_DENYLIST_NAMES = frozenset({
+    # Self-protection
+    "self_evolution.py",
+    # High-privilege runtime modules
+    "autonomy.py",
+    "autonomy_actions.py",
+    "autonomy_log.py",
+    "supervisor.py",
+    # Entire sensitive directories (matched against path parts)
+    "gateway",
+    "config",
+    "runtime",
+    "providers",
+    # Individual high-risk tool files
+    "exec.py",
+    "files.py",
+    "mcp.py",
+    "spawn.py",
+})
 _GAP_PATTERN = re.compile(
     r"#\s*(TODO|FIXME|HACK|XXX|STUB|NOT IMPLEMENTED|raise NotImplementedError)",
     re.IGNORECASE,
