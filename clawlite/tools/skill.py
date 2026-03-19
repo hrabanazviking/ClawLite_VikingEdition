@@ -927,6 +927,171 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    async def _run_github(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            auth_error = await self._precheck_github_auth(spec_name=spec_name, timeout=timeout, ctx=ctx)
+            if auth_error is not None:
+                return auth_error
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["gh", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = self._gh_value(payload, arguments, "action").lower() or "guide"
+        repo = self._gh_value(payload, arguments, "repo", "repository")
+        number = self._gh_value(payload, arguments, "number", "issue", "pr")
+        state = self._gh_value(payload, arguments, "state")
+        search = self._gh_value(payload, arguments, "search", "query")
+        author = self._gh_value(payload, arguments, "author")
+        assignee = self._gh_value(payload, arguments, "assignee")
+        labels = self._gh_label_values(payload, arguments)
+        wants_comments = self._gh_bool(payload, arguments, "comments", "include_comments")
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "gh",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "available_actions": [
+                        "list_issues",
+                        "list_prs",
+                        "view_issue",
+                        "view_pr",
+                        "pr_checks",
+                        "run_list",
+                        "search_issues",
+                        "search_prs",
+                        "api",
+                    ],
+                    "examples": [
+                        {"action": "list_issues", "tool_arguments": {"action": "list_issues", "repo": "owner/repo", "state": "open", "limit": 20}},
+                        {"action": "list_prs", "tool_arguments": {"action": "list_prs", "repo": "owner/repo", "state": "open", "limit": 20}},
+                        {"action": "api", "tool_arguments": {"action": "api", "path": "repos/owner/repo/pulls", "method": "GET"}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        limit_value = payload.get("limit", arguments.get("limit", 20))
+        limit = max(1, min(200, int(limit_value or 20)))
+
+        argv: list[str]
+        if action == "list_issues":
+            argv = ["gh", "issue", "list"]
+            if repo:
+                argv.extend(["--repo", repo])
+            if state:
+                argv.extend(["--state", state])
+            if search:
+                argv.extend(["--search", search])
+            if assignee:
+                argv.extend(["--assignee", assignee])
+            if labels:
+                argv.extend(["--label", ",".join(labels)])
+            argv.extend(["--limit", str(limit)])
+        elif action == "list_prs":
+            argv = ["gh", "pr", "list"]
+            if repo:
+                argv.extend(["--repo", repo])
+            if state:
+                argv.extend(["--state", state])
+            if search:
+                argv.extend(["--search", search])
+            if author:
+                argv.extend(["--author", author])
+            if labels:
+                argv.extend(["--label", ",".join(labels)])
+            argv.extend(["--limit", str(limit)])
+        elif action == "view_issue":
+            if not number:
+                raise ValueError("number is required for github view_issue")
+            argv = ["gh", "issue", "view", number]
+            if repo:
+                argv.extend(["--repo", repo])
+            if wants_comments:
+                argv.append("--comments")
+        elif action == "view_pr":
+            if not number:
+                raise ValueError("number is required for github view_pr")
+            argv = ["gh", "pr", "view", number]
+            if repo:
+                argv.extend(["--repo", repo])
+            if wants_comments:
+                argv.append("--comments")
+        elif action == "pr_checks":
+            if not number:
+                raise ValueError("number is required for github pr_checks")
+            argv = ["gh", "pr", "checks", number]
+            if repo:
+                argv.extend(["--repo", repo])
+        elif action == "run_list":
+            argv = ["gh", "run", "list", "--limit", str(limit)]
+            if repo:
+                argv.extend(["--repo", repo])
+        elif action == "search_issues":
+            if not search:
+                raise ValueError("query is required for github search_issues")
+            argv = ["gh", "search", "issues", "--limit", str(limit), search]
+            if repo:
+                argv.extend(["--repo", repo])
+            if state:
+                argv.extend(["--state", state])
+        elif action == "search_prs":
+            if not search:
+                raise ValueError("query is required for github search_prs")
+            argv = ["gh", "search", "prs", "--limit", str(limit), search]
+            if repo:
+                argv.extend(["--repo", repo])
+            if state:
+                argv.extend(["--state", state])
+        elif action == "api":
+            path = self._gh_value(payload, arguments, "path")
+            if not path:
+                raise ValueError("path is required for github api")
+            method = self._gh_value(payload, arguments, "method") or "GET"
+            argv = ["gh", "api", path, "--method", method.upper()]
+            if repo:
+                argv.extend(["--repo", repo])
+        else:
+            raise ValueError(
+                "action must be one of: guide, list_issues, list_prs, view_issue, view_pr, pr_checks, run_list, search_issues, search_prs, api"
+            )
+
+        auth_error = await self._precheck_github_auth(
+            spec_name=spec_name,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+        if auth_error is not None:
+            return auth_error
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=argv,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
     @staticmethod
     def _notion_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
         payload = SkillTool._skill_payload(arguments)
@@ -2268,6 +2433,14 @@ class SkillTool(Tool):
             return await self._run_coding_agent(arguments, ctx)
         if script_name == "gh_issues":
             return await self._run_gh_issues(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "github":
+            return await self._run_github(
                 arguments,
                 ctx,
                 spec_name=spec_name,

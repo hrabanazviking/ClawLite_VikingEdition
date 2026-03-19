@@ -636,6 +636,107 @@ def test_run_skill_gh_issues_uses_skill_entry_api_key_for_auth(tmp_path: Path, m
     asyncio.run(_scenario())
 
 
+def test_run_skill_github_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "github"},
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert payload["backend"] == "gh"
+        assert "list_prs" in payload["available_actions"]
+        assert "api" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_list_prs_dispatches_gh_pr_list(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=0\nstdout=ok\nstderr=",
+                    "gh pr list --repo openclaw/openclaw --state open --author bot --label bug,high --limit 25": "exit=0\nstdout=prs ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "github",
+                "tool_arguments": {
+                    "action": "list_prs",
+                    "repo": "openclaw/openclaw",
+                    "state": "open",
+                    "author": "bot",
+                    "labels": ["bug", "high"],
+                    "limit": 25,
+                },
+            },
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=prs ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_api_dispatches_gh_api(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=0\nstdout=ok\nstderr=",
+                    "gh api repos/openclaw/openclaw/pulls --method GET --repo openclaw/openclaw": "exit=0\nstdout=api ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "github",
+                "tool_arguments": {
+                    "action": "api",
+                    "repo": "openclaw/openclaw",
+                    "path": "repos/openclaw/openclaw/pulls",
+                    "method": "GET",
+                },
+            },
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=api ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

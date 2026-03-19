@@ -1268,6 +1268,8 @@ class SkillsLoader:
             return ["tool:sessions_spawn"]
         if script_name == "gh_issues":
             return ["tool:exec"]
+        if script_name == "github":
+            return ["tool:exec"]
         if script_name == "notion":
             return ["env:NOTION_API_KEY"]
         if script_name == "jira":
