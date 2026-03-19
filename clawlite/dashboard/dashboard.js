@@ -27,7 +27,32 @@ const state = {
   eventFeed: [],
   wsPreview: "Waiting for live websocket frames...",
   sessionId: "dashboard:operator",
+  deferredVisible: {},
+  deferredObservers: {},
 };
+
+const automationDeferredSections = [
+  {
+    id: "discord-grid",
+    render: renderDiscordBoard,
+    placeholder: "Discord diagnostics will render when this section enters view.",
+  },
+  {
+    id: "telegram-grid",
+    render: renderTelegramBoard,
+    placeholder: "Telegram diagnostics will render when this section enters view.",
+  },
+  {
+    id: "delivery-grid",
+    render: renderDeliveryBoard,
+    placeholder: "Delivery telemetry will render when this section enters view.",
+  },
+  {
+    id: "supervisor-grid",
+    render: renderSupervisorBoard,
+    placeholder: "Supervisor telemetry will render when this section enters view.",
+  },
+];
 
 function byId(id) {
   return document.getElementById(id);
@@ -392,6 +417,70 @@ function appendSummaryCard(container, item) {
 
   card.append(title, body, detail);
   container.appendChild(card);
+}
+
+function ensureDeferredSummaryPlaceholder(container, text) {
+  if (!container) {
+    return;
+  }
+  if (container.childElementCount > 0) {
+    return;
+  }
+  const card = document.createElement("article");
+  card.className = "summary-card";
+  card.textContent = text;
+  container.appendChild(card);
+}
+
+function ensureDeferredPanelRegistration(section) {
+  const panel = byId(section.id);
+  if (!panel) {
+    return;
+  }
+
+  if (state.deferredVisible[section.id]) {
+    section.render();
+    return;
+  }
+
+  ensureDeferredSummaryPlaceholder(panel, section.placeholder);
+
+  if (!("IntersectionObserver" in window)) {
+    state.deferredVisible[section.id] = true;
+    section.render();
+    return;
+  }
+
+  if (state.deferredObservers[section.id]) {
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) {
+          return;
+        }
+        state.deferredVisible[section.id] = true;
+        section.render();
+        observer.disconnect();
+        state.deferredObservers[section.id] = null;
+      });
+    },
+    {
+      root: null,
+      rootMargin: "0px 0px 120px 0px",
+      threshold: 0.1,
+    },
+  );
+  observer.observe(panel);
+  state.deferredObservers[section.id] = observer;
+}
+
+function renderDeferredAutomationSections() {
+  automationDeferredSections.forEach((section) => {
+    ensureDeferredPanelRegistration(section);
+  });
 }
 
 function renderDeliveryBoard() {
@@ -826,6 +915,8 @@ function renderAutomation() {
   const channelsTone = channels.length && stableCount === channels.length ? "ok" : channels.length ? "warn" : "warn";
   const channelsLabel = channels.length ? `${channels.length} channels | stable ${stableCount}` : "empty";
   setBadge("channels-status", channelsLabel, channelsTone);
+
+  renderDeferredAutomationSections();
 }
 
 function renderTelegramBoard() {
@@ -1237,8 +1328,6 @@ function renderActivePanel() {
   }
   if (tab === "automation") {
     renderAutomation();
-    renderDiscordBoard();
-    renderTelegramBoard();
     return;
   }
   if (tab === "knowledge") {
