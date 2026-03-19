@@ -251,6 +251,41 @@ def test_exec_tool_blocks_internal_network_fetch_in_env_wrapped_python_inline_ru
     asyncio.run(_scenario())
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/env python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "env -i python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "command -- python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "nohup python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "stdbuf -o0 python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "nice -n 5 python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+        "timeout 5 python3 -c \"import requests; requests.get('http://169.254.169.254/latest/meta-data')\"",
+    ],
+)
+def test_exec_tool_blocks_internal_network_fetch_in_transparent_wrapped_inline_runtime(command: str) -> None:
+    tool = ExecTool()
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error == "blocked_by_policy:internal_url:169.254.169.254"
+
+
+def test_exec_tool_blocks_internal_network_fetch_in_env_split_string_direct_fetch() -> None:
+    tool = ExecTool()
+    command = "/usr/bin/env -S \"curl http://169.254.169.254/latest/meta-data\""
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error == "blocked_by_policy:internal_url:169.254.169.254"
+
+
+def test_exec_tool_blocks_internal_network_fetch_in_env_split_string_inline_runtime() -> None:
+    tool = ExecTool()
+    command = (
+        "env -S \"python3 -c \\\"import requests; "
+        "requests.get('http://169.254.169.254/latest/meta-data')\\\"\""
+    )
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error == "blocked_by_policy:internal_url:169.254.169.254"
+
+
 def test_exec_tool_blocks_localhost_network_fetch_in_node_inline_runtime() -> None:
     async def _scenario() -> None:
         out = await ExecTool().run(
@@ -276,6 +311,20 @@ def test_exec_tool_allows_urllib_parse_without_network_call() -> None:
         "python3 -c \"import urllib.parse; "
         "print(urllib.parse.urlparse('http://localhost:8000/health'))\""
     )
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error is None
+
+
+def test_exec_tool_allows_print_only_url_in_transparent_wrapped_inline_runtime() -> None:
+    tool = ExecTool()
+    command = "env -i python3 -c \"print('http://localhost:8000/health')\""
+    guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
+    assert guard_error is None
+
+
+def test_exec_tool_allows_print_only_url_in_env_split_string_runtime() -> None:
+    tool = ExecTool()
+    command = "env -S \"python3 -c \\\"print('http://localhost:8000/health')\\\"\""
     guard_error = tool._guard_command(command, shlex.split(command), Path.cwd().resolve())
     assert guard_error is None
 

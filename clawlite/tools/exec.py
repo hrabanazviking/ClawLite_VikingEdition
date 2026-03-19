@@ -78,7 +78,35 @@ class ExecTool(Tool):
     _NETWORK_FETCH_BINARIES = frozenset({"curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm"})
     _HTTP_URL_RE = re.compile(r"https?://[^\s\"'`;|<>)]+", re.IGNORECASE)
     _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
-    _TRANSPARENT_RUNTIME_WRAPPERS = frozenset({"env", "env.exe", "command"})
+    _TIMEOUT_DURATION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?(?:[smhd]|ms)?$", re.IGNORECASE)
+    _TRANSPARENT_RUNTIME_WRAPPERS = frozenset({"command", "env", "env.exe", "nice", "nohup", "stdbuf", "timeout"})
+    _TRANSPARENT_RUNTIME_WRAPPER_FLAGS: dict[str, dict[str, int]] = {
+        "command": {"--": 0, "-p": 0, "-v": 0, "-V": 0},
+        "env": {
+            "--": 0,
+            "-i": 0,
+            "--ignore-environment": 0,
+            "-u": 1,
+            "--unset": 1,
+            "-c": 1,
+            "--chdir": 1,
+            "-s": 1,
+            "--split-string": 1,
+        },
+        "nice": {"--": 0, "-n": 1, "--adjustment": 1},
+        "nohup": {"--": 0},
+        "stdbuf": {"--": 0, "-i": 1, "-o": 1, "-e": 1},
+        "timeout": {
+            "--": 0,
+            "-k": 1,
+            "--kill-after": 1,
+            "-s": 1,
+            "--signal": 1,
+            "--foreground": 0,
+            "--preserve-status": 0,
+            "--verbose": 0,
+        },
+    }
     _INLINE_RUNTIME_FLAGS: dict[str, frozenset[str]] = {
         "python": frozenset({"-c"}),
         "node": frozenset({"-e", "--eval"}),
@@ -498,42 +526,128 @@ class ExecTool(Tool):
         return bool(token) and cls._ENV_ASSIGNMENT_RE.match(token) is not None
 
     @classmethod
-    def _inline_runtime_payload(cls, argv: list[str]) -> tuple[str, str] | None:
+    def _transparent_runtime_wrapper_name(cls, raw: object) -> str:
+        binary = cls._binary_name(raw)
+        if binary in cls._TRANSPARENT_RUNTIME_WRAPPERS:
+            return "env" if binary == "env.exe" else binary
+        return ""
+
+    @classmethod
+    def _transparent_runtime_wrapper_flag_consumption(cls, wrapper: str, raw: object) -> int | None:
+        token = str(raw or "").strip()
+        lower = token.lower()
+        if not lower:
+            return None
+        spec = cls._TRANSPARENT_RUNTIME_WRAPPER_FLAGS.get(wrapper, {})
+        if lower in spec:
+            return spec[lower]
+        if wrapper == "nice" and lower.startswith("--adjustment="):
+            return 0
+        if wrapper == "stdbuf":
+            if re.match(r"^-[ioe].+$", token, re.IGNORECASE):
+                return 0
+            if lower.startswith("--input=") or lower.startswith("--output=") or lower.startswith("--error="):
+                return 0
+        if wrapper == "env":
+            if lower.startswith("--unset=") or lower.startswith("--chdir="):
+                return 0
+        return None
+
+    @classmethod
+    def _guard_env_split_string_payloads(cls, argv: list[str], *, recursion_depth: int = 0) -> str | None:
+        if recursion_depth >= 4:
+            return None
+        for index, raw in enumerate(argv):
+            if cls._binary_name(raw) != "env":
+                continue
+            pointer = index + 1
+            while pointer < len(argv):
+                token = str(argv[pointer] or "").strip()
+                lower = token.lower()
+                if not token:
+                    pointer += 1
+                    continue
+                if token in cls._SHELL_CONTROL_TOKENS:
+                    break
+                if cls._is_env_assignment(token):
+                    pointer += 1
+                    continue
+                if lower in {"-s", "--split-string"} and pointer + 1 < len(argv):
+                    payload = str(argv[pointer + 1] or "").strip()
+                    if not payload:
+                        break
+                    try:
+                        nested_argv = shlex.split(payload)
+                    except ValueError:
+                        return None
+                    return cls._guard_network_fetch_targets(nested_argv, recursion_depth=recursion_depth + 1)
+                consumption = cls._transparent_runtime_wrapper_flag_consumption("env", token)
+                if consumption is None:
+                    break
+                pointer += 1 + consumption
+        return None
+
+    @classmethod
+    def _resolve_inline_runtime_start(cls, argv: list[str]) -> int | None:
         if not argv:
             return None
-        for start, raw in enumerate(argv):
-            token = str(raw or "").strip()
+        index = 0
+        while index < len(argv):
+            token = str(argv[index] or "").strip()
             if not token:
+                index += 1
                 continue
             if token in cls._SHELL_CONTROL_TOKENS:
-                break
-            if start == 0 and token.lower() in cls._TRANSPARENT_RUNTIME_WRAPPERS:
-                continue
-            if start > 0 and all(
-                str(item or "").strip().lower() in cls._TRANSPARENT_RUNTIME_WRAPPERS or cls._is_env_assignment(item)
-                for item in argv[:start]
-            ):
-                runtime = cls._runtime_family(token)
-            elif start == 0:
-                runtime = cls._runtime_family(token)
-            else:
-                break
-            if not runtime:
-                continue
-            flags = cls._INLINE_RUNTIME_FLAGS.get(runtime, frozenset())
-            if not flags:
                 return None
-            for index, inner_raw in enumerate(argv[start + 1 :], start=start + 1):
-                inner = str(inner_raw or "").strip()
+            if cls._is_env_assignment(token):
+                index += 1
+                continue
+            wrapper = cls._transparent_runtime_wrapper_name(token)
+            if not wrapper:
+                return index
+            index += 1
+            while index < len(argv):
+                inner = str(argv[index] or "").strip()
                 if not inner:
+                    index += 1
                     continue
                 if inner in cls._SHELL_CONTROL_TOKENS:
+                    return None
+                if wrapper == "env" and cls._is_env_assignment(inner):
+                    index += 1
+                    continue
+                consumption = cls._transparent_runtime_wrapper_flag_consumption(wrapper, inner)
+                if consumption is None:
+                    if wrapper == "timeout" and cls._TIMEOUT_DURATION_RE.match(inner) is not None:
+                        index += 1
+                        continue
                     break
-                if inner.lower() in flags and index + 1 < len(argv):
-                    payload = str(argv[index + 1] or "")
-                    return runtime, payload
-                if not inner.startswith("-"):
-                    break
+                index += 1 + consumption
+            continue
+        return None
+
+    @classmethod
+    def _inline_runtime_payload(cls, argv: list[str]) -> tuple[str, str] | None:
+        start = cls._resolve_inline_runtime_start(argv)
+        if start is None or start >= len(argv):
+            return None
+        runtime = cls._runtime_family(argv[start])
+        if not runtime:
+            return None
+        flags = cls._INLINE_RUNTIME_FLAGS.get(runtime, frozenset())
+        if not flags:
+            return None
+        for index, inner_raw in enumerate(argv[start + 1 :], start=start + 1):
+            inner = str(inner_raw or "").strip()
+            if not inner:
+                continue
+            if inner in cls._SHELL_CONTROL_TOKENS:
+                break
+            if inner.lower() in flags and index + 1 < len(argv):
+                payload = str(argv[index + 1] or "")
+                return runtime, payload
+            if not inner.startswith("-"):
+                break
         return None
 
     @classmethod
@@ -552,12 +666,15 @@ class ExecTool(Tool):
         return None
 
     @classmethod
-    def _guard_network_fetch_targets(cls, argv: list[str]) -> str | None:
+    def _guard_network_fetch_targets(cls, argv: list[str], *, recursion_depth: int = 0) -> str | None:
         for binary, tokens in cls._iter_network_fetch_segments(argv):
             for raw_url in cls._iter_network_fetch_target_urls(binary, tokens):
                 error = cls._validate_network_fetch_url(raw_url)
                 if error:
                     return error
+        split_string_error = cls._guard_env_split_string_payloads(argv, recursion_depth=recursion_depth)
+        if split_string_error:
+            return split_string_error
         inline_error = cls._guard_inline_runtime_fetch_targets(argv)
         if inline_error:
             return inline_error
