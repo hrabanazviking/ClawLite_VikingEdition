@@ -102,9 +102,11 @@ class FakeStreamingPromptCaptureProvider:
     def __init__(self, text: str = "ok") -> None:
         self.text = text
         self.snapshots: list[list[dict[str, Any]]] = []
+        self.stream_calls = 0
 
     async def stream(self, *, messages, max_tokens=None, temperature=None):
         del max_tokens, temperature
+        self.stream_calls += 1
         self.snapshots.append(copy.deepcopy(messages))
         if not self.text:
             yield ProviderChunk(text="", accumulated="", done=True)
@@ -178,6 +180,18 @@ class FakeWebToolProvider:
                 model="fake/model",
             )
         return ProviderResult(text="OpenClaw is an autonomous assistant stack.", tool_calls=[], model="fake/model")
+
+
+class FakeStreamingWebToolProvider(FakeWebToolProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_calls = 0
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        self.stream_calls += 1
+        yield ProviderChunk(text="st", accumulated="st", done=False)
+        yield ProviderChunk(text="ream", accumulated="stream", done=True)
 
 
 class FakeWebSearchTools:
@@ -2020,6 +2034,7 @@ def test_engine_stream_run_uses_shaped_prompt_memory_history_and_runtime_context
         ]
 
         assert "".join(chunk.text for chunk in chunks) == "ok"
+        assert provider.stream_calls == 1
         snapshot = provider.snapshots[0]
         memory_sections = [row for row in snapshot if row.get("role") == "system" and "[Memory]" in str(row.get("content", ""))]
         assert memory_sections
@@ -2056,6 +2071,60 @@ def test_engine_stream_run_persists_user_and_assistant_messages_after_completion
         ]
 
     asyncio.run(_scenario())
+
+
+def test_engine_stream_run_falls_back_to_full_run_for_live_lookup_turns() -> None:
+    async def _scenario() -> None:
+        provider = FakeStreamingWebToolProvider()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeWebSearchTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+        )
+
+        chunks = [
+            chunk
+            async for chunk in await engine.stream_run(
+                session_id="cli:stream",
+                user_text="Pesquise na internet sobre OpenClaw",
+            )
+        ]
+
+        final_text = "".join(chunk.text for chunk in chunks)
+        assert final_text.startswith("OpenClaw is an autonomous assistant stack.")
+        assert "Sources:" in final_text
+        assert provider.stream_calls == 0
+        assert provider.calls == 2
+        assert chunks == [
+            ProviderChunk(
+                text=final_text,
+                accumulated=final_text,
+                done=True,
+            )
+        ]
+        assert sessions.rows == [
+            {"session_id": "cli:stream", "role": "user", "content": "Pesquise na internet sobre OpenClaw"},
+            {
+                "session_id": "cli:stream",
+                "role": "assistant",
+                "content": final_text,
+            },
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_requires_full_run_only_for_live_lookup_turns() -> None:
+    assert AgentEngine._stream_requires_full_run(
+        user_text="Qual a temperatura em Suzano, SP?",
+        live_lookup_required=True,
+    )
+    assert not AgentEngine._stream_requires_full_run(
+        user_text="Resume isso em 3 linhas",
+        live_lookup_required=False,
+    )
 
 
 def test_engine_formats_memory_snippets_with_ref_and_source_marker() -> None:

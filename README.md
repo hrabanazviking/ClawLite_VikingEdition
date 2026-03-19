@@ -134,6 +134,7 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - `browser.navigate` keeps an explicit “external page content” prefix, and prompt guidance now treats browser page reads plus browser evaluations as untrusted external data without breaking the raw `browser.evaluate` return contract for callers that need exact values.
 - Inbound channel turns now pass a compact allowlisted subset of runtime metadata into the prompt as untrusted context, including safe structural hints like message/thread ids, DM/forum state, Slack thread timestamps, signed callback/button ids, and media markers without ingesting raw webhook payloads.
 - Inbound channel text now also normalizes real newlines and neutralizes obvious spoof markers like `[System Message]` or leading `System:` before that text reaches the agent loop.
+- `stream_run()` now falls back to the full agent loop for live lookup turns, so streaming no longer takes a text-only shortcut when the answer should be verified with web/weather capability.
 - Approval-gated tool calls now surface interactive approve/reject controls in Telegram and Discord, backed by temporary request-bound grants so the operator can approve and then retry only that reviewed call safely.
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`. Approval snapshots now include structured context such as exec binary/env keys/cwd and browser or web host targets.
 - Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks, with optional `--status` / `--source` / `--query` filters for operator triage.
@@ -260,7 +261,7 @@ Hybrid BM25 + vector search · FTS5 full-text · temporal decay + salience scori
 Heartbeat supervisor · persistent cron engine · autonomy wake coordinator · dead-letter queue + replay · background job queue (priority, retry, SQLite) · context window budget trimming · loop detection with bus events · bounded subagent orchestration (depth guard, retry budgets, zombie cleanup)
 
 **🌊 Streaming**
-`engine.stream_run()` async generator · `ProviderChunk` (delta/accumulated/done) · same base prompt shaping as `run()` for memory/history/runtime context · edit-in-place streaming on Telegram and Discord
+`engine.stream_run()` async generator · `ProviderChunk` (delta/accumulated/done) · same base prompt shaping as `run()` for memory/history/runtime context · falls back to the full `run()` loop on live-lookup turns instead of staying text-only · edit-in-place streaming on Telegram and Discord
 
 **🖥️ Operator Dashboard** — `http://localhost:8787`
 Live chat · sessions view · automation controls (cron, recovery, channels) · memory health · tools catalog · WebSocket frame preview
@@ -448,7 +449,7 @@ ClawLite has four main layers:
 
 **2. FastAPI Gateway** (`:8787`) — HTTP + WebSocket server, operator dashboard, auth, and channel dispatch. Single entry point for all traffic.
 
-**3. Agent Engine** — the core loop. On each turn it builds a prompt from memory + identity + workspace files, calls tools as needed, and streams tokens from LiteLLM (20+ providers). `run()` and `stream_run()` now share the same base prompt shaping for memory, history, and runtime context. Loop detection, context window budgeting, and subagent orchestration all live here.
+**3. Agent Engine** — the core loop. On each turn it builds a prompt from memory + identity + workspace files, calls tools as needed, and streams tokens from LiteLLM (20+ providers). `run()` and `stream_run()` now share the same base prompt shaping for memory, history, and runtime context, and `stream_run()` falls back to the full `run()` loop on live-lookup turns so current-data answers do not stay on a text-only path. Loop detection, context window budgeting, and subagent orchestration all live here.
 
 **4. Supporting layers** always running in the background:
 - **Memory** — hybrid BM25 + vector search, FTS5, temporal decay, SQLite or pgvector

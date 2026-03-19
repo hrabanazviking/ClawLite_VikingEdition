@@ -2704,6 +2704,18 @@ class AgentEngine:
         return cls._WEB_RESEARCH_SYSTEM_NOTICE
 
     @classmethod
+    def _stream_requires_full_run(
+        cls,
+        *,
+        user_text: str,
+        live_lookup_required: bool,
+    ) -> bool:
+        compact = " ".join(str(user_text or "").split()).strip()
+        if not compact:
+            return False
+        return live_lookup_required
+
+    @classmethod
     def _routing_notice_for_turn(
         cls,
         *,
@@ -2872,6 +2884,19 @@ class AgentEngine:
                 run_log=run_log,
                 include_tool_guidance=False,
             )
+            if self._stream_requires_full_run(
+                user_text=user_text,
+                live_lookup_required=prepared.live_lookup_required,
+            ):
+                result = await self.run(
+                    session_id=session_id,
+                    user_text=user_text,
+                    channel=channel,
+                    chat_id=chat_id,
+                    runtime_metadata=runtime_metadata,
+                )
+                yield ProviderChunk(text=result.text, accumulated=result.text, done=True)
+                return
             messages = list(prepared.messages)
             _cwm_budget = getattr(self, "_context_budget_chars", 0)
             if _cwm_budget > 0:
