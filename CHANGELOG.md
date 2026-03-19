@@ -55,9 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - deferred post-turn working-memory writes now move sync memory-store I/O off the event loop, so one session's background flush does not stall unrelated sessions
 - `stream_run()` now also falls back to the full `run()` loop for explicit `web_search` / `web-search` routing requests instead of staying on a raw provider stream when the operator already asked for a live search path
 - OpenAI-compatible provider streaming now advertises pre-text tool-call turns back to the engine, so `stream_run()` can fall back to the full tool loop before emitting visible text instead of getting stuck on a text-only stream path
+- whitespace-only prelude chunks no longer count as visible text for streamed tool-call reroutes, so both the engine and OpenAI-compatible provider streaming still escalate into the full tool loop when a provider emits blank content just before `tool_calls`
 - when a gateway token is configured, the broader control-plane surface now requires it even on loopback, including `status`, dashboard state, chat, cron/control mutations, approvals/grants, and gateway WebSocket chat, while root/assets/health stay open unless separately protected
 - authenticated dashboard state now redacts raw handoff secrets, keeping only `gateway_url` and a masked token preview instead of echoing `gateway_token` or tokenized dashboard URLs back through the runtime API
-- the packaged dashboard now keeps its gateway token only in `sessionStorage` for the current browser tab, clears any legacy `localStorage` copy on load/clear, and defaults live chat to a per-tab `dashboard:operator:<id>` session instead of a shared browser-wide operator route
+- the packaged dashboard now treats `#token=` as a one-time bootstrap input: it exchanges the raw gateway token for a scoped dashboard-session credential, clears any legacy raw token copy on load/clear, keeps only that derived credential in the current tab, accepts it only on dashboard-scoped `/api/*`, `/v1/control/*`, and `WS /ws` surfaces instead of generic `/v1/*` routes, and defaults live chat to a per-tab `dashboard:operator:<id>` session instead of a shared browser-wide operator route
 
 ## [v0.7.0-beta.0] - 2026-03-17
 
