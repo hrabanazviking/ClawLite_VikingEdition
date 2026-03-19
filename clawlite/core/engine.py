@@ -3044,15 +3044,62 @@ class AgentEngine:
                             run_log.warning("context_window_trim_failed error={}", exc)
                     accumulated = ""
                     completed = False
+                    cancelled = False
                     final_error = ""
                     stream_iter = stream_fn(messages=messages)
                     try:
                         while True:
-                            try:
-                                chunk = await anext(stream_iter)
-                            except StopAsyncIteration:
-                                completed = True
+                            if self._stop_requested(session_id=session_id, stop_event=None):
+                                cancelled = True
+                                await queue.put(
+                                    (
+                                        "chunk",
+                                        ProviderChunk(
+                                            text="",
+                                            accumulated=accumulated,
+                                            done=True,
+                                            error="engine_stop_requested",
+                                        ),
+                                    )
+                                )
                                 break
+                            next_chunk_task = asyncio.create_task(anext(stream_iter))
+                            chunk: ProviderChunk | None = None
+                            try:
+                                while True:
+                                    done, _ = await asyncio.wait({next_chunk_task}, timeout=0.05)
+                                    if next_chunk_task in done:
+                                        try:
+                                            chunk = next_chunk_task.result()
+                                        except StopAsyncIteration:
+                                            completed = True
+                                        break
+                                    if self._stop_requested(session_id=session_id, stop_event=None):
+                                        cancelled = True
+                                        next_chunk_task.cancel()
+                                        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                                            await next_chunk_task
+                                        await queue.put(
+                                            (
+                                                "chunk",
+                                                ProviderChunk(
+                                                    text="",
+                                                    accumulated=accumulated,
+                                                    done=True,
+                                                    error="engine_stop_requested",
+                                                ),
+                                            )
+                                        )
+                                        break
+                            finally:
+                                if not next_chunk_task.done():
+                                    next_chunk_task.cancel()
+                                    with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                                        await next_chunk_task
+                            if cancelled or completed:
+                                break
+                            if chunk is None:
+                                continue
                             accumulated = chunk.accumulated or (accumulated + chunk.text)
                             if chunk.error:
                                 final_error = str(chunk.error)
@@ -3066,7 +3113,7 @@ class AgentEngine:
                             with contextlib.suppress(Exception):
                                 await aclose()
 
-                    if completed:
+                    if completed and not cancelled:
                         if final_error:
                             run_log.info(
                                 "stream completion skipped assistant persistence after provider failure session={} error={}",
@@ -3084,6 +3131,9 @@ class AgentEngine:
                                 allow_memory_write=prepared.allow_memory_write,
                                 run_log=run_log,
                             )
+                    elif cancelled:
+                        run_log.info("stream cancelled before completion session={}", session_id or "-")
+                        self._append_session_message(session_id, "user", user_text)
                 except Exception as exc:
                     await queue.put(("error", exc))
                 finally:

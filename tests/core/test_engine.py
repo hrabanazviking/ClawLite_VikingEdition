@@ -157,6 +157,22 @@ class LockTrackingStreamingProvider:
             self.active -= 1
 
 
+class StoppableStreamingProvider:
+    def __init__(self) -> None:
+        self.closed = False
+        self.yielded_second = False
+
+    async def stream(self, *, messages, max_tokens=None, temperature=None):
+        del messages, max_tokens, temperature
+        try:
+            yield ProviderChunk(text="o", accumulated="o", done=False)
+            await asyncio.sleep(0.05)
+            self.yielded_second = True
+            yield ProviderChunk(text="k", accumulated="ok", done=True)
+        finally:
+            self.closed = True
+
+
 class FakeFixedTextProvider:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -2378,6 +2394,40 @@ def test_engine_stream_run_serializes_same_session_streams_with_lock() -> None:
         assert first == "ok"
         assert second == "ok"
         assert provider.max_active == 1
+
+    asyncio.run(_scenario())
+
+
+def test_engine_stream_run_stops_mid_stream_and_skips_assistant_persistence() -> None:
+    async def _scenario() -> None:
+        provider = StoppableStreamingProvider()
+        memory = FakeMemoryWithAsyncMemorize()
+        sessions = SessionStoreRecorder()
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=memory,
+        )
+
+        chunks: list[ProviderChunk] = []
+        async for chunk in await engine.stream_run(session_id="cli:stream-stop", user_text="ping"):
+            chunks.append(chunk)
+            if len(chunks) == 1:
+                assert engine.request_stop("cli:stream-stop") is True
+
+        assert chunks == [
+            ProviderChunk(text="o", accumulated="o", done=False),
+            ProviderChunk(text="", accumulated="o", done=True, error="engine_stop_requested"),
+        ]
+        assert provider.closed is True
+        assert provider.yielded_second is False
+        assert sessions.rows == [
+            {"session_id": "cli:stream-stop", "role": "user", "content": "ping"},
+        ]
+        assert memory.memorize_calls == []
+        assert memory.consolidate_calls == 0
+        assert engine._stop_requested(session_id="cli:stream-stop", stop_event=None) is False
 
     asyncio.run(_scenario())
 
