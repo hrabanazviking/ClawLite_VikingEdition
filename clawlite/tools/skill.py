@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import inspect
 import json
@@ -1190,6 +1191,424 @@ class SkillTool(Tool):
 
         raise ValueError("action must be one of: guide, search, page_get, page_create, page_update, database_query, blocks_children, blocks_append, request")
 
+    @staticmethod
+    def _jira_auth(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> tuple[str, str, str]:
+        payload = SkillTool._skill_payload(arguments)
+
+        def _pick(*keys: str) -> str:
+            for key in keys:
+                value = str(payload.get(key, arguments.get(key, "")) or "").strip()
+                if value:
+                    return value
+            if env_overrides:
+                for key in keys:
+                    value = str(env_overrides.get(key.upper(), "") or "").strip()
+                    if value:
+                        return value
+            for key in keys:
+                value = str(os.getenv(key.upper(), "") or "").strip()
+                if value:
+                    return value
+            return ""
+
+        base_url = _pick("jira_base_url", "base_url")
+        email = _pick("jira_email", "email")
+        token = _pick("jira_api_token", "api_token", "token")
+        if not base_url or not email or not token:
+            raise RuntimeError("jira_auth_missing")
+        return base_url.rstrip("/"), email, token
+
+    async def _jira_request(
+        self,
+        *,
+        method: str,
+        base_url: str,
+        email: str,
+        token: str,
+        path: str,
+        payload: dict[str, Any],
+        timeout: float,
+        spec_name: str,
+    ) -> str:
+        clean_method = str(method or "").strip().upper()
+        if clean_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise ValueError("jira_invalid_method")
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            raise ValueError("jira_path_required")
+        if not clean_path.startswith("/"):
+            clean_path = f"/{clean_path}"
+
+        creds = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
+        headers = {
+            "Authorization": f"Basic {creds}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        url = f"{base_url}/rest/api/3{clean_path}"
+
+        try:
+            async with httpx.AsyncClient(timeout=max(5.0, min(timeout, 60.0))) as client:
+                if clean_method == "GET":
+                    response = await client.get(url, headers=headers, params=payload or None)
+                else:
+                    response = await client.request(clean_method, url, headers=headers, json=payload or None)
+        except httpx.HTTPError as exc:
+            return f"skill_blocked:{spec_name}:jira_request_failed:{exc.__class__.__name__.lower()}"
+
+        try:
+            decoded = response.json()
+        except ValueError:
+            decoded = {
+                "status_code": int(response.status_code),
+                "text": str(response.text or "").strip(),
+            }
+
+        if int(response.status_code) >= 400:
+            detail = "jira_http_error"
+            if isinstance(decoded, dict):
+                messages = decoded.get("errorMessages")
+                if isinstance(messages, list) and messages:
+                    detail = str(messages[0] or detail)
+                else:
+                    detail = str(decoded.get("message", detail) or detail)
+            return f"skill_blocked:{spec_name}:jira_http_error:{response.status_code}:{detail}"
+        return json.dumps(decoded, ensure_ascii=False)
+
+    async def _run_jira(
+        self,
+        arguments: dict[str, Any],
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        def _data() -> dict[str, Any]:
+            for key in ("data", "body", "payload"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    return dict(value)
+            return {}
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "jira_rest_v3",
+                    "available_actions": [
+                        "issue_get",
+                        "search",
+                        "issue_create",
+                        "transition_list",
+                        "transition_issue",
+                        "comment_add",
+                        "request",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            base_url, email, token = self._jira_auth(arguments, env_overrides=env_overrides)
+        except RuntimeError as exc:
+            return f"skill_blocked:{spec_name}:{str(exc)}"
+
+        issue_key = str(payload.get("issue_key", payload.get("issueKey", arguments.get("issue_key", ""))) or "").strip()
+
+        if action == "issue_get":
+            if not issue_key:
+                raise ValueError("issue_key is required for jira issue_get")
+            return await self._jira_request(
+                method="GET",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path=f"/issue/{issue_key}",
+                payload={},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "search":
+            query = str(payload.get("jql", arguments.get("jql", "")) or "").strip()
+            if not query:
+                raise ValueError("jql is required for jira search")
+            max_results = int(payload.get("max_results", payload.get("maxResults", arguments.get("max_results", 20))) or 20)
+            return await self._jira_request(
+                method="GET",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path="/search",
+                payload={"jql": query, "maxResults": max(1, min(max_results, 200))},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "issue_create":
+            create_payload = _data()
+            if not create_payload:
+                raise ValueError("data is required for jira issue_create")
+            return await self._jira_request(
+                method="POST",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path="/issue",
+                payload=create_payload,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "transition_list":
+            if not issue_key:
+                raise ValueError("issue_key is required for jira transition_list")
+            return await self._jira_request(
+                method="GET",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path=f"/issue/{issue_key}/transitions",
+                payload={},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "transition_issue":
+            if not issue_key:
+                raise ValueError("issue_key is required for jira transition_issue")
+            transition_id = str(payload.get("transition_id", payload.get("transitionId", arguments.get("transition_id", ""))) or "").strip()
+            transition_payload = _data()
+            if transition_id:
+                transition_payload["transition"] = {"id": transition_id}
+            if not transition_payload:
+                raise ValueError("transition_id or data is required for jira transition_issue")
+            return await self._jira_request(
+                method="POST",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path=f"/issue/{issue_key}/transitions",
+                payload=transition_payload,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "comment_add":
+            if not issue_key:
+                raise ValueError("issue_key is required for jira comment_add")
+            comment_payload = _data()
+            if not comment_payload:
+                text = str(payload.get("text", arguments.get("text", "")) or "").strip()
+                if not text:
+                    raise ValueError("text or data is required for jira comment_add")
+                comment_payload = {
+                    "body": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
+                    }
+                }
+            return await self._jira_request(
+                method="POST",
+                base_url=base_url,
+                email=email,
+                token=token,
+                path=f"/issue/{issue_key}/comment",
+                payload=comment_payload,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "request":
+            method = str(payload.get("method", arguments.get("method", "GET")) or "GET").strip().upper()
+            path = str(payload.get("path", arguments.get("path", "")) or "").strip()
+            return await self._jira_request(
+                method=method,
+                base_url=base_url,
+                email=email,
+                token=token,
+                path=path,
+                payload=_data(),
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        raise ValueError("action must be one of: guide, issue_get, search, issue_create, transition_list, transition_issue, comment_add, request")
+
+    @staticmethod
+    def _linear_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
+        payload = SkillTool._skill_payload(arguments)
+        for key in ("token", "api_key", "linear_api_key", "linearApiKey"):
+            text = str(payload.get(key, arguments.get(key, "")) or "").strip()
+            if text:
+                return text
+        if env_overrides:
+            text = str(env_overrides.get("LINEAR_API_KEY", "") or "").strip()
+            if text:
+                return text
+        text = str(os.getenv("LINEAR_API_KEY", "") or "").strip()
+        if text:
+            return text
+        raise RuntimeError("linear_auth_missing")
+
+    async def _linear_request(
+        self,
+        *,
+        endpoint: str,
+        token: str,
+        query: str,
+        variables: dict[str, Any],
+        timeout: float,
+        spec_name: str,
+    ) -> str:
+        if not query.strip():
+            raise ValueError("linear_query_required")
+        headers = {
+            "Authorization": token,
+            "Content-Type": "application/json",
+        }
+        payload = {"query": query, "variables": variables or {}}
+        try:
+            async with httpx.AsyncClient(timeout=max(5.0, min(timeout, 60.0))) as client:
+                response = await client.post(endpoint, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            return f"skill_blocked:{spec_name}:linear_request_failed:{exc.__class__.__name__.lower()}"
+
+        try:
+            decoded = response.json()
+        except ValueError:
+            decoded = {"status_code": int(response.status_code), "text": str(response.text or "").strip()}
+        if int(response.status_code) >= 400:
+            return f"skill_blocked:{spec_name}:linear_http_error:{response.status_code}"
+        if isinstance(decoded, dict) and decoded.get("errors"):
+            first = decoded.get("errors")
+            detail = "linear_graphql_error"
+            if isinstance(first, list) and first:
+                first_item = first[0]
+                if isinstance(first_item, dict):
+                    detail = str(first_item.get("message", detail) or detail)
+            return f"skill_blocked:{spec_name}:linear_graphql_error:{detail}"
+        return json.dumps(decoded, ensure_ascii=False)
+
+    async def _run_linear(
+        self,
+        arguments: dict[str, Any],
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        endpoint = str(payload.get("endpoint", arguments.get("endpoint", "https://api.linear.app/graphql")) or "https://api.linear.app/graphql").strip()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "linear_graphql",
+                    "endpoint": endpoint,
+                    "available_actions": ["issues_list", "issue_create", "issue_update", "request"],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            token = self._linear_token(arguments, env_overrides=env_overrides)
+        except RuntimeError as exc:
+            return f"skill_blocked:{spec_name}:{str(exc)}"
+
+        if action == "issues_list":
+            first = int(payload.get("first", arguments.get("first", 20)) or 20)
+            state_name = str(payload.get("state", arguments.get("state", "")) or "").strip()
+            query = (
+                "query IssuesList($first: Int!, $state: String) { "
+                "issues(first: $first, filter: { state: { name: { eq: $state } } }) { "
+                "nodes { id identifier title priority state { name } assignee { name } } } }"
+            )
+            variables: dict[str, Any] = {"first": max(1, min(first, 100)), "state": state_name or None}
+            if not state_name:
+                query = (
+                    "query IssuesList($first: Int!) { "
+                    "issues(first: $first) { nodes { id identifier title priority state { name } assignee { name } } } }"
+                )
+                variables = {"first": max(1, min(first, 100))}
+            return await self._linear_request(
+                endpoint=endpoint,
+                token=token,
+                query=query,
+                variables=variables,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "issue_create":
+            title = str(payload.get("title", arguments.get("title", "")) or "").strip()
+            team_id = str(payload.get("team_id", payload.get("teamId", arguments.get("team_id", ""))) or "").strip()
+            if not title or not team_id:
+                raise ValueError("title and team_id are required for linear issue_create")
+            query = (
+                "mutation IssueCreate($title: String!, $teamId: String!, $description: String, $priority: Float) { "
+                "issueCreate(input: { title: $title, teamId: $teamId, description: $description, priority: $priority }) "
+                "{ issue { id identifier url } } }"
+            )
+            variables = {
+                "title": title,
+                "teamId": team_id,
+                "description": str(payload.get("description", arguments.get("description", "")) or "").strip() or None,
+                "priority": payload.get("priority", arguments.get("priority")),
+            }
+            return await self._linear_request(
+                endpoint=endpoint,
+                token=token,
+                query=query,
+                variables=variables,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "issue_update":
+            issue_id = str(payload.get("issue_id", payload.get("issueId", arguments.get("issue_id", ""))) or "").strip()
+            update_input = payload.get("input")
+            if not issue_id or not isinstance(update_input, dict) or not update_input:
+                raise ValueError("issue_id and input are required for linear issue_update")
+            query = (
+                "mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) { "
+                "issueUpdate(id: $id, input: $input) { issue { id identifier title state { name } } } }"
+            )
+            return await self._linear_request(
+                endpoint=endpoint,
+                token=token,
+                query=query,
+                variables={"id": issue_id, "input": dict(update_input)},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "request":
+            query = str(payload.get("query", arguments.get("query", "")) or "").strip()
+            variables = payload.get("variables")
+            if not isinstance(variables, dict):
+                variables = {}
+            return await self._linear_request(
+                endpoint=endpoint,
+                token=token,
+                query=query,
+                variables=variables,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        raise ValueError("action must be one of: guide, issues_list, issue_create, issue_update, request")
+
     async def _dispatch_script(
         self,
         script_name: str,
@@ -1221,6 +1640,20 @@ class SkillTool(Tool):
             )
         if script_name == "notion":
             return await self._run_notion(
+                arguments,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides,
+            )
+        if script_name == "jira":
+            return await self._run_jira(
+                arguments,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides,
+            )
+        if script_name == "linear":
+            return await self._run_linear(
                 arguments,
                 spec_name=spec_name,
                 timeout=self._timeout_value(arguments),

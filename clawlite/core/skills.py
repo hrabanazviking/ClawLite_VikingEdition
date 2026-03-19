@@ -1270,6 +1270,10 @@ class SkillsLoader:
             return ["tool:exec"]
         if script_name == "notion":
             return ["env:NOTION_API_KEY"]
+        if script_name == "jira":
+            return ["env:JIRA_BASE_URL", "env:JIRA_EMAIL", "env:JIRA_API_TOKEN"]
+        if script_name == "linear":
+            return ["env:LINEAR_API_KEY"]
         if script_name == "summarize":
             return ["provider", "tool:web_fetch|read|read_file"]
         return []

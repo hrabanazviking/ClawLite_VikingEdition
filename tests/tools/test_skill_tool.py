@@ -1197,3 +1197,214 @@ def test_run_skill_notion_blocks_without_auth(monkeypatch, tmp_path: Path) -> No
         assert out == "skill_blocked:notion:notion_auth_missing"
 
     asyncio.run(_scenario())
+
+
+def test_run_skill_jira_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "jira", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "issue_get" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_jira_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_jira_request(self, *, method, base_url, email, token, path, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "base_url": base_url,
+                "email": email,
+                "token": token,
+                "path": path,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "issues": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("JIRA_BASE_URL", "https://acme.atlassian.net")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira-secret")
+        monkeypatch.setattr(SkillTool, "_jira_request", _fake_jira_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "jira",
+                "tool_arguments": {
+                    "action": "search",
+                    "jql": "project = CORE",
+                    "max_results": 15,
+                },
+            },
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "GET",
+                "base_url": "https://acme.atlassian.net",
+                "email": "bot@example.com",
+                "token": "jira-secret",
+                "path": "/search",
+                "payload": {"jql": "project = CORE", "maxResults": 15},
+                "spec_name": "jira",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_jira_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+        monkeypatch.delenv("JIRA_EMAIL", raising=False)
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "jira",
+                "tool_arguments": {
+                    "action": "search",
+                    "jql": "project = CORE",
+                },
+            },
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:jira:jira_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "linear", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "issues_list" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_request_dispatches_graphql(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_linear_request(self, *, endpoint, token, query, variables, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "endpoint": endpoint,
+                "token": token,
+                "query": query,
+                "variables": variables,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"data": {"viewer": {"id": "u1"}}})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("LINEAR_API_KEY", "linear-secret")
+        monkeypatch.setattr(SkillTool, "_linear_request", _fake_linear_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "linear",
+                "tool_arguments": {
+                    "action": "request",
+                    "query": "query { viewer { id } }",
+                    "variables": {"team": "core"},
+                },
+            },
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["data"]["viewer"]["id"] == "u1"
+        assert calls == [
+            {
+                "endpoint": "https://api.linear.app/graphql",
+                "token": "linear-secret",
+                "query": "query { viewer { id } }",
+                "variables": {"team": "core"},
+                "spec_name": "linear",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "linear",
+                "tool_arguments": {
+                    "action": "issues_list",
+                },
+            },
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:linear:linear_auth_missing"
+
+    asyncio.run(_scenario())
