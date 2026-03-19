@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🦊 ClawLite
+[(ClawLite - Viking Edition)[](https://github.com/hrabanazviking/ClawLite_VikingEdition/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg)
+
+# ClawLite - Viking Edition
 
 **A local-first Python autonomous agent — persistent memory, 20+ LLM providers,<br>real chat channels, and a 24/7 self-healing runtime. No cloud required.**
 
