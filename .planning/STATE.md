@@ -2,14 +2,14 @@
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-16)
+See: `.planning/PROJECT.md` (updated 2026-03-16)
 
-**Core value:** Um agente AI que funciona de verdade em qualquer ambiente Python — incluindo mobile/Termux — sem dependências que compilem código nativo.
-**Current focus:** Phase 8 — Bugs Críticos (memory leak, shell=True, setup_logging)
+**Core value:** An AI agent that genuinely works in any Python environment — including mobile/Termux — without dependencies that need native compilation.
+**Current focus:** Phase 8 — Critical Bugs (`memory leak`, `shell=True`, `setup_logging`)
 
 ## Current Position
 
-Phase: 8 of 17 (Bugs Críticos)
+Phase: 8 of 17 (Critical Bugs)
 Plan: — (not yet planned)
 Status: Ready to plan
 Last activity: 2026-03-16 — Roadmap v0.6 created (Phases 8-17)
@@ -32,27 +32,27 @@ Progress: [░░░░░░░░░░] 0% (v0.6)
 
 ## Accumulated Context
 
-### Known Issues (from v0.5 audit)
-- `_session_locks` em `core/engine.py:324` — cresce indefinidamente, sem cleanup (Phase 8)
-- `setup_logging()` no module level em `core/engine.py:21` — efeito colateral no import (Phase 8)
-- `shell=True` em `runtime/multiagent.py` — injeção de comando CRÍTICO (Phase 8)
-- `MCPTool` só suporta HTTP POST — sem stdio/SSE (Phase 11)
-- Health checks em tools sempre retornam `ok=True` (Phase 12)
-- Circuit breaker não roteia para failover automaticamente (Phase 9)
-- Sem rate limiting no gateway `/api/message` (Phase 12)
-- Stub channels Signal/Matrix/IRC nunca implementados (Phase 13)
+### Known Issues (from the v0.5 audit)
+- `_session_locks` in `core/engine.py:324` — grows indefinitely, with no cleanup (Phase 8)
+- `setup_logging()` at module level in `core/engine.py:21` — import side effect (Phase 8)
+- `shell=True` in `runtime/multiagent.py` — CRITICAL command injection risk (Phase 8)
+- `MCPTool` only supports HTTP POST — no stdio/SSE support yet (Phase 11)
+- Health checks for tools always return `ok=True` (Phase 12)
+- Circuit breaker does not automatically route to failover (Phase 9)
+- No rate limiting on the gateway `/api/message` route (Phase 12)
+- Signal/Matrix/IRC stub channels have never been implemented (Phase 13)
 
 ### Architecture Decisions Locked
-- Pydantic v1.10.21 — não atualizar (Termux constraint)
-- `--only-binary=:all:` em todos os pip install
-- `_patch_db()` obrigatório em testes com gateway + multiagent
-- Nunca `shell=True` em código novo
+- Pydantic v1.10.21 — do not upgrade (Termux constraint)
+- `--only-binary=:all:` on every `pip install`
+- `_patch_db()` is mandatory in tests involving gateway + multiagent
+- Never use `shell=True` in new code
 
 ### Blockers/Concerns
-- Phase 13 (Signal) pode exigir wheel binária — verificar disponibilidade no Termux antes de iniciar
+- Phase 13 (Signal) may require a binary wheel — verify Termux availability before starting
 
 ## Session Continuity
 
 Last session: 2026-03-16
-Stopped at: Roadmap v0.6 criado — aguardando `/gsd:plan-phase 8`
+Stopped at: Roadmap v0.6 created — awaiting `/gsd:plan-phase 8`
 Resume file: None

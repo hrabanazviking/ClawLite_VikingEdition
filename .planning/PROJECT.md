@@ -2,11 +2,11 @@
 
 ## What This Is
 
-ClawLite é um agente AI portátil e autônomo em Python, projetado para rodar em ambientes com restrições (Android/Termux via PRoot-Distro, aarch64). Oferece gateway FastAPI, sistema de memória multicamada, tools extensíveis, suporte a múltiplos providers LLM e canais de mensagens (Telegram, Discord, etc.), com self-evolution engine único no ecossistema.
+ClawLite is a portable, autonomous AI agent written in Python and designed to run in constrained environments such as Android/Termux through PRoot-Distro on aarch64. It provides a FastAPI gateway, a multi-layer memory system, extensible tools, support for multiple LLM providers, and messaging channels such as Telegram and Discord, along with a self-evolution engine that remains unusual in this ecosystem.
 
 ## Core Value
 
-Um agente AI que funciona de verdade em qualquer ambiente Python — incluindo mobile/Termux — sem dependências que compilem código nativo.
+An AI agent that genuinely works in any Python environment — including mobile/Termux — without dependencies that need native compilation.
 
 ## Requirements
 
@@ -14,66 +14,66 @@ Um agente AI que funciona de verdade em qualquer ambiente Python — incluindo m
 
 <!-- Shipped and confirmed valuable. -->
 
-- ✓ Gateway FastAPI + WebSocket com dashboard — v0.5
-- ✓ Sistema de memória multicamada (episódica, semântica, working, shared) — v0.5
-- ✓ 18 tools com registry e validação de schema — v0.5
-- ✓ 14+ providers LLM via LiteLLM com circuit breaker — v0.5
-- ✓ Canais: Telegram (completo), Discord, Slack, Email, WhatsApp — v0.5
-- ✓ Cron/Heartbeat/Jobs com persistência — v0.5
+- ✓ FastAPI gateway + WebSocket dashboard — v0.5
+- ✓ Multi-layer memory system (episodic, semantic, working, shared) — v0.5
+- ✓ 18 tools with registry and schema validation — v0.5
+- ✓ 14+ LLM providers through LiteLLM with circuit breaker support — v0.5
+- ✓ Channels: Telegram (complete), Discord, Slack, Email, WhatsApp — v0.5
+- ✓ Cron/Heartbeat/Jobs with persistence — v0.5
 - ✓ Self-Evolution Engine (Phase 7) — v0.5
-- ✓ Multi-agente com SubagentManager e AutonomyWakeCoordinator — v0.5
-- ✓ Skills loader com frontmatter parsing — v0.5
-- ✓ Config Pydantic v1 com hot-reload e audit de tokens — v0.5
+- ✓ Multi-agent runtime with SubagentManager and AutonomyWakeCoordinator — v0.5
+- ✓ Skills loader with frontmatter parsing — v0.5
+- ✓ Pydantic v1 configuration with hot reload and token auditing — v0.5
 
 ### Active
 
 <!-- Current milestone v0.6 scope -->
 
-- [ ] Bugs críticos corrigidos (memory leak, shell=True, setup_logging)
-- [ ] MCP com stdio transport nativo
-- [ ] Failover automático ao abrir circuit breaker
-- [ ] Parallel tool execution no engine
-- [ ] Rotação de credenciais por provider
-- [ ] Health checks reais nas tools
-- [ ] Rate limiting no gateway
-- [ ] Thread ownership em subagentes
-- [ ] Channels stub implementados (Signal/Matrix/IRC)
-- [ ] Cost tracking por provider/sessão
-- [ ] Cron com webhook triggers e retry policy por job
+- [ ] Critical bugs fixed (`memory leak`, `shell=True`, `setup_logging`)
+- [ ] MCP with native stdio transport
+- [ ] Automatic failover when a circuit breaker opens
+- [ ] Parallel tool execution in the engine
+- [ ] Credential rotation per provider
+- [ ] Accurate health checks for tools
+- [ ] Rate limiting in the gateway
+- [ ] Thread ownership for subagents
+- [ ] Stub channels implemented (Signal/Matrix/IRC)
+- [ ] Cost tracking by provider and session
+- [ ] Cron with webhook triggers and per-job retry policy
 
 ### Out of Scope
 
-- Apps nativos iOS/Android/macOS/Windows — fora do escopo Python/Termux
-- Pydantic v2 — maturin/Rust não compila no Termux
-- Dependências que compilam C/Rust — quebra no ambiente Android
+- Native iOS/Android/macOS/Windows apps — outside the Python/Termux scope
+- Pydantic v2 — `maturin`/Rust does not compile on Termux
+- Dependencies that require C/Rust compilation — they break in the Android environment
 
 ## Context
 
-- **Ambiente:** PRoot-Distro em Android/Termux (aarch64) — sem llog/lunwind, não compila extensões Rust/C
+- **Environment:** PRoot-Distro on Android/Termux (aarch64) — no `llog`/`lunwind`, so Rust/C extensions do not compile
 - **Stack:** Python 3.12, FastAPI, Uvicorn, LiteLLM, questionary, Rich, SQLite
-- **Versão atual:** v0.5.0b2
-- **Paridade com referência (OpenClaw):** ~75% nos componentes comparáveis
-- **Diferencial único:** Self-Evolution Engine (Phase 7) — nenhum projeto similar tem
-- **Bugs conhecidos:** `_session_locks` memory leak (engine.py:324), `shell=True` em multiagent.py, `setup_logging()` no module level (engine.py:21)
-- **Auditoria:** docs/AUDIT_CLAWLITE_vs_OPENCLAW_2026-02-27.md (882 linhas, ~35-40% paridade geral)
+- **Current version:** v0.5.0b2
+- **Reference parity (OpenClaw):** ~75% across comparable components
+- **Unique differentiator:** Self-Evolution Engine (Phase 7) — uncommon among similar projects
+- **Known bugs:** `_session_locks` memory leak (`engine.py:324`), `shell=True` in `multiagent.py`, `setup_logging()` at module level (`engine.py:21`)
+- **Audit:** `docs/AUDIT_CLAWLITE_vs_OPENCLAW_2026-02-27.md` (882 lines, ~35-40% overall parity)
 
 ## Constraints
 
-- **Compatibilidade:** Sem deps que compilem no Termux — always `--only-binary=:all:`
-- **Pydantic:** v1.10.21 obrigatório (v2 requer maturin/Rust)
-- **Python:** 3.10+ (matrix CI: 3.10, 3.12)
-- **Segurança:** Nunca `shell=True` em código novo
-- **Testes:** Todo teste com gateway + multiagent DEVE usar `_patch_db()` para isolar DB
+- **Compatibility:** No dependencies that need compilation on Termux — always use `--only-binary=:all:`
+- **Pydantic:** v1.10.21 is mandatory (`v2` requires `maturin`/Rust)
+- **Python:** 3.10+ (CI matrix: 3.10, 3.12)
+- **Security:** Never use `shell=True` in new code
+- **Tests:** Every test involving gateway + multiagent MUST use `_patch_db()` to isolate the database
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| LiteLLM como abstração de providers | Suporta 100+ providers sem código custom por provider | ✓ Good |
-| FastAPI + Uvicorn | Async nativo, compatível com Termux via wheels | ✓ Good |
-| SQLite como backend de memória | Zero deps nativas, funciona em qualquer Python | ✓ Good |
-| Pydantic v1 (não v2) | maturin/Rust não compila no Termux | ✓ Good (necessário) |
-| Self-Evolution Engine desativado por default | Segurança — modificação autônoma de código requer opt-in explícito | ✓ Good |
+| LiteLLM as the provider abstraction | Supports 100+ providers without custom code per provider | ✓ Good |
+| FastAPI + Uvicorn | Native async stack, compatible with Termux through wheels | ✓ Good |
+| SQLite as the memory backend | Zero native dependencies; works in any Python environment | ✓ Good |
+| Pydantic v1 instead of v2 | `maturin`/Rust does not compile on Termux | ✓ Good (required) |
+| Self-Evolution Engine disabled by default | Safety — autonomous code modification requires explicit opt-in | ✓ Good |
 
 ---
 *Last updated: 2026-03-16 after milestone v0.6 initialization*
