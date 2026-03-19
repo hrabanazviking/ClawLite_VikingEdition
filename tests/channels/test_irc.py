@@ -72,7 +72,10 @@ def test_irc_channel_connects_joins_responds_to_ping_and_emits_privmsg(monkeypat
             on_message=_on_message,
         )
         await channel.start()
-        await asyncio.sleep(0.01)
+        for _ in range(20):
+            if emitted:
+                break
+            await asyncio.sleep(0.01)
 
         sent = await channel.send(target="#clawlite", text="reply from bot")
         await channel.stop()

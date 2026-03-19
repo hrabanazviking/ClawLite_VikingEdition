@@ -2,6 +2,8 @@
 name: jira
 description: Create, read, transition, and comment on Jira issues via the Jira REST API v3.
 always: false
+script: jira
+requirements: {"env":["JIRA_BASE_URL","JIRA_EMAIL","JIRA_API_TOKEN"]}
 metadata: {"clawlite":{"emoji":"🎯","auth":{"requiredEnv":["JIRA_BASE_URL","JIRA_EMAIL","JIRA_API_TOKEN"]}}}
 ---
 

@@ -2,6 +2,8 @@
 name: obsidian
 description: Read, write, and search local Obsidian vault markdown files via the filesystem.
 always: false
+script: obsidian
+requirements: {"env":["OBSIDIAN_VAULT"]}
 metadata: {"clawlite":{"emoji":"💎","requires":{"bins":["find","grep"]}}}
 ---
 

@@ -2,6 +2,7 @@
 name: apple-notes
 description: Create, read, and search Apple Notes on macOS using osascript AppleScript.
 always: false
+script: apple_notes
 metadata: {"clawlite":{"emoji":"🍎","platform":"macos","requires":{"bins":["osascript"]}}}
 ---
 

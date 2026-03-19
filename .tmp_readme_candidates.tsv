@@ -1,0 +1,82 @@
+1	b8395e0 feat: add explicit wizard flow overrides	# ClawLite
+1	0a22e1b update README.md	# ClawLite
+4	b6141e3 Restoring README.md with complete original documentation	# ClawLite Documentation
+1	1a94d22 Update README.md with complete original ClawLite documentation	# What is ClawLite?
+1	7b883d9 feat: add release preflight checks and runbook	# ClawLite
+1	81a5353 Update README.md	# ClawLite
+1	955a4c6 update README.md	# ClawLite
+2	2283b73 docs: rewrite README with evidence-based runtime guide	# ClawLite
+1	f063cd5 docs: align roadmap and operations with shipped ClawMemory	## What Is ClawLite
+1	804ef99 feat(skills): add deterministic diagnostics check command	## What Is ClawLite
+1	662e379 docs(readme): refresh guide and codex login workflow	## What Is ClawLite
+1	dcbb300 feat(cli): add provider use model switch command	## What ClawLite Is
+1	e97cceb feat(cli): expand provider status for API-key providers	## What ClawLite Is
+1	44b81ba feat(cli): add strict validate config preflight command	## What ClawLite Is
+1	8540d7f feat(workspace): add one-shot bootstrap lifecycle state	## What ClawLite Is
+1	1b625bd feat(auth): add codex login workflow and strict routing	## What ClawLite Is
+1	ca52c3e feat(provider): add diagnostics telemetry with config gate	## What ClawLite Is
+1	6bea632 feat(memory): add retrieval observability and eval	## What ClawLite Is
+1	19135b6 docs(readme): add inspiration acknowledgements	## What ClawLite Is
+1	a3077e0 docs(readme): refresh structure and current capabilities	## What ClawLite Is
+1	62526c8 feat(session): add per-session retention compaction	## ⚡ What Is ClawLite
+1	5baf79b feat(cli): add memory doctor snapshot command	## ⚡ What Is ClawLite
+1	ef66983 feat(memory): wire memory_window through runtime and cli	## ⚡ What Is ClawLite
+1	1e50dc0 feat(channels): add outbound adapters for discord slack whatsapp	## ⚡ What Is ClawLite
+1	87fc920 feat(gateway): auto-harden auth on public hosts	## ⚡ What Is ClawLite
+1	acb0285 feat(tools): enforce channel-aware safety policy	## ⚡ What Is ClawLite
+1	11660ae feat(heartbeat): persist check-state with atomic saves	## ⚡ What Is ClawLite
+1	2787216 feat(gateway): add compatibility api aliases	## ⚡ What Is ClawLite
+1	1a64371 feat(operational): implement improvement plan items 18-21	## ⚡ What Is ClawLite
+1	a5ce263 docs(readme): refine positioning roadmap and contribution guidance	## ⚡ What Is ClawLite
+1	2469e82 docs(readme): rewrite README with Linux-first autonomous agent guide	## ⚡ What Is ClawLite
+1	2d8ff45 fix(termux-autostart): harden proot boot bootstrap and docs	## ClawLite como assistente pessoal
+1	7e10ced chore(repo): update file modes across project	## ClawLite como assistente pessoal
+1	6edba39 fix(termux-setup): detect installed distro robustly and use main raw links	## ClawLite como assistente pessoal
+1	3ebc2c8 feat(termux): add proot supervisord autostart flow	## ClawLite como assistente pessoal
+1	f48db1c docs(status): sync readme and docs-site with current runtime	## ClawLite como assistente pessoal
+1	3d6e103 feat(outbound-release): add health policy runbook checklist and recovery e2e tests	## ClawLite como assistente pessoal
+1	7bd5290 feat(onboarding-docs): atualiza wizard, dashboard e config.example para o estado atual	## ClawLite como assistente pessoal
+1	b29edc4 docs(readme): document current full dashboard capabilities	## ClawLite como assistente pessoal
+1	74b7946 docs(termux): keep official install path as proot-only	## ClawLite como assistente pessoal
+1	5426056 feat(termux): add clawlitex proot wrapper for all clawlite commands	## ClawLite como assistente pessoal
+1	a68d030 feat(termux): add proot ubuntu setup script and docs	## ClawLite como assistente pessoal
+1	b422411 fix(auth): detect termux android and skip unsupported codex oauth flow	## ClawLite como assistente pessoal
+1	2125bf2 feat(auth): run codex cli oauth flow in openai-codex login	## ClawLite como assistente pessoal
+1	0f94f7e feat(codex): add openai-codex provider, models and codex-cli auth reuse	## ClawLite como assistente pessoal
+1	6223cd7 docs(readme): use refs/heads main installer URL to avoid raw cache lag	## ClawLite como assistente pessoal
+1	fc73848 feat(update): add stable/beta/dev channels for self-update	## ClawLite como assistente pessoal
+1	2b8e17a feat(update): adicionar self-update e check automatico no start	## ClawLite como assistente pessoal
+1	1d8ae13 chore(install): adicionar requirements e instalar stack completa	## ClawLite como assistente pessoal
+1	dd2a77c feat(onboarding): estabilizar etapas e adicionar stats comunitarias de skills	## ClawLite como assistente pessoal
+1	1bf83de feat(skills): adapt openclaw skill catalog and runtime aliases	## ClawLite como assistente pessoal
+1	050d1b8 docs(project): align markdown docs to personal-assistant onboarding model	## ClawLite como assistente pessoal
+1	d816d28 chore(repo): add github templates and professional onboarding docs	## Visão Geral
+1	212090e docs: rewrite README with production-focused structure	## Visão Geral
+2	1db9760 docs(readme): fix table-of-contents anchor links	## ⚡ Demo rápida
+2	1ea7a67 feat(multiagent): suporte multi-canal com agentes unificados, bind e roteamento	## ⚡ Demo rápida
+2	e5e9c68 docs(mcp): documentar comandos, APIs e fluxo de uso	## ⚡ Demo rápida
+2	3c65e8c docs(readme): add prerequisites, troubleshooting, comparison, support and practical skill examples	## ⚡ Demo rápida
+1	38f77ff docs(readme): replace broken quickstart GIF with ASCII terminal demo and update contribution section	## ⚡ Demo rápida
+2	86a2956 docs(readme): force single-line curl in README and quickstart GIF	## ⚡ Demo rápida
+2	24a3a0f docs(readme): wrap long install curl command to prevent overflow	## ⚡ Demo rápida
+2	86bdc58 docs(readme): redesign README to top OSS style with animated banner, quick demo, TOC and roadmap	## ⚡ Demo rápida
+1	fe8247a feat(skills): polish install/publish/search UX and enrich marketplace metadata	# ClawLite
+1	f410dbf docs(quickstart): enforce full guided setup incl. voice in onboarding	# ClawLite
+1	7e83c46 feat(voice): add STT/TTS pipeline for Telegram and WhatsApp	# ClawLite
+1	6cf79fc docs(readme): professional rewrite synced with real v0.4.x status	# ClawLite
+1	c984efe brand: add animated mascot asset and use it in README	# ClawLite
+1	4957fff docs: update README/docs with official logo and Vercel site link	# ClawLite
+1	91910d0 feat(skills): auto-update with trust policy, rollback and runtime scheduling	# ClawLite
+1	62ca376 feat(memory): add persistent session memory architecture with semantic search and compaction	# ClawLite
+1	bf99c32 docs+scripts: consolidate community automation playbook and milestone templates	# ClawLite
+1	828dcc2 test/docs: cobre configure-onboarding-status-doctor e atualiza README	# ClawLite
+1	91a5ed4 feat(reddit): add oauth, milestone posting and hourly mention monitor with telegram approval	# ClawLite
+1	bcab0f7 docs: adicionar troubleshooting para erros de skills e comandos	# ClawLite
+1	24b9a7e docs: update configuration guide and add example config for new runtime modes	# ClawLite
+1	f0d020f docs/tests: document dashboard MVP and add gateway dashboard API tests	# ClawLite
+1	5787f8a docs(config): exemplos ASCII da nova experiência de configuração	# ClawLite
+1	c3eb5f8 feat(skills): add secure marketplace install/update/publish workflow	# ClawLite
+1	4c651bc docs: document telegram multi-agent MVP and CLI flow	# ClawLite
+1	01742f0 feat(branding): add ClawLite mascot ascii onboarding and SVG logo	# ClawLite
+2	afbba4f feat(skills): add registry and catalog listing	# ClawLite
+2	9493f87 feat: add gateway server onboarding flow and production-grade README	# ClawLite

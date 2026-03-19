@@ -18,7 +18,7 @@ class GatewayRequestHandlers:
     runtime: Any
     dashboard_asset_root: str
     dashboard_bootstrap_token: str
-    run_engine_with_timeout_fn: Callable[[str, str], Awaitable[Any]]
+    run_engine_with_timeout_fn: Callable[..., Awaitable[Any]]
     provider_error_payload_fn: Callable[[RuntimeError], tuple[int, str]]
     finalize_bootstrap_for_user_turn_fn: Callable[[str], None]
     build_tools_catalog_payload_fn: Callable[..., dict[str, Any]]
@@ -27,11 +27,21 @@ class GatewayRequestHandlers:
     dashboard_asset_text_fn: Callable[[str], str]
     render_root_dashboard_html_fn: Callable[..., str]
 
-    def _check_control(self, request: Request) -> None:
+    def _check_control(self, request: Request, *, allow_dashboard_session: bool = False) -> None:
         self.auth_guard.check_http(
             request=request,
             scope="control",
             diagnostics_auth=self.diagnostics_require_auth,
+            allow_dashboard_session=allow_dashboard_session,
+        )
+
+    def _check_sensitive_control(self, request: Request, *, allow_dashboard_session: bool = False) -> None:
+        self.auth_guard.check_http(
+            request=request,
+            scope="control",
+            diagnostics_auth=self.diagnostics_require_auth,
+            require_token_if_configured=True,
+            allow_dashboard_session=allow_dashboard_session,
         )
 
     @staticmethod
@@ -56,13 +66,24 @@ class GatewayRequestHandlers:
             "jobs": jobs,
         }
 
-    async def chat(self, req: Any, request: Request) -> Any:
-        self._check_control(request)
+    async def chat(self, req: Any, request: Request, *, allow_dashboard_session: bool = False) -> Any:
+        self._check_sensitive_control(request, allow_dashboard_session=allow_dashboard_session)
         if not str(req.session_id or "").strip() or not str(req.text or "").strip():
             raise HTTPException(status_code=400, detail="session_id and text are required")
         logger.debug("chat request received session={} chars={}", req.session_id, len(str(req.text or "")))
+        channel = str(getattr(req, "channel", "") or "").strip() or None
+        raw_chat_id = getattr(req, "chat_id", None)
+        chat_id = None if raw_chat_id is None else str(raw_chat_id).strip() or None
+        raw_runtime_metadata = getattr(req, "runtime_metadata", None)
+        runtime_metadata = dict(raw_runtime_metadata) if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata else None
         try:
-            out = await self.run_engine_with_timeout_fn(str(req.session_id), str(req.text))
+            out = await self.run_engine_with_timeout_fn(
+                str(req.session_id),
+                str(req.text),
+                channel=channel,
+                chat_id=chat_id,
+                runtime_metadata=runtime_metadata,
+            )
         except RuntimeError as exc:
             status_code, detail = self.provider_error_payload_fn(exc)
             bind_event("gateway.chat", session=str(req.session_id)).error(
@@ -75,8 +96,8 @@ class GatewayRequestHandlers:
         bind_event("gateway.chat", session=str(req.session_id)).info("chat response generated model={}", out.model)
         return {"text": out.text, "model": out.model}
 
-    async def tools_catalog(self, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+    async def tools_catalog(self, request: Request, *, allow_dashboard_session: bool = False) -> dict[str, Any]:
+        self._check_sensitive_control(request, allow_dashboard_session=allow_dashboard_session)
         include_schema = self.parse_include_schema_flag_fn(request.query_params)
         return self.build_tools_catalog_payload_fn(self.runtime.engine.tools.schema(), include_schema=include_schema)
 
@@ -92,7 +113,7 @@ class GatewayRequestHandlers:
         include_grants: bool = False,
         limit: int = 50,
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         list_requests = getattr(tools, "approval_requests_snapshot", None)
         if not callable(list_requests):
@@ -149,7 +170,7 @@ class GatewayRequestHandlers:
         actor: str = "",
         note: str = "",
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         review_fn = getattr(tools, "review_approval_request", None)
         if not callable(review_fn):
@@ -159,17 +180,20 @@ class GatewayRequestHandlers:
             review_fn,
             str(request_id or "").strip(),
             decision=str(decision or "").strip().lower(),
-            actor=str(actor or "").strip(),
+            actor="control-plane",
             note=str(note or "").strip(),
         )
         if not isinstance(summary, dict):
             raise HTTPException(status_code=500, detail="tool_approval_review_failed")
         if not bool(summary.get("ok", False)):
             error = str(summary.get("error", "tool_approval_review_failed") or "tool_approval_review_failed")
+            expected_actor = str(summary.get("expected_actor", "") or "").strip()
             if error == "approval_request_not_found":
                 raise HTTPException(status_code=404, detail=error)
             if error == "invalid_review_decision":
                 raise HTTPException(status_code=400, detail=error)
+            if error in {"approval_actor_required", "approval_actor_mismatch", "approval_channel_bound"} and expected_actor:
+                raise HTTPException(status_code=400, detail=f"{error}:{expected_actor}")
             raise HTTPException(status_code=400, detail=error)
         return {"ok": True, "summary": summary}
 
@@ -181,7 +205,7 @@ class GatewayRequestHandlers:
         channel: str = "",
         rule: str = "",
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         tools = getattr(self.runtime.engine, "tools", None)
         revoke_fn = getattr(tools, "revoke_approval_grants", None)
         if not callable(revoke_fn):
@@ -201,7 +225,7 @@ class GatewayRequestHandlers:
         return {"ok": True, "summary": summary}
 
     async def cron_add(self, req: Any, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         job_id = await self.runtime.cron.add_job(
             session_id=req.session_id,
             expression=req.expression,
@@ -211,15 +235,15 @@ class GatewayRequestHandlers:
         return {"ok": True, "status": "created", "id": job_id}
 
     async def cron_status(self, *, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         return self._cron_list_payload()
 
     async def cron_list(self, *, session_id: str = "", request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         return self._cron_list_payload(session_id=session_id)
 
     async def cron_get(self, *, job_id: str, session_id: str = "", request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         scoped_session = str(session_id or "").strip()
         jobs = self.runtime.cron.list_jobs(session_id=scoped_session or None)
         job = next((row for row in jobs if str(row.get("id", "") or "").strip() == str(job_id or "").strip()), None)
@@ -235,7 +259,7 @@ class GatewayRequestHandlers:
         session_id: str = "",
         request: Request,
     ) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         scoped_session = str(session_id or "").strip() or None
         changed = self.runtime.cron.enable_job(
             job_id,
@@ -253,7 +277,7 @@ class GatewayRequestHandlers:
         }
 
     async def cron_remove(self, *, job_id: str, request: Request) -> dict[str, Any]:
-        self._check_control(request)
+        self._check_sensitive_control(request)
         removed = await asyncio.to_thread(self.runtime.cron.remove_job, job_id)
         return {"ok": removed, "status": "removed" if removed else "not_found"}
 

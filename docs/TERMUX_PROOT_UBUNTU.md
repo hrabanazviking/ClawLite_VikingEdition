@@ -21,7 +21,7 @@ Important:
 Run the wrapper installer from Termux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/Development/scripts/install_termux_proot.sh | bash
 ```
 
 What it does:
@@ -64,16 +64,16 @@ python3 -m playwright install chromium
 - If you see `fatal: Not possible to fast-forward, aborting.`, rerun the remote wrapper from Termux instead of an old local copy:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/Development/scripts/install_termux_proot.sh | bash
 ```
 
 - If you need a manual recovery inside Ubuntu, use the same sync helper directly:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/update_checkout.sh) \
-  https://github.com/eobarretooo/ClawLite.git \
+bash <(curl -fsSL https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/Development/scripts/update_checkout.sh) \
+  https://github.com/hrabanazviking/ClawLite_VikingEdition.git \
   /root/ClawLite \
-  main
+  Development
 ```
 - If you want to rerun the Ubuntu-side installer manually, use:
 

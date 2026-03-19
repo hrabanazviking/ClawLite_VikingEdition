@@ -72,8 +72,8 @@ def append_privacy_audit_event(
 
 
 def encrypted_prefix() -> str:
-    """Current encryption prefix — v3 (Fernet/AES-128-CBC+HMAC) if available, else v2 (XOR)."""
-    return "enc:v3:" if _FERNET_AVAILABLE else "enc:v2:"
+    """Current encryption prefix for newly written memory entries."""
+    return "enc:v2:"
 
 
 def legacy_encrypted_prefix() -> str:
@@ -188,21 +188,13 @@ def encrypt_text_for_category(
         key = load_or_create_privacy_key_fn()
         if key is None:
             return clean
-        if _FERNET_AVAILABLE:
-            # v3: Fernet (AES-128-CBC + HMAC-SHA256) — audited, standard
-            f = _fernet_from_key(key)
-            token = f.encrypt(clean.encode("utf-8"))
-            encoded = base64.urlsafe_b64encode(token).decode("ascii")
-            diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
-            return f"{_fernet_prefix()}{encoded}"
-        else:
-            # v2 fallback: XOR + SHA256 counter-mode KDF + HMAC (used when cryptography package absent)
-            nonce = secrets.token_bytes(16)
-            ciphertext = xor_with_keystream_fn(clean.encode("utf-8"), key=key, nonce=nonce)
-            tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-            encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
-            diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
-            return f"enc:v2:{encoded}"
+        # v2: XOR + SHA256 counter-mode KDF + HMAC (stable write format)
+        nonce = secrets.token_bytes(16)
+        ciphertext = xor_with_keystream_fn(clean.encode("utf-8"), key=key, nonce=nonce)
+        tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+        encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
+        diagnostics["privacy_encrypt_events"] = int(diagnostics.get("privacy_encrypt_events", 0)) + 1
+        return f"enc:v2:{encoded}"
     except Exception as exc:
         diagnostics["privacy_encrypt_errors"] = int(diagnostics.get("privacy_encrypt_errors", 0)) + 1
         diagnostics["last_error"] = str(exc)

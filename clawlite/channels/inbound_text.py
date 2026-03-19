@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-_BRACKETED_SYSTEM_TAG_RE = re.compile(r"\[\s*(System\s*Message|System|Assistant|Internal)\s*\]", re.IGNORECASE)
+_BRACKETED_SYSTEM_TAG_RE = re.compile(r"\[\s*(System\s*Message|System|Assistant|Developer|Internal)\s*\]", re.IGNORECASE)
 _LINE_SYSTEM_PREFIX_RE = re.compile(r"^(\s*)System:(?=\s|$)", re.IGNORECASE | re.MULTILINE)
 
 

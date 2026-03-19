@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${1:-${REPO_URL:-https://github.com/eobarretooo/ClawLite.git}}"
+REPO_URL="${1:-${REPO_URL:-https://github.com/hrabanazviking/ClawLite_VikingEdition.git}}"
 INSTALL_DIR="${2:-${INSTALL_DIR:-/root/ClawLite}}"
-BRANCH="${3:-main}"
+BRANCH="${3:-Development}"
 
 backup_and_reclone() {
   local reason="$1"

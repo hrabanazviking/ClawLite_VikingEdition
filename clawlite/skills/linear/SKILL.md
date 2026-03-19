@@ -2,6 +2,8 @@
 name: linear
 description: Manage Linear issues, projects, and cycles via the Linear GraphQL API.
 always: false
+script: linear
+requirements: {"env":["LINEAR_API_KEY"]}
 metadata: {"clawlite":{"emoji":"📐","auth":{"requiredEnv":["LINEAR_API_KEY"]}}}
 ---
 

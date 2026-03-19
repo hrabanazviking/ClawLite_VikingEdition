@@ -4,7 +4,7 @@ description: Search, install, list, and update agent skills from ClawHub into ~/
 always: false
 homepage: https://clawhub.ai
 metadata: {"clawlite":{"emoji":"🦞","requires":{"bins":["npx"]}}}
-command: npx --yes clawhub@latest
+script: clawhub
 ---
 
 # ClawHub

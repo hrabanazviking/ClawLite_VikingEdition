@@ -19,6 +19,18 @@ class MessageAPI(Protocol):
 class MessageTool(Tool):
     name = "message"
     description = "Send proactive message to a channel target."
+    _CHANNEL_CAPABILITIES: dict[str, dict[str, object]] = {
+        "telegram": {
+            "actions": {"send", "reply", "edit", "delete", "react", "create_topic"},
+            "buttons": True,
+            "media": True,
+        },
+        "discord": {
+            "actions": {"send"},
+            "buttons": True,
+            "media": False,
+        },
+    }
     TELEGRAM_MEDIA_TYPES = {
         "animation",
         "audio",
@@ -32,6 +44,22 @@ class MessageTool(Tool):
 
     def __init__(self, api: MessageAPI) -> None:
         self.api = api
+
+    @classmethod
+    def channel_capabilities(cls, channel: str) -> dict[str, object]:
+        normalized = str(channel or "").strip().lower()
+        configured = cls._CHANNEL_CAPABILITIES.get(normalized)
+        if configured is None:
+            return {
+                "actions": ["send"],
+                "buttons": False,
+                "media": False,
+            }
+        return {
+            "actions": sorted(str(item) for item in configured.get("actions", set())),
+            "buttons": bool(configured.get("buttons", False)),
+            "media": bool(configured.get("media", False)),
+        }
 
     def args_schema(self) -> dict:
         return {
@@ -127,6 +155,29 @@ class MessageTool(Tool):
             normalized_rows.append(normalized_row)
         return normalized_rows
 
+    @staticmethod
+    def _discord_components_from_buttons(buttons: list[list[dict[str, str]]]) -> list[dict[str, Any]]:
+        components: list[dict[str, Any]] = []
+        for row in buttons:
+            discord_row: dict[str, Any] = {"type": 1, "components": []}
+            for button in row:
+                entry: dict[str, Any] = {
+                    "type": 2,
+                    "label": str(button.get("text", "") or "")[:80],
+                }
+                callback_data = str(button.get("callback_data", "") or "").strip()
+                url = str(button.get("url", "") or "").strip()
+                if callback_data:
+                    entry["style"] = 1
+                    entry["custom_id"] = callback_data[:100]
+                elif url:
+                    entry["style"] = 5
+                    entry["url"] = url
+                discord_row["components"].append(entry)
+            if discord_row["components"]:
+                components.append(discord_row)
+        return components
+
     @classmethod
     def _validate_media(cls, media: Any) -> list[dict[str, Any]]:
         if not isinstance(media, list):
@@ -168,8 +219,10 @@ class MessageTool(Tool):
             raise ValueError("invalid action")
         if not channel or not target:
             raise ValueError("channel and target are required")
-        if action != "send" and channel != "telegram":
-            raise ValueError("telegram actions are only supported on telegram channel")
+        capabilities = self.channel_capabilities(channel)
+        if action not in set(capabilities["actions"]):
+            supported = ", ".join(capabilities["actions"])
+            raise ValueError(f"message action `{action}` is not supported on `{channel}` (supported: {supported})")
 
         raw_metadata = arguments.get("metadata")
         metadata: dict[str, Any] | None = None
@@ -180,8 +233,8 @@ class MessageTool(Tool):
 
         media_items: list[dict[str, Any]] | None = None
         if "media" in arguments and arguments.get("media") is not None:
-            if channel != "telegram":
-                raise ValueError("media is currently only supported on telegram channel")
+            if not bool(capabilities["media"]):
+                raise ValueError(f"media is not supported on `{channel}`")
             media_items = self._validate_media(arguments.get("media"))
 
         message_id = self._coerce_int(arguments.get("message_id"))
@@ -241,7 +294,12 @@ class MessageTool(Tool):
         if "buttons" in arguments and arguments.get("buttons") is not None:
             keyboard = self._validate_buttons(arguments.get("buttons"))
             metadata = dict(metadata or {})
-            metadata["_telegram_inline_keyboard"] = keyboard
+            if channel == "telegram":
+                metadata["_telegram_inline_keyboard"] = keyboard
+            elif channel == "discord":
+                metadata["discord_components"] = self._discord_components_from_buttons(keyboard)
+            else:
+                raise ValueError(f"buttons are not supported on `{channel}`")
 
         if media_items is not None:
             metadata = dict(metadata or {})

@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+from clawlite.channels.readiness import channel_readiness
+
 
 def dashboard_preview(value: Any, *, max_chars: int = 140) -> str:
     text = " ".join(str(value or "").strip().split())
@@ -45,24 +47,30 @@ def recent_dashboard_sessions(*, sessions: Any, subagents: Any, limit: int = 8) 
 
 def dashboard_channels_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
+    readiness_counts: dict[str, int] = {}
     for name, payload in sorted(snapshot.items()):
         row = dict(payload) if isinstance(payload, dict) else {"status": payload}
+        readiness = str(row.get("readiness") or channel_readiness(str(name))).strip().lower() or "experimental"
+        enabled = bool(row["enabled"]) if "enabled" in row else True
         state_label = str(
             row.get("status")
             or row.get("worker_state")
             or row.get("mode")
-            or ("enabled" if bool(row.get("enabled", False)) else "disabled")
+            or ("enabled" if enabled else "disabled")
         )
+        readiness_counts[readiness] = readiness_counts.get(readiness, 0) + 1
         items.append(
             {
                 "name": name,
-                "enabled": bool(row.get("enabled", False)),
+                "enabled": enabled,
+                "readiness": readiness,
                 "state": state_label,
                 "summary": dashboard_preview(row, max_chars=180),
             }
         )
     return {
         "count": len(items),
+        "readiness_counts": dict(sorted(readiness_counts.items())),
         "items": items,
     }
 

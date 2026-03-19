@@ -2,6 +2,7 @@
 name: github-issues
 description: List, create, close, comment on, and triage GitHub issues and pull requests via the gh CLI.
 always: false
+script: gh_issues
 metadata: {"clawlite":{"emoji":"🐙","requires":{"bins":["gh","git"]},"auth":{"optionalEnv":["GH_TOKEN"]}}}
 ---
 
