@@ -99,6 +99,46 @@ class FakeFixedTextProvider:
         return ProviderResult(text=self.text, tool_calls=[], model="fake/model")
 
 
+class FakeSemanticSummaryProvider:
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, Any]]] = []
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+    async def complete(self, *, messages, tools=None, max_tokens=None, temperature=None, reasoning_effort=None):
+        del tools, max_tokens, temperature, reasoning_effort
+        self.calls.append(copy.deepcopy(messages))
+        system_text = str(messages[0].get("content", "") or "") if messages else ""
+        if system_text.startswith("Compress the provided content for an agent context window."):
+            return ProviderResult(text="semantic summary from llm", tool_calls=[], model="fake/model")
+        return ProviderResult(text="final answer", tool_calls=[], model="fake/model")
+
+
+class FakeToolCompactionProvider:
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, Any]]] = []
+        self.main_calls = 0
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+    async def complete(self, *, messages, tools=None, max_tokens=None, temperature=None, reasoning_effort=None):
+        del tools, max_tokens, temperature, reasoning_effort
+        self.calls.append(copy.deepcopy(messages))
+        system_text = str(messages[0].get("content", "") or "") if messages else ""
+        if system_text.startswith("Compress the provided content for an agent context window."):
+            return ProviderResult(text="compacted tool output", tool_calls=[], model="fake/model")
+        self.main_calls += 1
+        if self.main_calls == 1:
+            return ProviderResult(
+                text="need tools",
+                tool_calls=[ToolCall(name="echo", arguments={"text": "ignored"})],
+                model="fake/model",
+            )
+        return ProviderResult(text="done", tool_calls=[], model="fake/model")
+
+
 class FakeWebToolProvider:
     def __init__(self) -> None:
         self.calls = 0
@@ -3304,5 +3344,80 @@ def test_engine_persists_and_replays_legal_tool_history_from_session_store(tmp_p
         assert history_tool_rows
         assert history_assistant_rows[0]["tool_calls"][0]["function"]["name"] == "echo"
         assert history_tool_rows[0]["name"] == "echo"
+
+    asyncio.run(_scenario())
+
+
+def test_engine_uses_semantic_history_summary_when_enabled() -> None:
+    async def _scenario() -> None:
+        provider = FakeSemanticSummaryProvider()
+        sessions = InMemorySessionStore()
+        for idx in range(6):
+            sessions.append("s1", "user" if idx % 2 == 0 else "assistant", f"history-message-{idx}-" * 40)
+
+        engine = AgentEngine(
+            provider=provider,
+            tools=FakeTools(),
+            sessions=sessions,
+            memory=FakeMemory(),
+            prompt_builder=PromptBuilder(context_token_budget=220),
+            semantic_history_summary_enabled=True,
+        )
+
+        result = await engine.run(session_id="s1", user_text="hello")
+
+        assert result.text == "final answer"
+        assert any(
+            str(call[0].get("content", "")).startswith("Compress the provided content for an agent context window.")
+            for call in provider.calls
+        )
+        final_calls = [
+            call
+            for call in provider.calls
+            if not str(call[0].get("content", "")).startswith("Compress the provided content for an agent context window.")
+        ]
+        assert any(
+            any("semantic summary from llm" in str(msg.get("content", "")) for msg in snapshot)
+            for snapshot in final_calls
+        )
+
+    asyncio.run(_scenario())
+
+
+def test_engine_compacts_large_tool_results_before_history_injection() -> None:
+    async def _scenario() -> None:
+        provider = FakeToolCompactionProvider()
+
+        class LargeToolResultTools(FakeTools):
+            async def execute(self, name, arguments, *, session_id: str, channel: str = "", user_id: str = "") -> str:
+                del name, arguments, session_id, channel, user_id
+                return "LARGE-RESULT-" * 400
+
+        engine = AgentEngine(
+            provider=provider,
+            tools=LargeToolResultTools(),
+            sessions=InMemorySessionStore(),
+            memory=FakeMemory(),
+            tool_result_compaction_enabled=True,
+            tool_result_compaction_threshold_chars=200,
+            max_tool_result_chars=400,
+        )
+
+        result = await engine.run(session_id="s1", user_text="do it")
+
+        assert result.text == "done"
+        assert any(
+            str(call[0].get("content", "")).startswith("Compress the provided content for an agent context window.")
+            for call in provider.calls
+        )
+        non_compaction_calls = [
+            call
+            for call in provider.calls
+            if not str(call[0].get("content", "")).startswith("Compress the provided content for an agent context window.")
+        ]
+        assert any(
+            any(msg.get("role") == "tool" and msg.get("content") == "compacted tool output" for msg in snapshot)
+            for snapshot in non_compaction_calls
+        )
 
     asyncio.run(_scenario())

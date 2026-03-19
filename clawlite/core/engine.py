@@ -433,6 +433,9 @@ class AgentEngine:
         max_tool_result_chars: int = 4000,
         max_progress_events_per_turn: int = 120,
         memory_window: int = 20,
+        semantic_history_summary_enabled: bool = False,
+        tool_result_compaction_enabled: bool = False,
+        tool_result_compaction_threshold_chars: int = 3200,
         reasoning_effort_default: str | None = None,
         loop_detection: LoopDetectionSettings | None = None,
         bus: Any | None = None,
@@ -461,6 +464,9 @@ class AgentEngine:
         self.max_tool_result_chars = max(32, int(max_tool_result_chars))
         self.max_progress_events_per_turn = max(1, int(max_progress_events_per_turn))
         self.memory_window = max(1, int(memory_window))
+        self.semantic_history_summary_enabled = bool(semantic_history_summary_enabled)
+        self.tool_result_compaction_enabled = bool(tool_result_compaction_enabled)
+        self.tool_result_compaction_threshold_chars = max(1, int(tool_result_compaction_threshold_chars))
         self.reasoning_effort_default = self._normalize_reasoning_effort(reasoning_effort_default)
         resolved_loop = loop_detection or LoopDetectionSettings()
         critical_threshold = max(1, int(resolved_loop.critical_threshold))
@@ -2270,6 +2276,96 @@ class AgentEngine:
         keep = max(0, limit - len(suffix))
         return f"{text[:keep]}{suffix}", True
 
+    async def _llm_compact_text(
+        self,
+        *,
+        mode: str,
+        source_text: str,
+        max_chars: int,
+        user_text: str,
+    ) -> str:
+        if not source_text.strip():
+            return ""
+        result = await self.provider.complete(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Compress the provided content for an agent context window. "
+                        "Keep concrete facts, URLs, commands, IDs, error markers, and numeric values. "
+                        f"Output plain text under {max(64, int(max_chars))} characters."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Mode: {mode}\n"
+                        f"User request: {str(user_text or '').strip()}\n\n"
+                        f"Content to compress:\n{source_text}"
+                    ),
+                },
+            ],
+            tools=None,
+            max_tokens=max(64, min(256, max(64, int(max_chars)) // 3)),
+            temperature=0.0,
+        )
+        normalized = self._normalize_provider_result(result)
+        return str(normalized.text or "").strip()
+
+    async def _maybe_semantic_history_summary(
+        self,
+        *,
+        trimmed_history_rows: list[dict[str, Any]],
+        fallback_summary: str,
+        user_text: str,
+    ) -> str:
+        if not self.semantic_history_summary_enabled or not trimmed_history_rows:
+            return fallback_summary
+        raw = "\n".join(
+            f"{str(row.get('role', '')).strip()}: {str(row.get('content', '')).strip()}"
+            for row in trimmed_history_rows
+            if str(row.get("content", "")).strip()
+        ).strip()
+        if not raw:
+            return fallback_summary
+        try:
+            compacted = await self._llm_compact_text(
+                mode="history-summary",
+                source_text=raw,
+                max_chars=max(240, len(fallback_summary) or 320),
+                user_text=user_text,
+            )
+        except Exception:
+            return fallback_summary
+        return compacted or fallback_summary
+
+    async def _maybe_compact_tool_result(
+        self,
+        *,
+        tool_name: str,
+        tool_result: Any,
+        user_text: str,
+        max_chars: int,
+    ) -> str:
+        text = str(tool_result or "")
+        if (
+            not self.tool_result_compaction_enabled
+            or not text
+            or text.startswith("tool_error:")
+            or len(text) < self.tool_result_compaction_threshold_chars
+        ):
+            return text
+        try:
+            compacted = await self._llm_compact_text(
+                mode=f"tool-result:{tool_name}",
+                source_text=text,
+                max_chars=max_chars,
+                user_text=user_text,
+            )
+        except Exception:
+            return text
+        return compacted or text
+
     @staticmethod
     def _split_subagent_digest(text: str) -> tuple[str, str]:
         marker = "\n\n[Subagent Digest]\n"
@@ -2697,6 +2793,12 @@ class AgentEngine:
             channel=runtime_channel,
             chat_id=runtime_chat_id,
         )
+        if prompt.history_summary and prompt.trimmed_history_rows:
+            prompt.history_summary = await self._maybe_semantic_history_summary(
+                trimmed_history_rows=prompt.trimmed_history_rows,
+                fallback_summary=prompt.history_summary,
+                user_text=user_text,
+            )
 
         messages: list[dict[str, Any]] = []
         if prompt.system_prompt:
@@ -3272,8 +3374,14 @@ class AgentEngine:
 
                     failure_fingerprint = self._failure_fingerprint(tool_signature=signature, tool_result=tool_result)
 
+                    compacted_tool_result = await self._maybe_compact_tool_result(
+                        tool_name=name,
+                        tool_result=tool_result,
+                        user_text=user_text,
+                        max_chars=budget.max_tool_result_chars or self.max_tool_result_chars,
+                    )
                     normalized_result, was_truncated = self._truncate_tool_result(
-                        tool_result,
+                        compacted_tool_result,
                         budget.max_tool_result_chars or self.max_tool_result_chars,
                     )
                     if was_truncated:

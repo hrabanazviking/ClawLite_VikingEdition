@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -27,6 +28,7 @@ class LiteLLMProvider(LLMProvider):
         allow_empty_api_key: bool = False,
         timeout: float = 30.0,
         extra_headers: dict[str, str] | None = None,
+        oauth_refresh_callback: Callable[[], Awaitable[dict[str, Any]] | dict[str, Any]] | None = None,
         retry_max_attempts: int = 3,
         retry_initial_backoff_s: float = 0.5,
         retry_max_backoff_s: float = 8.0,
@@ -46,6 +48,7 @@ class LiteLLMProvider(LLMProvider):
         self.allow_empty_api_key = bool(allow_empty_api_key)
         self.timeout = timeout
         self.extra_headers = dict(extra_headers or {})
+        self.oauth_refresh_callback = oauth_refresh_callback
         self.reliability = ReliabilitySettings(
             retry_max_attempts=max(1, int(retry_max_attempts)),
             retry_initial_backoff_s=max(0.0, float(retry_initial_backoff_s)),
@@ -74,6 +77,10 @@ class LiteLLMProvider(LLMProvider):
             "last_error_class": "",
             "error_class_counts": {},
             "last_status_code": 0,
+            "oauth_refresh_attempts": 0,
+            "oauth_refresh_success": 0,
+            "oauth_refresh_failures": 0,
+            "last_oauth_refresh_error": "",
         }
 
     def diagnostics(self) -> dict[str, Any]:
@@ -165,6 +172,33 @@ class LiteLLMProvider(LLMProvider):
         error = f"provider_response_invalid:{suffix}"
         self._record_failure(error=error)
         return RuntimeError(error)
+
+    async def _try_refresh_oauth(self) -> bool:
+        callback = self.oauth_refresh_callback
+        if callback is None:
+            return False
+        self._diagnostics["oauth_refresh_attempts"] = int(self._diagnostics["oauth_refresh_attempts"]) + 1
+        try:
+            payload = callback()
+            if asyncio.iscoroutine(payload):
+                payload = await payload
+        except Exception as exc:
+            self._diagnostics["oauth_refresh_failures"] = int(self._diagnostics["oauth_refresh_failures"]) + 1
+            self._diagnostics["last_oauth_refresh_error"] = str(exc)
+            return False
+        if not isinstance(payload, dict):
+            self._diagnostics["oauth_refresh_failures"] = int(self._diagnostics["oauth_refresh_failures"]) + 1
+            self._diagnostics["last_oauth_refresh_error"] = "invalid_refresh_payload"
+            return False
+        token = str(payload.get("access_token", "") or payload.get("token", "") or "").strip()
+        if not token:
+            self._diagnostics["oauth_refresh_failures"] = int(self._diagnostics["oauth_refresh_failures"]) + 1
+            self._diagnostics["last_oauth_refresh_error"] = "missing_access_token"
+            return False
+        self.api_key = token
+        self._diagnostics["oauth_refresh_success"] = int(self._diagnostics["oauth_refresh_success"]) + 1
+        self._diagnostics["last_oauth_refresh_error"] = ""
+        return True
 
     @staticmethod
     def _error_payload(resp: httpx.Response | None) -> dict[str, Any] | None:
@@ -537,9 +571,11 @@ class LiteLLMProvider(LLMProvider):
 
         attempts = self.reliability.retry_max_attempts
         _t0 = time.monotonic()
+        auth_retry_used = False
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for attempt in range(1, attempts + 1):
+            attempt = 1
+            while attempt <= attempts:
                 try:
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
@@ -571,6 +607,13 @@ class LiteLLMProvider(LLMProvider):
                     status = exc.response.status_code if exc.response is not None else None
                     detail = self._error_detail(exc.response)
                     self._diagnostics["http_errors"] = int(self._diagnostics["http_errors"]) + 1
+                    if status == 401 and not auth_retry_used and await self._try_refresh_oauth():
+                        auth_retry_used = True
+                        headers = {"content-type": "application/json"}
+                        if self.api_key.strip():
+                            headers["authorization"] = f"Bearer {self.api_key}"
+                        headers.update(self.extra_headers)
+                        continue
                     hard_quota = status == 429 and self._is_hard_quota_429(detail=detail, resp=exc.response)
                     retry_after_s = parse_retry_after_seconds(exc.response.headers.get("retry-after") if exc.response is not None else "")
                     should_retry = (
@@ -582,6 +625,7 @@ class LiteLLMProvider(LLMProvider):
                     if should_retry:
                         self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
                         await asyncio.sleep(self._retry_delay(attempt, retry_after_s=retry_after_s if status == 429 else None))
+                        attempt += 1
                         continue
                     if detail:
                         error = f"provider_http_error:{status}:{detail}"
@@ -596,6 +640,7 @@ class LiteLLMProvider(LLMProvider):
                     if attempt < attempts:
                         self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
                         await asyncio.sleep(self._retry_delay(attempt))
+                        attempt += 1
                         continue
                     error = f"provider_network_error:{exc}"
                     self._record_failure(error=error)
@@ -605,6 +650,7 @@ class LiteLLMProvider(LLMProvider):
                     if attempt < attempts:
                         self._diagnostics["retries"] = int(self._diagnostics["retries"]) + 1
                         await asyncio.sleep(self._retry_delay(attempt))
+                        attempt += 1
                         continue
                     error = f"provider_network_error:{exc}"
                     self._record_failure(error=error)
@@ -670,44 +716,58 @@ class LiteLLMProvider(LLMProvider):
         _t0 = time.monotonic()
         _tel = get_telemetry_registry()
         _degraded_recovered = False
+        auth_retry_used = False
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    response.raise_for_status()
+                while True:
                     try:
-                        async for line in response.aiter_lines():
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            raw = line[len("data:"):].strip()
-                            if raw == "[DONE]":
-                                break
+                        async with client.stream("POST", url, headers=headers, json=payload) as response:
+                            response.raise_for_status()
                             try:
-                                data = json.loads(raw)
-                            except Exception:
-                                continue
-                            choices = data.get("choices")
-                            if not isinstance(choices, list) or not choices:
-                                continue
-                            delta = choices[0].get("delta") or {}
-                            text = str(delta.get("content") or "")
-                            finish_reason = choices[0].get("finish_reason")
-                            accumulated += text
-                            done = finish_reason is not None
-                            yield ProviderChunk(text=text, accumulated=accumulated, done=done)
-                            if done:
-                                break
-                    except Exception as mid_exc:
-                        # Stream failed mid-way — recover with accumulated text if non-empty
-                        if accumulated:
-                            _degraded_recovered = True
-                            error = f"provider_stream_degraded:{mid_exc}"
-                            self._record_failure(error=error)
-                            _tel.record(self.model, latency_ms=(time.monotonic() - _t0) * 1000, error=True)
-                            yield ProviderChunk(text="", accumulated=accumulated, done=True, degraded=True)
-                        else:
-                            raise
+                                async for line in response.aiter_lines():
+                                    line = line.strip()
+                                    if not line or not line.startswith("data:"):
+                                        continue
+                                    raw = line[len("data:"):].strip()
+                                    if raw == "[DONE]":
+                                        break
+                                    try:
+                                        data = json.loads(raw)
+                                    except Exception:
+                                        continue
+                                    choices = data.get("choices")
+                                    if not isinstance(choices, list) or not choices:
+                                        continue
+                                    delta = choices[0].get("delta") or {}
+                                    text = str(delta.get("content") or "")
+                                    finish_reason = choices[0].get("finish_reason")
+                                    accumulated += text
+                                    done = finish_reason is not None
+                                    yield ProviderChunk(text=text, accumulated=accumulated, done=done)
+                                    if done:
+                                        break
+                            except Exception as mid_exc:
+                                # Stream failed mid-way — recover with accumulated text if non-empty
+                                if accumulated:
+                                    _degraded_recovered = True
+                                    error = f"provider_stream_degraded:{mid_exc}"
+                                    self._record_failure(error=error)
+                                    _tel.record(self.model, latency_ms=(time.monotonic() - _t0) * 1000, error=True)
+                                    yield ProviderChunk(text="", accumulated=accumulated, done=True, degraded=True)
+                                else:
+                                    raise
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        status = exc.response.status_code if exc.response is not None else None
+                        if status == 401 and not auth_retry_used and not accumulated and await self._try_refresh_oauth():
+                            auth_retry_used = True
+                            headers = {"content-type": "application/json"}
+                            if self.api_key.strip():
+                                headers["authorization"] = f"Bearer {self.api_key}"
+                            headers.update(self.extra_headers)
+                            continue
+                        raise
 
             # Emit final done-chunk if stream ended without finish_reason (skip if already degraded-recovered)
             if not _degraded_recovered:

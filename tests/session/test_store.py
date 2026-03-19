@@ -175,6 +175,20 @@ def test_session_store_prune_expired_is_noop_when_ttl_disabled(tmp_path: Path) -
     assert diag["ttl_prune_runs"] == 0
 
 
+def test_session_store_list_sessions_prefers_most_recent_mtime(tmp_path: Path) -> None:
+    store = SessionStore(root=tmp_path / "sessions")
+    store.append("telegram:older", "user", "one")
+    store.append("telegram:newer", "user", "two")
+
+    older = store._path("telegram:older")
+    newer = store._path("telegram:newer")
+    now = time.time()
+    os.utime(older, (now - 60, now - 60))
+    os.utime(newer, (now, now))
+
+    assert store.list_sessions() == ["telegram:newer", "telegram:older"]
+
+
 def test_session_store_read_messages_preserves_legal_tool_history(tmp_path: Path) -> None:
     store = SessionStore(root=tmp_path / "sessions")
     tool_calls = [

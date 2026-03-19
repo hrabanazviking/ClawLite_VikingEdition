@@ -460,6 +460,24 @@ def test_mcp_servers():
     assert cfg.tools.mcp.servers["my_server"].timeout_s == 60.0
 
 
+def test_tools_config_normalizes_per_tool_timeouts() -> None:
+    cfg = AppConfig.model_validate(
+        {
+            "tools": {
+                "default_timeout_s": 20,
+                "timeouts": {
+                    "exec": 120,
+                    "browser": "30",
+                    "bad": "nope",
+                    "": 5,
+                },
+            }
+        }
+    )
+
+    assert cfg.tools.timeouts == {"exec": 120.0, "browser": 30.0}
+
+
 # ---------------------------------------------------------------------------
 # 15. AgentMemoryConfig fields
 # ---------------------------------------------------------------------------

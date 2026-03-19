@@ -462,7 +462,15 @@ class SessionStore:
         }
 
     def list_sessions(self) -> list[str]:
-        return sorted(self._restore_session_id(path.stem) for path in self.root.glob("*.jsonl"))
+        ranked: list[tuple[float, str]] = []
+        for path in self.root.glob("*.jsonl"):
+            try:
+                modified_at = float(path.stat().st_mtime)
+            except OSError:
+                modified_at = 0.0
+            ranked.append((modified_at, self._restore_session_id(path.stem)))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [session_id for _mtime, session_id in ranked]
 
     def delete(self, session_id: str) -> bool:
         path = self._path(session_id)

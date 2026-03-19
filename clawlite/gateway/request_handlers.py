@@ -34,6 +34,28 @@ class GatewayRequestHandlers:
             diagnostics_auth=self.diagnostics_require_auth,
         )
 
+    @staticmethod
+    def _cron_counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in jobs:
+            status = str(row.get("last_status", "") or "idle").strip() or "idle"
+            counts[status] = counts.get(status, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def _cron_list_payload(self, *, session_id: str = "") -> dict[str, Any]:
+        scoped_session = str(session_id or "").strip()
+        jobs = self.runtime.cron.list_jobs(session_id=scoped_session or None)
+        enabled_count = sum(1 for row in jobs if bool(row.get("enabled", False)))
+        return {
+            "status": self.runtime.cron.status(),
+            "session_id": scoped_session,
+            "count": len(jobs),
+            "enabled_count": enabled_count,
+            "disabled_count": max(0, len(jobs) - enabled_count),
+            "status_counts": self._cron_counts(jobs),
+            "jobs": jobs,
+        }
+
     async def chat(self, req: Any, request: Request) -> Any:
         self._check_control(request)
         if not str(req.session_id or "").strip() or not str(req.text or "").strip():
@@ -188,9 +210,47 @@ class GatewayRequestHandlers:
         )
         return {"ok": True, "status": "created", "id": job_id}
 
-    async def cron_list(self, *, session_id: str, request: Request) -> dict[str, Any]:
+    async def cron_status(self, *, request: Request) -> dict[str, Any]:
         self._check_control(request)
-        return {"jobs": self.runtime.cron.list_jobs(session_id=session_id)}
+        return self._cron_list_payload()
+
+    async def cron_list(self, *, session_id: str = "", request: Request) -> dict[str, Any]:
+        self._check_control(request)
+        return self._cron_list_payload(session_id=session_id)
+
+    async def cron_get(self, *, job_id: str, session_id: str = "", request: Request) -> dict[str, Any]:
+        self._check_control(request)
+        scoped_session = str(session_id or "").strip()
+        jobs = self.runtime.cron.list_jobs(session_id=scoped_session or None)
+        job = next((row for row in jobs if str(row.get("id", "") or "").strip() == str(job_id or "").strip()), None)
+        if job is None:
+            raise HTTPException(status_code=404, detail="cron_job_not_found")
+        return {"status": self.runtime.cron.status(), "job": job}
+
+    async def cron_toggle(
+        self,
+        *,
+        job_id: str,
+        enabled: bool,
+        session_id: str = "",
+        request: Request,
+    ) -> dict[str, Any]:
+        self._check_control(request)
+        scoped_session = str(session_id or "").strip() or None
+        changed = self.runtime.cron.enable_job(
+            job_id,
+            enabled=bool(enabled),
+            session_id=scoped_session,
+        )
+        if not changed:
+            return {"ok": False, "status": "not_found"}
+        payload = await self.cron_get(job_id=job_id, session_id=str(session_id or ""), request=request)
+        return {
+            "ok": True,
+            "status": "enabled" if enabled else "disabled",
+            "cron_status": payload.get("status", {}),
+            "job": payload.get("job", {}),
+        }
 
     async def cron_remove(self, *, job_id: str, request: Request) -> dict[str, Any]:
         self._check_control(request)

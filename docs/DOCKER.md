@@ -10,6 +10,24 @@ Docker is now a first-class deployment path for ClawLite. This flow is intention
 
 ## Quick Start
 
+Recommended:
+
+```bash
+bash scripts/docker_setup.sh
+```
+
+The helper validates Compose, builds the image, runs `configure --flow quickstart` if no local config exists yet, and starts the gateway. It also exports `CLAWLITE_UID` / `CLAWLITE_GID` from your host user so the container runs rootless without leaving root-owned files behind in `~/.clawlite`.
+
+Optional helper toggles:
+
+- `CLAWLITE_DOCKER_REDIS=1` — enable the Redis profile during setup
+- `CLAWLITE_DOCKER_BROWSER=1` — build the browser-enabled image variant
+- `CLAWLITE_DOCKER_SKIP_BUILD=1` — skip image build
+- `CLAWLITE_DOCKER_SKIP_CONFIGURE=1` — skip `configure --flow quickstart`
+- `CLAWLITE_DOCKER_SKIP_UP=1` — stop after build/config validation
+
+Manual flow still works:
+
 From the repository root:
 
 ```bash
@@ -23,7 +41,7 @@ Open `http://127.0.0.1:8787`.
 ClawLite keeps config and runtime state in a bind mount:
 
 - Host: `~/.clawlite`
-- Container: `/root/.clawlite`
+- Container: `/home/clawlite/.clawlite`
 
 That means the normal config path still works inside the container:
 
@@ -50,6 +68,14 @@ docker compose build
 ```
 
 The `runtime` extra installs the Redis Python client used by the optional Redis bus backend.
+
+The image now runs as a rootless `clawlite` user. Override the build-time UID/GID when your host user is not `1000`:
+
+```bash
+CLAWLITE_UID="$(id -u)" \
+CLAWLITE_GID="$(id -g)" \
+docker compose build
+```
 
 ## Local Providers from the Container
 
@@ -90,6 +116,7 @@ If you want Redis enabled all the time, set those env vars before running `docke
 What this Docker path covers now:
 
 - local build + compose startup
+- rootless runtime under `/home/clawlite`
 - persisted config/state under `~/.clawlite`
 - gateway healthcheck via `/health`
 - optional CLI sidecar container
@@ -98,7 +125,4 @@ What this Docker path covers now:
 
 What remains for later parity work:
 
-- setup helper script similar to `openclaw/docker-setup.sh`
-- CI container build smoke
-- rootless image variant
 - sandbox/browser-optimized runtime images

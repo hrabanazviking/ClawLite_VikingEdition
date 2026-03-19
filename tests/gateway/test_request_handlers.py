@@ -15,7 +15,11 @@ def _build_handlers() -> GatewayRequestHandlers:
         ),
         cron=SimpleNamespace(
             add_job=AsyncMock(return_value="job-1"),
-            list_jobs=lambda session_id: [{"id": "job-1", "session_id": session_id}],
+            list_jobs=lambda session_id=None: [
+                {"id": "job-1", "session_id": session_id or "cli:test", "enabled": True, "last_status": "idle"}
+            ],
+            enable_job=lambda job_id, *, enabled, session_id=None: job_id == "job-1",
+            status=lambda: {"running": True, "jobs": 1, "lock_backend": "fcntl"},
             remove_job=lambda job_id: job_id == "job-1",
         ),
     )
@@ -54,12 +58,21 @@ def test_request_handlers_chat_and_cron_paths() -> None:
             request,
         )
     )
+    cron_status_payload = asyncio.run(handlers.cron_status(request=request))
     cron_list_payload = asyncio.run(handlers.cron_list(session_id="cli:test", request=request))
+    cron_get_payload = asyncio.run(handlers.cron_get(job_id="job-1", session_id="cli:test", request=request))
+    cron_disable_payload = asyncio.run(
+        handlers.cron_toggle(job_id="job-1", enabled=False, session_id="cli:test", request=request)
+    )
     cron_remove_payload = asyncio.run(handlers.cron_remove(job_id="job-1", request=request))
 
     assert chat_payload == {"text": "pong", "model": "fake/test"}
     assert cron_add_payload == {"ok": True, "status": "created", "id": "job-1"}
-    assert cron_list_payload == {"jobs": [{"id": "job-1", "session_id": "cli:test"}]}
+    assert cron_status_payload["status"]["running"] is True
+    assert cron_list_payload["count"] == 1
+    assert cron_list_payload["jobs"][0]["id"] == "job-1"
+    assert cron_get_payload["job"]["id"] == "job-1"
+    assert cron_disable_payload["status"] == "disabled"
     assert cron_remove_payload == {"ok": True, "status": "removed"}
 
 

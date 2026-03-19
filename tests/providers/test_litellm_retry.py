@@ -261,6 +261,60 @@ def test_litellm_provider_invalid_malformed_payload_returns_controlled_error() -
     asyncio.run(_scenario())
 
 
+def test_litellm_provider_refreshes_oauth_once_on_401_then_retries() -> None:
+    async def _scenario() -> None:
+        provider = LiteLLMProvider(
+            base_url="https://api.example/v1",
+            api_key="stale-token",
+            model="gpt-test",
+            provider_name="gemini_oauth",
+            retry_max_attempts=1,
+            oauth_refresh_callback=AsyncMock(return_value={"access_token": "fresh-token"}),
+        )
+
+        responses = [
+            _FakeResponse(401, {"error": {"message": "expired"}}),
+            _FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+        ]
+        post_mock = AsyncMock(side_effect=responses)
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            out = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+        assert out.text == "ok"
+        assert post_mock.call_count == 2
+        assert provider.api_key == "fresh-token"
+        assert provider.diagnostics()["oauth_refresh_success"] == 1
+
+    asyncio.run(_scenario())
+
+
+def test_litellm_provider_preserves_auth_error_when_oauth_refresh_fails() -> None:
+    async def _scenario() -> None:
+        provider = LiteLLMProvider(
+            base_url="https://api.example/v1",
+            api_key="stale-token",
+            model="gpt-test",
+            provider_name="qwen_oauth",
+            retry_max_attempts=1,
+            oauth_refresh_callback=AsyncMock(side_effect=RuntimeError("refresh failed")),
+        )
+
+        post_mock = AsyncMock(side_effect=[_FakeResponse(401, {"error": {"message": "expired"}})])
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            try:
+                await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+            except RuntimeError as exc:
+                assert str(exc) == "provider_http_error:401:expired"
+            else:
+                raise AssertionError("expected auth error")
+
+        diag = provider.diagnostics()
+        assert diag["oauth_refresh_attempts"] == 1
+        assert diag["oauth_refresh_failures"] == 1
+
+    asyncio.run(_scenario())
+
+
 def test_litellm_provider_passes_reasoning_effort_for_openai() -> None:
     async def _scenario() -> None:
         provider = LiteLLMProvider(base_url="https://api.example/v1", api_key="k", model="gpt-test", provider_name="openai", retry_max_attempts=1)

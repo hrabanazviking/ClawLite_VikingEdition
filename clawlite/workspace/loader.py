@@ -38,6 +38,7 @@ DEFAULT_VARS = {
     "user_context": "",
     "user_preferences": "",
 }
+DEFAULT_PROMPT_FILE_MAX_BYTES = 16_384
 
 
 class WorkspaceLoader:
@@ -266,13 +267,31 @@ class WorkspaceLoader:
             return self.ensure_runtime_files()
         return dict(self._last_runtime_health)
 
-    def read(self, filenames: Iterable[str]) -> dict[str, str]:
+    def read(
+        self,
+        filenames: Iterable[str],
+        *,
+        prompt_file_max_bytes: int | None = None,
+        critical_files: Iterable[str] | None = None,
+    ) -> dict[str, str]:
         out: dict[str, str] = {}
+        max_bytes = None if prompt_file_max_bytes is None else max(1, int(prompt_file_max_bytes))
+        critical = {str(item or "").strip() for item in (critical_files or []) if str(item or "").strip()}
         for filename in filenames:
             path = self.workspace / filename
             if not path.exists():
                 continue
+            if max_bytes is not None:
+                try:
+                    file_bytes = int(path.stat().st_size)
+                except Exception:
+                    file_bytes = 0
+                if file_bytes > max_bytes and filename not in critical:
+                    continue
             text = path.read_text(encoding="utf-8", errors="ignore").strip()
+            if max_bytes is not None and len(text.encode("utf-8")) > max_bytes and filename in critical:
+                text = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+                text = f"{text}\n\n[Truncated: prompt file exceeded byte budget]"
             if text:
                 out[filename] = text
         return out
@@ -561,7 +580,13 @@ class WorkspaceLoader:
         parts = [f"## {name}\n{docs[name]}" for name in ordered_files]
         return "\n\n".join(parts).strip()
 
-    def prompt_context(self, *, include_heartbeat: bool = True, include_bootstrap: bool = True) -> str:
+    def prompt_context(
+        self,
+        *,
+        include_heartbeat: bool = True,
+        include_bootstrap: bool = True,
+        prompt_file_max_bytes: int = DEFAULT_PROMPT_FILE_MAX_BYTES,
+    ) -> str:
         self.ensure_runtime_files()
         # USER.md is parsed separately into a structured profile hint so raw placeholders
         # do not leak into the live system prompt.
@@ -571,7 +596,11 @@ class WorkspaceLoader:
         if include_bootstrap and self.should_run_bootstrap():
             files.append("BOOTSTRAP.md")
 
-        docs = self.read(files)
+        docs = self.read(
+            files,
+            prompt_file_max_bytes=prompt_file_max_bytes,
+            critical_files=RUNTIME_CRITICAL_FILES,
+        )
         ordered_files = [name for name in files if name in docs]
         parts = [f"## {name}\n{docs[name]}" for name in ordered_files]
         return "\n\n".join(parts).strip()

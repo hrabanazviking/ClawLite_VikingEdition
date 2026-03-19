@@ -202,6 +202,10 @@ class CronAddRequest(BaseModel):
     name: str = ""
 
 
+class CronToggleRequest(BaseModel):
+    session_id: str = ""
+
+
 class ChannelReplayRequest(BaseModel):
     limit: int = 25
     channel: str = ""
@@ -3371,9 +3375,37 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def cron_add(req: CronAddRequest, request: Request) -> dict[str, Any]:
         return await request_handlers.cron_add(req, request)
 
+    @app.get("/v1/cron/status")
+    async def cron_status(request: Request) -> dict[str, Any]:
+        return await request_handlers.cron_status(request=request)
+
     @app.get("/v1/cron/list")
-    async def cron_list(session_id: str, request: Request) -> dict[str, Any]:
+    async def cron_list(request: Request, session_id: str = "") -> dict[str, Any]:
         return await request_handlers.cron_list(session_id=session_id, request=request)
+
+    @app.get("/v1/cron/{job_id}")
+    async def cron_get(job_id: str, request: Request, session_id: str = "") -> dict[str, Any]:
+        return await request_handlers.cron_get(job_id=job_id, session_id=session_id, request=request)
+
+    @app.post("/v1/cron/{job_id}/enable")
+    async def cron_enable(job_id: str, request: Request, payload: CronToggleRequest | None = None) -> dict[str, Any]:
+        body = payload or CronToggleRequest()
+        return await request_handlers.cron_toggle(
+            job_id=job_id,
+            enabled=True,
+            session_id=str(body.session_id or ""),
+            request=request,
+        )
+
+    @app.post("/v1/cron/{job_id}/disable")
+    async def cron_disable(job_id: str, request: Request, payload: CronToggleRequest | None = None) -> dict[str, Any]:
+        body = payload or CronToggleRequest()
+        return await request_handlers.cron_toggle(
+            job_id=job_id,
+            enabled=False,
+            session_id=str(body.session_id or ""),
+            request=request,
+        )
 
     @app.delete("/v1/cron/{job_id}")
     async def cron_remove(job_id: str, request: Request) -> dict[str, Any]:

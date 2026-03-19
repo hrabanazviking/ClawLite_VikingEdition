@@ -11,9 +11,9 @@ from clawlite.providers.codex_auth import resolve_codex_auth_snapshot
 from clawlite.providers.custom import CustomProvider
 from clawlite.providers.discovery import detect_local_runtime, normalize_local_runtime_base_url
 from clawlite.providers.failover import FailoverCandidate, FailoverProvider
-from clawlite.providers.gemini_auth import load_gemini_auth_file
+from clawlite.providers.gemini_auth import load_gemini_auth_file, load_gemini_auth_state, refresh_gemini_auth_file
 from clawlite.providers.litellm import LiteLLMProvider
-from clawlite.providers.qwen_auth import load_qwen_auth_file
+from clawlite.providers.qwen_auth import load_qwen_auth_file, load_qwen_auth_state, refresh_qwen_auth_file
 
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -652,11 +652,13 @@ def _resolve_generic_oauth(
     token_envs: tuple[str, ...],
     account_envs: tuple[str, ...],
     file_loader,
-) -> tuple[str, str]:
+    file_state_loader,
+) -> dict[str, str]:
     auth = dict(config.get("auth") or {})
     auth_providers = auth.get("providers")
     auth_provider_map = dict(auth_providers) if isinstance(auth_providers, dict) else {}
     auth_file = file_loader()
+    auth_state = file_state_loader()
 
     payload: dict[str, Any] = {}
     for key in provider_names:
@@ -665,40 +667,62 @@ def _resolve_generic_oauth(
             payload = dict(candidate)
             break
 
-    token = (
-        _cfg_value(payload, "access_token", "accessToken")
-        or _cfg_value(payload, "token", "token")
-        or next((os.getenv(env_name, "").strip() for env_name in token_envs if os.getenv(env_name, "").strip()), "")
-        or str(auth_file.get("access_token", "") or "").strip()
-    )
-    account_id = (
+    cfg_source = _cfg_value(payload, "source", "source") or _cfg_value(payload, "auth_source", "authSource")
+    env_token = next((os.getenv(env_name, "").strip() for env_name in token_envs if os.getenv(env_name, "").strip()), "")
+    env_account_id = next((os.getenv(env_name, "").strip() for env_name in account_envs if os.getenv(env_name, "").strip()), "")
+    file_token = str(auth_file.get("access_token", "") or "").strip()
+    file_account_id = str(auth_file.get("account_id", "") or "").strip()
+    file_source = str(auth_state.get("source", auth_file.get("source", "")) or "").strip()
+    cfg_token = _cfg_value(payload, "access_token", "accessToken") or _cfg_value(payload, "token", "token")
+    cfg_account_id = (
         _cfg_value(payload, "account_id", "accountId")
         or _cfg_value(payload, "org_id", "orgId")
         or _cfg_value(payload, "organization", "organization")
-        or next((os.getenv(env_name, "").strip() for env_name in account_envs if os.getenv(env_name, "").strip()), "")
-        or str(auth_file.get("account_id", "") or "").strip()
     )
-    return token, account_id
+
+    if env_token:
+        return {"access_token": env_token, "account_id": env_account_id, "source": "env"}
+    if str(cfg_source or "").startswith("file:") and file_token:
+        return {
+            "access_token": file_token,
+            "account_id": file_account_id or cfg_account_id,
+            "source": file_source or cfg_source,
+        }
+    if cfg_token:
+        return {
+            "access_token": cfg_token,
+            "account_id": cfg_account_id or file_account_id,
+            "source": cfg_source or "config",
+        }
+    return {
+        "access_token": file_token,
+        "account_id": file_account_id or cfg_account_id,
+        "source": file_source,
+    }
 
 
 def _resolve_gemini_oauth(config: dict[str, Any]) -> tuple[str, str]:
-    return _resolve_generic_oauth(
+    resolved = _resolve_generic_oauth(
         config,
         provider_names=("gemini_oauth", "gemini-oauth", "geminiOAuth", "gemini"),
         token_envs=("CLAWLITE_GEMINI_ACCESS_TOKEN", "GEMINI_ACCESS_TOKEN"),
         account_envs=("CLAWLITE_GEMINI_ACCOUNT_ID", "GEMINI_ACCOUNT_ID"),
         file_loader=load_gemini_auth_file,
+        file_state_loader=load_gemini_auth_state,
     )
+    return str(resolved.get("access_token", "") or "").strip(), str(resolved.get("account_id", "") or "").strip()
 
 
 def _resolve_qwen_oauth(config: dict[str, Any]) -> tuple[str, str]:
-    return _resolve_generic_oauth(
+    resolved = _resolve_generic_oauth(
         config,
         provider_names=("qwen_oauth", "qwen-oauth", "qwenOAuth", "qwen"),
         token_envs=("CLAWLITE_QWEN_ACCESS_TOKEN", "QWEN_ACCESS_TOKEN"),
         account_envs=("CLAWLITE_QWEN_ACCOUNT_ID", "QWEN_ACCOUNT_ID"),
         file_loader=load_qwen_auth_file,
+        file_state_loader=load_qwen_auth_state,
     )
+    return str(resolved.get("access_token", "") or "").strip(), str(resolved.get("account_id", "") or "").strip()
 
 
 def _reliability_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -781,7 +805,16 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
 
     if model_lower.startswith(("gemini-oauth/", "gemini_oauth/")):
         model_name = model.split("/", 1)[1] if "/" in model else model
-        token, _account_id = _resolve_gemini_oauth(config)
+        resolved = _resolve_generic_oauth(
+            config,
+            provider_names=("gemini_oauth", "gemini-oauth", "geminiOAuth", "gemini"),
+            token_envs=("CLAWLITE_GEMINI_ACCESS_TOKEN", "GEMINI_ACCESS_TOKEN"),
+            account_envs=("CLAWLITE_GEMINI_ACCOUNT_ID", "GEMINI_ACCOUNT_ID"),
+            file_loader=load_gemini_auth_file,
+            file_state_loader=load_gemini_auth_state,
+        )
+        token = str(resolved.get("access_token", "") or "").strip()
+        gemini_state = load_gemini_auth_state()
         gemini_cfg = _provider_cfg(providers_cfg, "gemini_oauth")
         gemini_base_url = (
             _cfg_value(gemini_cfg, "api_base", "apiBase")
@@ -794,12 +827,27 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
             model=model_name,
             provider_name="gemini_oauth",
             allow_empty_api_key=False,
+            oauth_refresh_callback=(
+                (lambda: refresh_gemini_auth_file(gemini_state.get("path")))
+                if str(resolved.get("source", "") or "").startswith("file:")
+                and str(gemini_state.get("refresh_token", "") or "").strip()
+                else None
+            ),
             **reliability,
         )
 
     if model_lower.startswith(("qwen-oauth/", "qwen_oauth/")):
         model_name = model.split("/", 1)[1] if "/" in model else model
-        token, _account_id = _resolve_qwen_oauth(config)
+        resolved = _resolve_generic_oauth(
+            config,
+            provider_names=("qwen_oauth", "qwen-oauth", "qwenOAuth", "qwen"),
+            token_envs=("CLAWLITE_QWEN_ACCESS_TOKEN", "QWEN_ACCESS_TOKEN"),
+            account_envs=("CLAWLITE_QWEN_ACCOUNT_ID", "QWEN_ACCOUNT_ID"),
+            file_loader=load_qwen_auth_file,
+            file_state_loader=load_qwen_auth_state,
+        )
+        token = str(resolved.get("access_token", "") or "").strip()
+        qwen_state = load_qwen_auth_state()
         qwen_cfg = _provider_cfg(providers_cfg, "qwen_oauth")
         qwen_base_url = (
             _cfg_value(qwen_cfg, "api_base", "apiBase")
@@ -812,6 +860,12 @@ def _build_provider_single(config: dict[str, Any]) -> LLMProvider:
             model=model_name,
             provider_name="qwen_oauth",
             allow_empty_api_key=False,
+            oauth_refresh_callback=(
+                (lambda: refresh_qwen_auth_file(qwen_state.get("path")))
+                if str(resolved.get("source", "") or "").startswith("file:")
+                and str(qwen_state.get("refresh_token", "") or "").strip()
+                else None
+            ),
             **reliability,
         )
 

@@ -963,7 +963,8 @@ class SkillsLoader:
     def _parse_header(path: Path, *, source: str) -> SkillSpec | None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         meta, body = _extract_frontmatter(text)
-        name = str(meta.get("name", "")).strip() or path.parent.name
+        raw_name = str(meta.get("name", "")).strip()
+        name = raw_name or path.parent.name
         description = str(meta.get("description", "")).strip()
         always = _to_bool(meta.get("always", "false"))
         requires, _ = _coerce_list(meta.get("requires"))
@@ -996,6 +997,8 @@ class SkillsLoader:
         metadata_as_text = {key: _serialize_frontmatter_value(value) for key, value in meta.items()}
         version = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
         all_contract_issues: list[str] = []
+        if "name" in meta and not raw_name:
+            all_contract_issues.append("metadata:empty_name")
         for issue in [*req_issues, *contract_issues]:
             if issue not in all_contract_issues:
                 all_contract_issues.append(issue)

@@ -1,6 +1,7 @@
 """Context window budget trimming for agent message history."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -33,11 +34,27 @@ class ContextWindowManager:
 
         def _chars(m: dict[str, Any]) -> int:
             content = m.get("content", "")
+            tool_calls = m.get("tool_calls")
+            tool_call_id = str(m.get("tool_call_id", "") or "").strip()
+            tool_name = str(m.get("name", "") or "").strip()
+            metadata_cost = 0
+            if isinstance(tool_calls, list) and tool_calls:
+                try:
+                    metadata_cost += len(json.dumps(tool_calls, ensure_ascii=False, separators=(",", ":")))
+                except Exception:
+                    metadata_cost += len(str(tool_calls))
+            if tool_call_id:
+                metadata_cost += len(tool_call_id) + 12
+            if tool_name:
+                metadata_cost += len(tool_name) + 8
             if isinstance(content, str):
-                return len(content)
+                return len(content) + metadata_cost
             if isinstance(content, list):
-                return sum(len(str(part.get("text", "") if isinstance(part, dict) else part)) for part in content)
-            return len(str(content))
+                return (
+                    sum(len(str(part.get("text", "") if isinstance(part, dict) else part)) for part in content)
+                    + metadata_cost
+                )
+            return len(str(content)) + metadata_cost
 
         system_chars = sum(_chars(m) for m in system)
         remaining_budget = max(0, self._budget_chars - system_chars)

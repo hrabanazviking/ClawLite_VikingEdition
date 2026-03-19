@@ -275,6 +275,98 @@ def test_cli_skills_check_returns_diagnostics_report(capsys) -> None:
     assert summary["enabled"] == summary["total"] - summary["disabled"]
 
 
+def test_cli_skills_config_updates_config_entry_and_preserves_other_skills_keys(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"workspace_path: {tmp_path / 'workspace'}",
+                f"state_path: {tmp_path / 'state'}",
+                "skills:",
+                "  allowBundled:",
+                "    - cron",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "skills",
+            "config",
+            "cron",
+            "--api-key",
+            "secret-token",
+            "--env",
+            "CRON_TOKEN=from-config",
+            "--disable",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["action"] == "skills_config"
+    assert payload["skill_key"] == "cron"
+    assert payload["entry"] == {
+        "apiKey": "secret-token",
+        "env": {"CRON_TOKEN": "from-config"},
+        "enabled": False,
+    }
+
+    raw = config_path.read_text(encoding="utf-8")
+    assert "allowBundled:" in raw
+    assert "apiKey: secret-token" in raw
+    assert "CRON_TOKEN: from-config" in raw
+
+    rc_show = main(["--config", str(config_path), "skills", "config", "cron"])
+    assert rc_show == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["action"] == "skills_config_show"
+    assert shown["entry"]["enabled"] is False
+
+
+def test_cli_skills_config_writes_to_profile_overlay(tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "workspace_path": str(tmp_path / "workspace"),
+                "state_path": str(tmp_path / "state"),
+                "skills": {"allowBundled": ["cron"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "--config",
+            str(config_path),
+            "--profile",
+            "prod",
+            "skills",
+            "config",
+            "cron",
+            "--enable",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["config_path"].endswith("config.prod.json")
+    assert payload["entry"] == {"enabled": True}
+
+    base_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "entries" not in base_payload["skills"]
+
+    profile_payload = json.loads((tmp_path / "config.prod.json").read_text(encoding="utf-8"))
+    assert profile_payload["skills"]["entries"]["cron"]["enabled"] is True
+
+
 def test_cli_skills_enable_disable_and_pin_unpin(tmp_path: Path, capsys) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

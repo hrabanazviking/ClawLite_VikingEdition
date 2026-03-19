@@ -750,6 +750,27 @@ def test_skills_loader_normalizes_requirement_schema_and_reports_invalid_env_nam
     assert row.available is False
 
 
+def test_skills_loader_marks_explicit_empty_name_as_invalid(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "fallback-name"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: \"\"\n"
+        "description: invalid name\n"
+        "command: echo test\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(builtin_root=tmp_path)
+    row = loader.get("fallback-name")
+    assert row is not None
+    assert row.name == "fallback-name"
+    assert "metadata:empty_name" in row.contract_issues
+    assert row.available is False
+
+
 def test_skills_loader_diagnostics_report_aggregates_deterministically(tmp_path: Path) -> None:
     command_dir = tmp_path / "command-ok"
     command_dir.mkdir(parents=True, exist_ok=True)

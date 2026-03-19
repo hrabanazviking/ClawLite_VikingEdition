@@ -93,9 +93,7 @@ clawlite run "hello — what can you do?"
 ClawLite now ships an official Docker path:
 
 ```bash
-docker compose build
-docker compose run --rm clawlite-cli configure --flow quickstart
-docker compose up -d clawlite-gateway
+bash scripts/docker_setup.sh
 ```
 
 This persists state in `~/.clawlite`, exposes the dashboard on `http://127.0.0.1:8787`, and includes a CLI sidecar for one-shot commands like:
@@ -110,6 +108,8 @@ If you want the Redis bus backend from Docker, enable the `redis` profile and th
 ```bash
 CLAWLITE_BUS_BACKEND=redis docker compose --profile redis up -d
 ```
+
+The Docker image now runs as a non-root `clawlite` user by default. If your host UID/GID is not `1000`, export `CLAWLITE_UID` and `CLAWLITE_GID` before building or use the setup helper, which does that automatically.
 
 Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 
@@ -131,13 +131,17 @@ Full guide: [`docs/DOCKER.md`](docs/DOCKER.md)
 - Operators can now review those pending tool approvals from the gateway or CLI with `clawlite tools approvals|approve|reject`, and revoke active temporary grants explicitly with `clawlite tools revoke-grant`. Approval snapshots now include structured context such as exec binary/env keys/cwd and browser or web host targets.
 - Skills now include a dedicated `clawlite skills doctor` view that turns deterministic diagnostics into actionable remediation hints for missing env vars, binaries, config keys, and bundled-skill policy blocks, with optional `--status` / `--source` / `--query` filters for operator triage.
 - Managed skills now expose richer local lifecycle state in the CLI, including aggregate `status_counts` plus resolved marketplace state after `install`, `update`, `sync`, and `remove`. `skills search` also includes matching locally managed skills for quick operator triage.
+- `clawlite skills config <name>` now gives the operator a direct path to inspect or update `skills.entries.<skillKey>` in the active config/profile, including `apiKey`, per-skill `env`, and `enabled` overrides without editing JSON/YAML manually.
 - Workspace defaults no longer inject fake user profile values like `Owner`, and explicit “search on the internet / latest” requests now add a web-research requirement so the engine is pushed toward `web_search` / `web_fetch` before answering.
 - Telegram outbound rendering now cleans up inline numbered lists, markdown headings, and pipe tables into more readable channel-safe HTML.
 - Phase 7 is complete on `main`: `self_evolution` now uses provider-direct proposal, pre-apply patch policy, isolated git worktree branches, configurable branch prefixes, and Telegram/Discord approval callbacks that record human review state while staying disabled by default.
 - Gateway startup now uses per-subsystem timeouts, so a slow channel transport no longer blocks the whole control plane from coming up.
 - OAuth-backed free-tier cloud setup now includes `gemini-oauth` and `qwen-oauth` alongside `openai-codex`.
+- File-backed `gemini-oauth` and `qwen-oauth` providers now refresh expired access tokens once on `401`, persist the renewed token back into the local CLI auth file, and retry the request automatically.
 - The onboarding wizard now suggests provider-specific model ids, expected base URLs, and OAuth re-login hints before it probes the selected provider.
 - Wizard coverage now also includes `azure-openai`, `aihubmix`, `siliconflow`, and `cerebras`, matching the current OpenClaw/nanobot parity slice for OpenAI-compatible providers.
+- Prompt/context hardening on `main` now includes larger history budget allocation, optional semantic compression for trimmed history, optional oversized tool-result compaction, workspace prompt file byte ceilings, and explicit per-tool timeout overrides through `tools.timeouts.<tool>`.
+- The cron control plane now exposes richer operational state: `/v1/cron/status`, expanded `/v1/cron/list`, per-job inspection, and native enable/disable controls on top of the existing scheduler.
 - Runtime scale-out and observability are now in place as opt-in surfaces: Redis bus backend, OTLP telemetry hooks, session TTL, history compaction, `sqlite-vec`, and `memory_compact`.
 - Latest validation on `main`: `python -m pytest tests -q --tb=short` → `1561 passed, 1 skipped`; `python -m pytest -q tests/runtime/test_autonomy_actions.py tests/gateway/test_server.py tests/runtime/test_self_evolution.py` → `190 passed`; `bash scripts/smoke_test.sh` → `7 ok / 0 failure(s)`.
 - Tracking docs: [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROBUSTNESS_SCORECARD.md`](docs/ROBUSTNESS_SCORECARD.md).
@@ -510,6 +514,7 @@ clawlite skills check                  # diagnostics (missing deps, fallback hin
 clawlite skills doctor                 # actionable remediation hints for broken skills
 clawlite skills doctor --status missing_requirements --source builtin
 clawlite skills doctor --query github
+clawlite skills config github --api-key ghp_example --env GH_HOST=github.example.com --enable
 clawlite skills enable/disable <name>  # toggle skill
 clawlite skills pin/unpin <name>       # always-include / unpin
 clawlite skills pin-version <name> <version>  # lock to specific version

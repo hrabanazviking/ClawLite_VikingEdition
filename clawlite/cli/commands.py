@@ -67,9 +67,12 @@ from clawlite.cli.ops import telegram_live_probe
 from clawlite.cli.onboarding import build_dashboard_handoff
 from clawlite.cli.onboarding import run_onboarding_wizard
 from clawlite.cli.onboarding import _run_configure_flow as run_configure_flow
+from clawlite.config.loader import config_payload_path
 from clawlite.config.loader import load_config
+from clawlite.config.loader import load_target_config_payload
 from clawlite.config.loader import DEFAULT_CONFIG_PATH
 from clawlite.config.loader import save_config
+from clawlite.config.loader import save_raw_config_payload
 from clawlite.core.skills import SkillsLoader
 from clawlite.scheduler.cron import CronService
 from clawlite.tools.registry import ToolRegistry
@@ -153,6 +156,20 @@ def _skills_loader_for_args(args: argparse.Namespace) -> SkillsLoader:
         cfg = load_config(config_path)
         return SkillsLoader(state_path=Path(cfg.state_path) / "skills-state.json")
     return SkillsLoader()
+
+
+def _parse_skill_env_assignments(values: list[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text or "=" not in text:
+            raise ValueError("expected KEY=VALUE for --env")
+        key, value = text.split("=", 1)
+        env_key = str(key or "").strip()
+        if not env_key:
+            raise ValueError("expected KEY=VALUE for --env")
+        env[env_key] = value
+    return env
 
 
 def _skills_managed_root(loader: SkillsLoader) -> Path:
@@ -1545,7 +1562,7 @@ def _skills_doctor_hint(row: dict[str, Any]) -> str:
         if primary_env and primary_env in env_items:
             skill_key = str(row.get("skill_key", "") or row.get("name", "")).strip()
             return (
-                f"Export {primary_env} or set skills.entries.{skill_key}.apiKey / env overrides in config."
+                f"Export {primary_env}, set skills.entries.{skill_key}.apiKey manually, or run clawlite skills config {skill_key}."
             )
         return f"Set the required environment variables: {', '.join(env_items)}."
 
@@ -1758,6 +1775,117 @@ def _resolve_managed_skill(loader: SkillsLoader, raw_name: str) -> tuple[Any | N
         resolved_slug = slug or str(raw_name or "").strip()
         return row, resolved_slug, managed_root / "skills" / resolved_slug
     return None, "", fallback
+
+
+def cmd_skills_config(args: argparse.Namespace) -> int:
+    loader = _skills_loader_for_args(args)
+    row = loader.get(args.name)
+    if row is None:
+        _print_json({"ok": False, "error": f"skill_not_found:{args.name}"})
+        return 1
+
+    if bool(getattr(args, "enable", False)) and bool(getattr(args, "disable", False)):
+        _print_json({"ok": False, "error": "skills_config_conflicting_enabled_flags"})
+        return 1
+    if bool(getattr(args, "clear", False)) and (
+        str(getattr(args, "api_key", "") or "").strip()
+        or bool(getattr(args, "clear_api_key", False))
+        or list(getattr(args, "env", []) or [])
+        or bool(getattr(args, "clear_env", False))
+        or bool(getattr(args, "enable", False))
+        or bool(getattr(args, "disable", False))
+    ):
+        _print_json({"ok": False, "error": "skills_config_clear_conflicts_with_other_flags"})
+        return 1
+    if bool(getattr(args, "clear_api_key", False)) and str(getattr(args, "api_key", "") or "").strip():
+        _print_json({"ok": False, "error": "skills_config_conflicting_api_key_flags"})
+        return 1
+
+    skill_key = row.skill_key or row.name
+    target_path = config_payload_path(getattr(args, "config", None), profile=getattr(args, "profile", None))
+    payload = load_target_config_payload(getattr(args, "config", None), profile=getattr(args, "profile", None))
+    skills_cfg = dict(payload.get("skills") or {})
+    entries = dict(skills_cfg.get("entries") or {})
+    current_entry = dict(entries.get(skill_key) or {})
+
+    mutation_requested = any(
+        [
+            bool(getattr(args, "clear", False)),
+            bool(getattr(args, "clear_api_key", False)),
+            bool(getattr(args, "clear_env", False)),
+            bool(getattr(args, "enable", False)),
+            bool(getattr(args, "disable", False)),
+            bool(list(getattr(args, "env", []) or [])),
+            bool(str(getattr(args, "api_key", "") or "").strip()),
+        ]
+    )
+    if not mutation_requested:
+        _print_json(
+            {
+                "ok": True,
+                "action": "skills_config_show",
+                "name": row.name,
+                "skill_key": skill_key,
+                "primary_env": row.primary_env,
+                "config_path": str(target_path),
+                "entry": current_entry,
+            }
+        )
+        return 0
+
+    if bool(getattr(args, "clear", False)):
+        entries.pop(skill_key, None)
+    else:
+        entry = dict(current_entry)
+        if bool(getattr(args, "clear_api_key", False)):
+            entry.pop("apiKey", None)
+            entry.pop("api_key", None)
+        api_key = str(getattr(args, "api_key", "") or "").strip()
+        if api_key:
+            entry["apiKey"] = api_key
+
+        if bool(getattr(args, "clear_env", False)):
+            entry.pop("env", None)
+        env_values = list(getattr(args, "env", []) or [])
+        if env_values:
+            merged_env = dict(entry.get("env") or {})
+            merged_env.update(_parse_skill_env_assignments(env_values))
+            entry["env"] = merged_env
+
+        if bool(getattr(args, "enable", False)):
+            entry["enabled"] = True
+        elif bool(getattr(args, "disable", False)):
+            entry["enabled"] = False
+
+        if entry:
+            entries[skill_key] = entry
+        else:
+            entries.pop(skill_key, None)
+
+    if entries:
+        skills_cfg["entries"] = entries
+    else:
+        skills_cfg.pop("entries", None)
+    if skills_cfg:
+        payload["skills"] = skills_cfg
+    else:
+        payload.pop("skills", None)
+
+    saved_path = save_raw_config_payload(payload, getattr(args, "config", None), profile=getattr(args, "profile", None))
+    updated_payload = load_target_config_payload(getattr(args, "config", None), profile=getattr(args, "profile", None))
+    updated_entry = dict(dict(updated_payload.get("skills") or {}).get("entries") or {}).get(skill_key, {})
+    _print_json(
+        {
+            "ok": True,
+            "action": "skills_config",
+            "name": row.name,
+            "skill_key": skill_key,
+            "primary_env": row.primary_env,
+            "config_path": str(saved_path),
+            "entry": updated_entry,
+        }
+    )
+    return 0
 
 
 def cmd_skills_enable(args: argparse.Namespace) -> int:
@@ -2442,6 +2570,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills_show = skills_sub.add_parser("show", help="Show one skill body + metadata")
     p_skills_show.add_argument("name")
     p_skills_show.set_defaults(handler=cmd_skills_show)
+
+    p_skills_config = skills_sub.add_parser(
+        "config",
+        help="Show or update skills.entries.<skillKey> config for one skill",
+    )
+    p_skills_config.add_argument("name")
+    p_skills_config.add_argument("--api-key", default="", help="Set skills.entries.<skillKey>.apiKey")
+    p_skills_config.add_argument("--clear-api-key", action="store_true", help="Remove skills.entries.<skillKey>.apiKey")
+    p_skills_config.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Add or update one env override as KEY=VALUE; repeat for multiple values",
+    )
+    p_skills_config.add_argument("--clear-env", action="store_true", help="Remove all env overrides for the skill")
+    p_skills_config.add_argument("--enable", action="store_true", help="Set skills.entries.<skillKey>.enabled=true")
+    p_skills_config.add_argument("--disable", action="store_true", help="Set skills.entries.<skillKey>.enabled=false")
+    p_skills_config.add_argument("--clear", action="store_true", help="Remove the entire skills.entries.<skillKey> entry")
+    p_skills_config.set_defaults(handler=cmd_skills_config)
 
     p_skills_check = skills_sub.add_parser("check", help="Emit aggregated deterministic skills diagnostics")
     p_skills_check.set_defaults(handler=cmd_skills_check)

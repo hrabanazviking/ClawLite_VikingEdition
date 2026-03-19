@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from clawlite.config.loader import load_config, save_config
+from clawlite.config.loader import config_payload_path, load_config, load_target_config_payload, save_config, save_raw_config_payload
 from clawlite.config.schema import AppConfig
 
 
@@ -48,6 +48,49 @@ def test_load_config_yaml_file(tmp_path: Path) -> None:
     assert cfg.provider.model == "openai/gpt-4.1-mini"
     assert cfg.agents.defaults.model == "openai/gpt-4.1-mini"
     assert cfg.gateway.port == 9999
+
+
+def test_save_raw_config_payload_preserves_skills_section_in_yaml(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+
+    saved = save_raw_config_payload(
+        {
+            "workspace_path": str(tmp_path / "workspace"),
+            "state_path": str(tmp_path / "state"),
+            "skills": {
+                "allowBundled": ["cron"],
+                "entries": {
+                    "cron": {
+                        "enabled": False,
+                        "apiKey": "secret-token",
+                        "env": {"CRON_TOKEN": "from-config"},
+                    }
+                },
+            },
+        },
+        path,
+    )
+
+    assert saved == path
+    raw = path.read_text(encoding="utf-8")
+    assert "allowBundled:" in raw
+    assert "apiKey: secret-token" in raw
+    payload = load_target_config_payload(path)
+    assert payload["skills"]["allowBundled"] == ["cron"]
+    assert payload["skills"]["entries"]["cron"]["enabled"] is False
+    assert payload["skills"]["entries"]["cron"]["env"]["CRON_TOKEN"] == "from-config"
+
+
+def test_save_raw_config_payload_uses_profile_target_path(tmp_path: Path) -> None:
+    base_path = tmp_path / "config.json"
+    base_path.write_text("{}", encoding="utf-8")
+
+    saved = save_raw_config_payload({"skills": {"entries": {"cron": {"enabled": True}}}}, base_path, profile="prod")
+
+    assert saved == config_payload_path(base_path, profile="prod")
+    assert saved.name == "config.prod.json"
+    payload = json.loads(saved.read_text(encoding="utf-8"))
+    assert payload["skills"]["entries"]["cron"]["enabled"] is True
 
 
 def test_save_config_uses_atomic_replace_in_same_directory(tmp_path: Path, monkeypatch) -> None:

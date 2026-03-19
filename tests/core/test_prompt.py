@@ -78,6 +78,7 @@ def test_prompt_builder_applies_token_budget_shaping_deterministically(
     assert "old-message" not in out.history_messages[0]["content"]
     assert "[Compressed Session History]" in out.history_summary
     assert "old-message" in out.history_summary
+    assert len(out.trimmed_history_rows) == 1
 
 
 def test_prompt_builder_preserves_soul_and_structured_user_profile_under_workspace_pressure(
@@ -224,6 +225,39 @@ def test_prompt_builder_replaces_legacy_identity_fallback_with_stable_identity(
     assert "Fill this during the first real conversation" not in out.system_prompt
     assert "## Name" in out.system_prompt
     assert "ClawLite" in out.system_prompt
+
+
+def test_prompt_builder_skips_oversized_noncritical_workspace_files(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("I am ClawLite", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("agent-rules " * 400, encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path, workspace_prompt_file_max_bytes=64)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=[],
+    )
+
+    assert "## AGENTS.md" not in out.system_prompt
+    assert "## IDENTITY.md" in out.system_prompt
+
+
+def test_prompt_builder_truncates_oversized_critical_workspace_files(tmp_path: Path) -> None:
+    (tmp_path / "IDENTITY.md").write_text("I am ClawLite " * 200, encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("Be direct", encoding="utf-8")
+
+    builder = PromptBuilder(tmp_path, workspace_prompt_file_max_bytes=96)
+    out = builder.build(
+        user_text="hello",
+        memory_snippets=[],
+        history=[],
+        skills_for_prompt=[],
+    )
+
+    assert "## IDENTITY.md" in out.system_prompt
+    assert "[Truncated: prompt file exceeded byte budget]" in out.system_prompt
 
 
 def test_prompt_builder_adds_always_on_identity_guard_section(tmp_path: Path) -> None:

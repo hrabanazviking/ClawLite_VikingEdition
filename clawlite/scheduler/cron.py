@@ -23,6 +23,11 @@ except Exception:  # pragma: no cover
     fcntl = None
 
 try:
+    import portalocker
+except Exception:  # pragma: no cover
+    portalocker = None
+
+try:
     from croniter import croniter
 except Exception:  # pragma: no cover
     croniter = None
@@ -120,6 +125,14 @@ class CronService:
                 lock = threading.RLock()
                 cls._PATH_LOCKS[key] = lock
             return lock
+
+    @staticmethod
+    def _lock_backend_name() -> str:
+        if fcntl is not None:
+            return "fcntl"
+        if portalocker is not None:
+            return "portalocker"
+        return "threading"
 
     def _task_snapshot(self) -> tuple[str, str]:
         task = self._task
@@ -228,18 +241,22 @@ class CronService:
     def _store_lock(self):
         fd: int | None = None
         lock_file = None
-        fallback_lock = self._path_lock(self.path) if fcntl is None else None
+        fallback_lock = self._path_lock(self.path) if fcntl is None and portalocker is None else None
         try:
             if fallback_lock is not None:
                 fallback_lock.acquire()
-            lock_file = self._lock_path.open("a+", encoding="utf-8")
+            lock_file = self._lock_path.open("a+b")
             fd = lock_file.fileno()
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
+            elif portalocker is not None:
+                portalocker.lock(lock_file, portalocker.LOCK_EX)
             yield
         finally:
             if fd is not None and fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
+            elif lock_file is not None and portalocker is not None:
+                portalocker.unlock(lock_file)
             if lock_file is not None:
                 lock_file.close()
             if fallback_lock is not None:
@@ -396,6 +413,7 @@ class CronService:
             "jobs": len(self._jobs),
             "store_path": str(self.path),
             "default_timezone": self.default_timezone,
+            "lock_backend": self._lock_backend_name(),
             "load_attempts": int(self._diag.get("load_attempts", 0) or 0),
             "load_success": int(self._diag.get("load_success", 0) or 0),
             "load_failures": int(self._diag.get("load_failures", 0) or 0),

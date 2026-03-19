@@ -5,7 +5,10 @@ x-clawlite-common: &clawlite-common
     args:
       CLAWLITE_PIP_EXTRAS: "${CLAWLITE_PIP_EXTRAS:-telegram,media,observability,runtime}"
       CLAWLITE_INSTALL_BROWSER: "${CLAWLITE_INSTALL_BROWSER:-}"
+      CLAWLITE_UID: "${CLAWLITE_UID:-1000}"
+      CLAWLITE_GID: "${CLAWLITE_GID:-1000}"
   environment:
+    HOME: /home/clawlite
     PYTHONUNBUFFERED: "1"
     CLAWLITE_BUS_BACKEND: "${CLAWLITE_BUS_BACKEND:-inprocess}"
     CLAWLITE_BUS_REDIS_URL: "${CLAWLITE_BUS_REDIS_URL:-redis://redis:6379/0}"
@@ -20,7 +23,7 @@ x-clawlite-common: &clawlite-common
   tmpfs:
     - /tmp
   volumes:
-    - ${HOME:-.}/.clawlite:/root/.clawlite
+    - ${HOME:-.}/.clawlite:/home/clawlite/.clawlite
 
 services:
   clawlite-gateway:

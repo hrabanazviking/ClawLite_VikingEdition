@@ -309,7 +309,11 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         journal_path=Path(config.state_path) / "autonomy-wake.json",
     )
 
-    tools = ToolRegistry(safety=config.tools.safety)
+    tools = ToolRegistry(
+        safety=config.tools.safety,
+        default_timeout_s=config.tools.default_timeout_s,
+        tool_timeouts=config.tools.timeouts,
+    )
     tools.register(
         ExecTool(
             workspace_path=workspace_path,
@@ -423,7 +427,11 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
     tools.register(BrowserTool())
     tools.register(TTSTool())
     tools.register(PdfReadTool())
-    prompt = PromptBuilder(workspace_path=config.workspace_path)
+    prompt = PromptBuilder(
+        workspace_path=config.workspace_path,
+        context_token_budget=config.agents.defaults.context_token_budget,
+        workspace_prompt_file_max_bytes=config.agents.defaults.workspace_prompt_file_max_bytes,
+    )
 
     engine = AgentEngine(
         provider=provider,
@@ -437,6 +445,9 @@ def build_runtime(config: AppConfig) -> RuntimeContainer:
         max_tokens=config.agents.defaults.max_tokens,
         temperature=config.agents.defaults.temperature,
         memory_window=config.agents.defaults.memory_window,
+        semantic_history_summary_enabled=config.agents.defaults.semantic_history_summary_enabled,
+        tool_result_compaction_enabled=config.agents.defaults.tool_result_compaction_enabled,
+        tool_result_compaction_threshold_chars=config.agents.defaults.tool_result_compaction_threshold_chars,
         reasoning_effort_default=config.agents.defaults.reasoning_effort,
         loop_detection=LoopDetectionSettings(
             enabled=config.tools.loop_detection.enabled,

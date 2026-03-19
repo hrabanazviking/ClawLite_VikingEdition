@@ -405,12 +405,16 @@ Gemini OAuth is resolved in this order:
 3. `GEMINI_ACCESS_TOKEN`
 4. auth file at `~/.gemini/oauth_creds.json` or `CLAWLITE_GEMINI_AUTH_PATH`
 
+When the resolved Gemini token came from the local auth file and a request gets an HTTP `401`, ClawLite refreshes that file-backed token once through Google's OAuth token endpoint, writes the renewed access token back to the same file, and retries the provider call once.
+
 Qwen OAuth is resolved in this order:
 
 1. `auth.providers.qwen_oauth` in config
 2. `CLAWLITE_QWEN_ACCESS_TOKEN`
 3. `QWEN_ACCESS_TOKEN`
 4. auth file at `~/.qwen/oauth_creds.json`, `~/.qwen/auth.json`, or `CLAWLITE_QWEN_AUTH_PATH`
+
+When the resolved Qwen token came from the local auth file and a request gets an HTTP `401`, ClawLite refreshes that file-backed token once through the Qwen portal OAuth token endpoint, persists the renewed token back to the same auth file, and retries the provider call once.
 
 CLI helpers:
 

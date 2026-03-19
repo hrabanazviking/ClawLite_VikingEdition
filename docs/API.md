@@ -1242,9 +1242,76 @@ Example response:
 
 ```json
 {
+  "status": {
+    "running": true,
+    "jobs": 1,
+    "lock_backend": "fcntl"
+  },
+  "session_id": "cli:cron",
+  "count": 1,
+  "enabled_count": 1,
+  "disabled_count": 0,
+  "status_counts": {
+    "idle": 1
+  },
   "jobs": []
 }
 ```
+
+## `GET /v1/cron/status`
+
+Returns the same operational envelope as `GET /v1/cron/list`, but scoped to all cron jobs instead of a single session.
+
+## `GET /v1/cron/{job_id}?session_id=...`
+
+Example response:
+
+```json
+{
+  "status": {
+    "running": true,
+    "jobs": 1,
+    "lock_backend": "fcntl"
+  },
+  "job": {
+    "id": "job_xxx",
+    "name": "stretch",
+    "session_id": "telegram:123",
+    "enabled": true,
+    "last_status": "idle"
+  }
+}
+```
+
+## `POST /v1/cron/{job_id}/enable`
+
+Body:
+
+```json
+{
+  "session_id": "telegram:123"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "status": "enabled",
+  "cron_status": {
+    "running": true,
+    "jobs": 1,
+    "lock_backend": "fcntl"
+  },
+  "job": {
+    "id": "job_xxx",
+    "enabled": true
+  }
+}
+```
+
+`POST /v1/cron/{job_id}/disable` has the same shape, but returns `"status": "disabled"`.
 
 ## `DELETE /v1/cron/{job_id}`
 

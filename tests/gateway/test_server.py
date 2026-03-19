@@ -6227,7 +6227,10 @@ def test_gateway_cron_endpoints_roundtrip(tmp_path: Path) -> None:
 
         listed = client.get("/v1/cron/list", params={"session_id": "cli:cron"})
         assert listed.status_code == 200
-        jobs = listed.json()["jobs"]
+        listed_payload = listed.json()
+        assert listed_payload["status"]["lock_backend"] in {"fcntl", "portalocker", "threading"}
+        assert listed_payload["count"] == 1
+        jobs = listed_payload["jobs"]
         assert len(jobs) == 1
         job = jobs[0]
         assert job["id"] == job_id
@@ -6238,6 +6241,24 @@ def test_gateway_cron_endpoints_roundtrip(tmp_path: Path) -> None:
         assert job["enabled"] is True
         assert isinstance(job["next_run_iso"], str) and job["next_run_iso"]
         assert job["payload"]["prompt"] == "Run cron check"
+
+        status_response = client.get("/v1/cron/status")
+        assert status_response.status_code == 200
+        assert status_response.json()["count"] == 1
+
+        job_response = client.get(f"/v1/cron/{job_id}", params={"session_id": "cli:cron"})
+        assert job_response.status_code == 200
+        assert job_response.json()["job"]["id"] == job_id
+
+        disabled = client.post(f"/v1/cron/{job_id}/disable", json={"session_id": "cli:cron"})
+        assert disabled.status_code == 200
+        assert disabled.json()["status"] == "disabled"
+        assert disabled.json()["job"]["enabled"] is False
+
+        enabled = client.post(f"/v1/cron/{job_id}/enable", json={"session_id": "cli:cron"})
+        assert enabled.status_code == 200
+        assert enabled.json()["status"] == "enabled"
+        assert enabled.json()["job"]["enabled"] is True
 
         deleted = client.delete(f"/v1/cron/{job_id}")
         assert deleted.status_code == 200

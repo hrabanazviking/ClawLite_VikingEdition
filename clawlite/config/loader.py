@@ -64,6 +64,18 @@ def _profile_path(base_path: Path, profile: str) -> Path:
     return base_path.with_name(f"{base_path.name}.{profile}")
 
 
+def config_payload_path(
+    path: str | Path | None = None,
+    *,
+    profile: str | None = None,
+) -> Path:
+    target = Path(path) if path else DEFAULT_CONFIG_PATH
+    resolved_profile = _normalize_profile_name(profile if profile is not None else os.getenv("CLAWLITE_PROFILE", ""))
+    if resolved_profile:
+        return _profile_path(target, resolved_profile)
+    return target
+
+
 
 
 def _migrate_config(raw: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +250,14 @@ def load_raw_config_payload(
     return file_cfg
 
 
+def load_target_config_payload(
+    path: str | Path | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    return _migrate_config(_read_file(config_payload_path(path, profile=profile)))
+
+
 def load_config(
     path: str | Path | None = None,
     *,
@@ -253,14 +273,32 @@ def load_config(
 
 
 def save_config(config: AppConfig, path: str | Path | None = None) -> Path:
-    target = Path(path) if path else DEFAULT_CONFIG_PATH
+    return save_raw_config_payload(config.to_dict(), path)
+
+
+def save_raw_config_payload(
+    payload: dict[str, Any],
+    path: str | Path | None = None,
+    *,
+    profile: str | None = None,
+) -> Path:
+    target = config_payload_path(path, profile=profile)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(config.to_dict(), ensure_ascii=False, indent=2)
+    if target.suffix.lower() in {".yaml", ".yml"}:
+        try:
+            import yaml  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("pyyaml is required for YAML config files") from exc
+        serialized = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
+    else:
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
+            handle.write(serialized)
+            if not serialized.endswith("\n"):
+                handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, target)

@@ -2,10 +2,14 @@ FROM python:3.12-slim-bookworm
 
 ARG CLAWLITE_PIP_EXTRAS="telegram,media,observability,runtime"
 ARG CLAWLITE_INSTALL_BROWSER=""
+ARG CLAWLITE_UID=1000
+ARG CLAWLITE_GID=1000
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/home/clawlite \
+    PLAYWRIGHT_BROWSERS_PATH=/home/clawlite/.cache/ms-playwright
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -31,10 +35,15 @@ RUN if [ -n "${CLAWLITE_INSTALL_BROWSER}" ]; then \
       python -m playwright install --with-deps chromium; \
     fi
 
-RUN mkdir -p /root/.clawlite
+RUN groupadd --gid "${CLAWLITE_GID}" clawlite && \
+    useradd --uid "${CLAWLITE_UID}" --gid "${CLAWLITE_GID}" --create-home --home-dir /home/clawlite --shell /bin/bash clawlite && \
+    mkdir -p /home/clawlite/.clawlite "${PLAYWRIGHT_BROWSERS_PATH}" && \
+    chown -R clawlite:clawlite /home/clawlite
 
-VOLUME ["/root/.clawlite"]
+VOLUME ["/home/clawlite/.clawlite"]
 EXPOSE 8787
+
+USER clawlite
 
 ENTRYPOINT ["tini", "--", "clawlite"]
 CMD ["status"]

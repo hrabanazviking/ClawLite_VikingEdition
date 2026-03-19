@@ -637,11 +637,16 @@ class AgentDefaultsConfig(Base):
     provider: str = "auto"
     max_tokens: int = 8192
     temperature: float = 0.1
+    context_token_budget: int = 7000
     max_tool_iterations: int = 40
     memory_window: int = 100
     session_retention_messages: int | None = 2000
     session_retention_ttl_s: int | None = None
     reasoning_effort: str | None = None
+    semantic_history_summary_enabled: bool = False
+    tool_result_compaction_enabled: bool = False
+    tool_result_compaction_threshold_chars: int = 3200
+    workspace_prompt_file_max_bytes: int = 16384
     semantic_memory: bool = False
     memory_auto_categorize: bool = False
     memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
@@ -687,6 +692,12 @@ class AgentDefaultsConfig(Base):
         v = v if v not in (None, "") else 8192
         return max(1, int(v))
 
+    @field_validator("context_token_budget", mode="before")
+    @classmethod
+    def _min_context_budget(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 7000
+        return max(512, int(v))
+
     @field_validator("temperature", mode="before")
     @classmethod
     def _temperature_default(cls, v: Any) -> float:
@@ -703,6 +714,12 @@ class AgentDefaultsConfig(Base):
     @classmethod
     def _min_window(cls, v: Any) -> int:
         v = v if v not in (None, "") else 100
+        return max(1, int(v))
+
+    @field_validator("tool_result_compaction_threshold_chars", "workspace_prompt_file_max_bytes", mode="before")
+    @classmethod
+    def _min_positive_budget(cls, v: Any) -> int:
+        v = v if v not in (None, "") else 1
         return max(1, int(v))
 
     @field_validator("session_retention_messages", mode="before")
@@ -1659,11 +1676,31 @@ class ToolSafetyPolicyConfig(Base):
 class ToolsConfig(Base):
     restrict_to_workspace: bool = False
     default_timeout_s: float = 20.0
+    timeouts: dict[str, float] = Field(default_factory=dict)
     web: WebToolConfig = Field(default_factory=WebToolConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     mcp: MCPToolConfig = Field(default_factory=MCPToolConfig)
     loop_detection: ToolLoopDetectionConfig = Field(default_factory=ToolLoopDetectionConfig)
     safety: ToolSafetyPolicyConfig = Field(default_factory=ToolSafetyPolicyConfig)
+
+    @field_validator("timeouts", mode="before")
+    @classmethod
+    def _normalize_tool_timeouts(cls, v: Any) -> dict[str, float]:
+        if not isinstance(v, dict):
+            return {}
+        out: dict[str, float] = {}
+        for key, value in v.items():
+            name = str(key or "").strip().lower()
+            if not name:
+                continue
+            try:
+                timeout_s = float(value)
+            except (TypeError, ValueError):
+                continue
+            if timeout_s <= 0:
+                continue
+            out[name] = timeout_s
+        return out
 
 
 # ---------------------------------------------------------------------------

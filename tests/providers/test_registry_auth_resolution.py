@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from clawlite.providers.codex import CodexProvider
 from clawlite.providers.failover import FailoverProvider
@@ -366,6 +369,72 @@ def test_build_provider_qwen_oauth_reads_auth_file_when_env_missing(tmp_path, mo
     assert provider.provider_name == "qwen_oauth"
     assert provider.api_key == "qwen-file-token"
     assert provider.base_url == "https://api.qwen.ai/v1"
+
+
+def test_build_provider_gemini_oauth_prefers_current_file_token_when_config_source_is_file(tmp_path, monkeypatch) -> None:
+    auth_path = tmp_path / "oauth_creds.json"
+    auth_path.write_text(
+        json.dumps({"tokens": {"access_token": "gemini-file-token-new", "refresh_token": "refresh-token"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_GEMINI_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("CLAWLITE_GEMINI_AUTH_PATH", str(auth_path))
+
+    provider = build_provider(
+        {
+            "model": "gemini_oauth/gemini-2.0-flash",
+            "auth": {
+                "providers": {
+                    "gemini_oauth": {
+                        "access_token": "stale-config-token",
+                        "source": f"file:{auth_path}",
+                    }
+                }
+            },
+        }
+    )
+
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.api_key == "gemini-file-token-new"
+
+
+def test_build_provider_qwen_oauth_refreshes_file_backed_token_on_401(tmp_path, monkeypatch) -> None:
+    auth_path = tmp_path / "oauth_creds.json"
+    auth_path.write_text(
+        json.dumps({"tokens": {"access_token": "stale-token", "refresh_token": "refresh-token"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CLAWLITE_QWEN_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("CLAWLITE_QWEN_AUTH_PATH", str(auth_path))
+
+    provider = build_provider({"model": "qwen_oauth/qwen-plus"})
+    assert isinstance(provider, LiteLLMProvider)
+
+    request = httpx.Request("POST", "https://api.qwen.ai/v1/chat/completions")
+    response_401 = httpx.Response(401, request=request, json={"error": {"message": "expired"}})
+    response_200 = httpx.Response(200, request=request, json={"choices": [{"message": {"content": "ok"}}]})
+    refresh_response = httpx.Response(200, request=request, json={"access_token": "fresh-token", "expires_in": 3600})
+
+    async def post_mock(self, url, *args, **kwargs):
+        del args, kwargs
+        if "oauth2/token" in str(url):
+            return refresh_response
+        if str(url).endswith("/chat/completions"):
+            current = post_mock.calls
+            post_mock.calls += 1
+            return response_401 if current == 0 else response_200
+        raise AssertionError(f"unexpected url: {url}")
+
+    post_mock.calls = 0
+
+    async def _scenario() -> None:
+        with patch("httpx.AsyncClient.post", new=post_mock):
+            result = await provider.complete(messages=[{"role": "user", "content": "hi"}], tools=[])
+        assert result.text == "ok"
+
+    asyncio.run(_scenario())
+    persisted = json.loads(auth_path.read_text(encoding="utf-8"))
+    assert persisted["tokens"]["access_token"] == "fresh-token"
 
 
 def test_build_provider_detects_ollama_from_local_base_url_without_api_key() -> None:

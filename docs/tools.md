@@ -36,6 +36,11 @@ The runtime-level tool config lives under `tools` in `~/.clawlite/config.json`:
 {
   "tools": {
     "restrict_to_workspace": false,
+    "default_timeout_s": 20.0,
+    "timeouts": {
+      "exec": 90.0,
+      "browser": 45.0
+    },
     "exec": {
       "timeout": 60,
       "path_append": "",
@@ -89,6 +94,8 @@ The runtime-level tool config lives under `tools` in `~/.clawlite/config.json`:
   }
 }
 ```
+
+Timeout precedence is: per-call `timeout` / `timeout_s`, then `tools.timeouts.<tool>`, then the tool's own default, then `tools.default_timeout_s`.
 
 Important behavior:
 

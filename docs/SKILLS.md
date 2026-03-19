@@ -62,6 +62,7 @@ clawlite skills show cron
 clawlite skills doctor
 clawlite skills doctor --status missing_requirements --source builtin
 clawlite skills doctor --query github
+clawlite skills config github --api-key ghp_example_token --env GH_HOST=github.example.com --enable
 clawlite skills search "discord"
 clawlite skills install jira-helper
 clawlite skills update jira-helper
@@ -76,6 +77,7 @@ clawlite skills remove jira-helper
 `skills show` and `skills check` also surface the resolved `skill_key` and `primary_env` used for `skills.entries`.
 `skills search` now includes `local_matches`, so operators can compare ClawHub search hits against already managed marketplace skills without a second command.
 `skills doctor` turns that deterministic diagnostics data into remediation hints, grouped around the actual blocker: missing env vars, binaries, config keys, bundled-skill policy, or invalid `SKILL.md` contract. It also supports `--status`, `--source`, and `--query` when you only want one operational slice, for example builtin skills that are blocked by missing secrets.
+`skills config <name>` is the direct config path for `skills.entries.<skillKey>` and can either inspect the current entry or update `apiKey`, `env`, and `enabled` for the active base/profile config without editing JSON or YAML by hand.
 `skills managed` shows only the marketplace-local skills currently discovered under `~/.clawlite/marketplace/skills`, including the managed folder `slug`, resolved runtime `status`, description, and remediation hint when a managed skill is blocked or missing requirements. It also supports `--status` and `--query` for filtering to one lifecycle slice such as `ready`, `missing_requirements`, or `jira`, while still returning global `status_counts` for the full managed inventory.
 
 Managed installs use the marketplace root: `~/.clawlite/marketplace/skills`.
@@ -113,6 +115,15 @@ Supported fields today:
 - `env` to inject per-skill environment variables into `command` skills
 - `apiKey` as a convenience for skills that declare `metadata.openclaw.primaryEnv`
 - `allowBundled` to restrict builtin skills without affecting workspace or marketplace overrides
+
+Operator shortcut:
+
+```bash
+clawlite skills config gh-issues --api-key ghp_example_token --enable
+clawlite skills config env-skill --env CUSTOM_TOKEN=secret-value
+clawlite skills config gh-issues --clear-api-key
+clawlite skills config gh-issues --clear
+```
 
 Example:
 

@@ -131,3 +131,50 @@ async def test_stream_error_before_any_chunks_propagates_as_error_chunk():
     # No content accumulated, so should NOT be degraded — should be error
     assert final.degraded is False
     assert final.error is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_refreshes_oauth_once_on_401_before_emitting_chunks():
+    provider = LiteLLMProvider(
+        base_url="http://fake.local",
+        api_key="stale-token",
+        model="test-model",
+        provider_name="qwen_oauth",
+        oauth_refresh_callback=AsyncMock(return_value={"access_token": "fresh-token"}),
+    )
+
+    async def refreshed_aiter_lines():
+        yield 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}'
+
+    unauthorized_response = MagicMock()
+    unauthorized_response.status_code = 401
+    unauthorized_response.headers = {}
+    unauthorized_response.text = "expired"
+    request = __import__("httpx").Request("POST", "http://fake.local/chat/completions")
+    response = __import__("httpx").Response(401, request=request, json={"error": {"message": "expired"}})
+    unauthorized_response.raise_for_status = MagicMock(side_effect=__import__("httpx").HTTPStatusError("err", request=request, response=response))
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.raise_for_status = MagicMock()
+    ok_response.aiter_lines = refreshed_aiter_lines
+
+    unauthorized_ctx = MagicMock()
+    unauthorized_ctx.__aenter__ = AsyncMock(return_value=unauthorized_response)
+    unauthorized_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    ok_ctx = MagicMock()
+    ok_ctx.__aenter__ = AsyncMock(return_value=ok_response)
+    ok_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(side_effect=[unauthorized_ctx, ok_ctx])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("clawlite.providers.litellm.httpx.AsyncClient", return_value=mock_client):
+        chunks = await _collect_chunks(provider.stream(messages=[{"role": "user", "content": "hi"}]))
+
+    assert provider.api_key == "fresh-token"
+    assert chunks[-1].done is True
+    assert chunks[-1].accumulated == "ok"

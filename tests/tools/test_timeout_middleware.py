@@ -47,6 +47,24 @@ class DefaultTimeoutTool(Tool):
         return "never"
 
 
+class FlakyRuntimeTool(Tool):
+    name = "flaky_runtime_tool"
+    description = "Fails once with a transient runtime error."
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del arguments, ctx
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary upstream failure")
+        return "recovered"
+
+
 @pytest.mark.asyncio
 async def test_registry_timeout_raises_tool_timeout_error():
     reg = ToolRegistry(default_timeout_s=0.05)
@@ -74,6 +92,27 @@ async def test_registry_tool_class_default_timeout():
     with pytest.raises(ToolTimeoutError) as exc_info:
         await reg.execute("default_timeout_tool", {}, session_id="s1")
     assert exc_info.value.timeout_s == pytest.approx(0.05, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_config_timeout_override():
+    reg = ToolRegistry(default_timeout_s=10.0, tool_timeouts={"slow_tool": 0.1})
+    reg.register(SlowTool())
+    with pytest.raises(ToolTimeoutError) as exc_info:
+        await reg.execute("slow_tool", {}, session_id="s1")
+    assert exc_info.value.timeout_s == pytest.approx(0.1, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_registry_retries_transient_runtime_failure_once():
+    reg = ToolRegistry(default_timeout_s=5.0)
+    tool = FlakyRuntimeTool()
+    reg.register(tool)
+
+    result = await reg.execute("flaky_runtime_tool", {}, session_id="s1")
+
+    assert result == "recovered"
+    assert tool.calls == 2
 
 
 @pytest.mark.asyncio

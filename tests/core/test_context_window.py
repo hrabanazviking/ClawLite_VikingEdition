@@ -66,3 +66,30 @@ def test_trim_budget_tokens():
 def test_trim_empty_messages():
     mgr = ContextWindowManager(budget_chars=100)
     assert mgr.trim([]) == []
+
+
+def test_trim_counts_assistant_tool_call_metadata_in_budget() -> None:
+    mgr = ContextWindowManager(budget_chars=20)
+    msgs = [
+        _msg("user", "old"),
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": "{\"query\":\"long query for current weather in suzano sao paulo\"}",
+                    },
+                }
+            ],
+        },
+        _msg("user", "latest"),
+    ]
+
+    trimmed = mgr.trim(msgs)
+
+    assert msgs[1] not in trimmed
+    assert trimmed[-1] == msgs[-1]

@@ -68,10 +68,19 @@ def dashboard_channels_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def dashboard_cron_summary(*, cron: Any, limit: int = 8) -> dict[str, Any]:
-    jobs = cron.list_jobs()[: max(1, int(limit or 1))]
+    jobs = cron.list_jobs()
+    enabled_count = sum(1 for row in jobs if bool(row.get("enabled", False)))
+    status_counts: dict[str, int] = {}
+    for row in jobs:
+        status = str(row.get("last_status", "") or "idle").strip() or "idle"
+        status_counts[status] = status_counts.get(status, 0) + 1
     return {
         "status": cron.status(),
-        "jobs": jobs,
+        "count": len(jobs),
+        "enabled_count": enabled_count,
+        "disabled_count": max(0, len(jobs) - enabled_count),
+        "status_counts": dict(sorted(status_counts.items())),
+        "jobs": jobs[: max(1, int(limit or 1))],
     }
 
 

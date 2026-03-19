@@ -42,6 +42,11 @@ Profiles are layered on top of the base file. For example, `clawlite --config ./
 | `session_retention_messages` | `2000` | Max messages per session (null = unlimited) |
 | `reasoning_effort` | `null` | `"low"`, `"medium"`, `"high"`, or null |
 | `provider` | `"auto"` | Provider hint (overridden by model prefix) |
+| `context_token_budget` | `7000` | Total prompt/context token budget used by the prompt shaper |
+| `semantic_history_summary_enabled` | `false` | Opt-in LLM compaction for trimmed conversation history after deterministic trimming |
+| `tool_result_compaction_enabled` | `false` | Opt-in LLM compaction for oversized text-like tool results before they re-enter model history |
+| `tool_result_compaction_threshold_chars` | `3200` | Minimum tool-result size before compaction is attempted |
+| `workspace_prompt_file_max_bytes` | `16384` | Per-file byte ceiling for prompt-ingested workspace markdown before skip/truncate rules apply |
 
 ### `agents.defaults.memory`
 
@@ -100,6 +105,8 @@ Supported fields:
 | `entries.<skill>.enabled` | Disable a skill without editing the skill itself |
 | `entries.<skill>.env` | Inject host env vars into `command` skills when the variable is not already set |
 | `entries.<skill>.apiKey` | Convenience field for skills declaring `metadata.openclaw.primaryEnv` |
+
+Operator shortcut: `clawlite skills config <name> --api-key ... --env KEY=VALUE --enable` writes those overrides back to the active config or profile file.
 
 ---
 
@@ -332,6 +339,13 @@ Each server under `tools.mcp.servers`:
   }
 }
 ```
+
+## `tools`
+
+| Field | Default | Description |
+|---|---|---|
+| `default_timeout_s` | `20.0` | Global default timeout for tool execution when no tool-specific timeout overrides it |
+| `timeouts` | `{}` | Per-tool timeout overrides such as `{"exec": 90, "browser": 45}` |
 
 ## `tools.safety`
 

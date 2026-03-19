@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,6 +18,7 @@ class PromptArtifacts:
     history_messages: list[dict[str, Any]]
     runtime_context: str
     skills_context: str
+    trimmed_history_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PromptBuilder:
@@ -64,12 +65,21 @@ class PromptBuilder:
     _TOKEN_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
     _TOKEN_SYMBOL_RE = re.compile(r"[^\sA-Za-z0-9_]")
 
-    def __init__(self, workspace_path: str | Path | None = None, *, context_token_budget: int = 7000) -> None:
+    def __init__(
+        self,
+        workspace_path: str | Path | None = None,
+        *,
+        context_token_budget: int = 7000,
+        workspace_prompt_file_max_bytes: int = 16_384,
+    ) -> None:
         self.workspace_loader = WorkspaceLoader(workspace_path=workspace_path)
         self.context_token_budget = max(512, int(context_token_budget))
+        self.workspace_prompt_file_max_bytes = max(1, int(workspace_prompt_file_max_bytes))
 
     def _read_workspace_files(self) -> str:
-        return self.workspace_loader.prompt_context()
+        return self.workspace_loader.prompt_context(
+            prompt_file_max_bytes=self.workspace_prompt_file_max_bytes
+        )
 
     @classmethod
     def _identity_fallback_section(cls) -> str:
@@ -267,14 +277,14 @@ class PromptBuilder:
         runtime_context: str,
         user_text: str,
         token_budget: int,
-    ) -> tuple[str, list[str], str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, list[str], str, str, list[dict[str, Any]], list[dict[str, Any]]]:
         total_budget = max(512, int(token_budget))
         reserved = cls._estimate_tokens(runtime_context) + cls._estimate_tokens(user_text) + 32
         available = max(128, total_budget - reserved)
 
         system_cap = max(96, int(available * 0.40))
         history_summary_cap = max(48, int(available * 0.10))
-        history_cap = max(64, int(available * 0.18))
+        history_cap = max(64, int(available * 0.28))
         skills_cap = max(64, int(available * 0.22))
         memory_cap = max(32, available - (system_cap + history_summary_cap + history_cap + skills_cap))
 
@@ -289,14 +299,22 @@ class PromptBuilder:
         shaped_skills_context = cls._truncate_text(skills_context.strip(), skills_cap)
         shaped_history = cls._shape_history(history_rows, history_cap)
         dropped_count = max(0, len(history_rows) - len(shaped_history))
+        trimmed_history_rows = history_rows[:dropped_count]
         shaped_history_summary = ""
         if dropped_count > 0:
             shaped_history_summary = cls._summarize_trimmed_history(
-                history_rows[:dropped_count],
+                trimmed_history_rows,
                 history_summary_cap,
             )
 
-        return shaped_system, shaped_memory, shaped_skills_context, shaped_history_summary, shaped_history
+        return (
+            shaped_system,
+            shaped_memory,
+            shaped_skills_context,
+            shaped_history_summary,
+            shaped_history,
+            trimmed_history_rows,
+        )
 
     @classmethod
     def _split_workspace_sections(cls, workspace_block: str) -> list[tuple[str, str]]:
@@ -417,7 +435,14 @@ class PromptBuilder:
 
         normalized_history = self._normalize_history(history)
         clean_memory = [item.strip() for item in memory_snippets if item and item.strip()]
-        shaped_system, shaped_memory, shaped_skills_context, shaped_history_summary, shaped_history = self._shape_context(
+        (
+            shaped_system,
+            shaped_memory,
+            shaped_skills_context,
+            shaped_history_summary,
+            shaped_history,
+            trimmed_history_rows,
+        ) = self._shape_context(
             workspace_block=workspace_block,
             identity_guard=self._IDENTITY_GUARD_SECTION,
             profile_text=profile_text,
@@ -437,4 +462,5 @@ class PromptBuilder:
             history_messages=shaped_history,
             runtime_context=runtime_context,
             skills_context=shaped_skills_context,
+            trimmed_history_rows=trimmed_history_rows,
         )

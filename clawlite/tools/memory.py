@@ -82,6 +82,30 @@ def _dump_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _public_memory_item(
+    *,
+    ref: str,
+    text: str,
+    include_metadata: bool,
+    row_id: str = "",
+    source: str = "",
+    created_at: str = "",
+    reasoning_layer: str = "",
+    confidence: Any = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "ref": str(ref or ""),
+        "text": str(text or ""),
+    }
+    if include_metadata:
+        item["id"] = str(row_id or "")
+        item["source"] = str(source or "")
+        item["created_at"] = str(created_at or "")
+        item["reasoning_layer"] = str(reasoning_layer or "")
+        item["confidence"] = confidence
+    return item
+
+
 def _record_from_backend_payload(payload: dict[str, Any]) -> MemoryRecord | None:
     if not isinstance(payload, dict):
         return None
@@ -268,30 +292,32 @@ class MemoryRecallTool(Tool):
         if async_retrieved is not None:
             for row in async_retrieved:
                 row_id = str(row.get("id", "") or "")
-                item: dict[str, Any] = {
-                    "ref": _memory_ref(row_id),
-                    "text": str(row.get("text", "") or ""),
-                }
-                if include_metadata:
-                    item["id"] = row_id
-                    item["source"] = str(row.get("source", "") or "")
-                    item["created_at"] = str(row.get("created_at", "") or "")
-                    item["reasoning_layer"] = str(row.get("reasoning_layer", "") or "")
-                    item["confidence"] = row.get("confidence")
-                results.append(item)
+                results.append(
+                    _public_memory_item(
+                        ref=_memory_ref(row_id),
+                        text=str(row.get("text", "") or ""),
+                        include_metadata=include_metadata,
+                        row_id=row_id,
+                        source=str(row.get("source", "") or ""),
+                        created_at=str(row.get("created_at", "") or ""),
+                        reasoning_layer=str(row.get("reasoning_layer", "") or ""),
+                        confidence=row.get("confidence"),
+                    )
+                )
         else:
             for row in rows:
-                item = {
-                    "ref": _memory_ref(row.id),
-                    "text": str(row.text or ""),
-                }
-                if include_metadata:
-                    item["id"] = str(row.id or "")
-                    item["source"] = str(row.source or "")
-                    item["created_at"] = str(row.created_at or "")
-                    item["reasoning_layer"] = str(getattr(row, "reasoning_layer", "") or "")
-                    item["confidence"] = getattr(row, "confidence", None)
-                results.append(item)
+                results.append(
+                    _public_memory_item(
+                        ref=_memory_ref(row.id),
+                        text=str(row.text or ""),
+                        include_metadata=include_metadata,
+                        row_id=str(row.id or ""),
+                        source=str(row.source or ""),
+                        created_at=str(row.created_at or ""),
+                        reasoning_layer=str(getattr(row, "reasoning_layer", "") or ""),
+                        confidence=getattr(row, "confidence", None),
+                    )
+                )
 
         payload = {
             "status": "ok",

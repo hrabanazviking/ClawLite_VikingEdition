@@ -209,6 +209,7 @@ Notes:
 | `skills show <name>` | Prints one skill body and metadata | `clawlite skills show summarize` |
 | `skills check` | Emits the aggregated diagnostics report | `clawlite skills check` |
 | `skills doctor` | Turns diagnostics into actionable remediation hints, with optional status/source/query filters | `clawlite skills doctor --status missing_requirements --source builtin --query github` |
+| `skills config <name>` | Shows or updates `skills.entries.<skillKey>` for one skill in the active config/profile | `clawlite skills config github --api-key ghp_example --env GH_HOST=github.example.com --enable` |
 | `skills enable <name>` | Enables a skill in local state | `clawlite skills enable github` |
 | `skills disable <name>` | Disables a skill in local state | `clawlite skills disable github` |
 | `skills pin <name>` | Pins a skill in local state | `clawlite skills pin summarize` |
@@ -230,7 +231,7 @@ Skill discovery includes:
 
 The local skill state is stored in `~/.clawlite/state/skills-state.json`.
 
-`skills managed` includes the managed folder `slug`, resolved runtime `status`, and a hint when the skill is blocked or missing requirements, plus global `status_counts` for the full managed inventory. `skills update` resolves either the slug or the discovered skill name before invoking ClawHub, and successful `install`/`update`/`sync` calls now echo the resolved local marketplace state. `skills search` also includes `local_matches` so an operator can see whether a remote query already exists locally without leaving the CLI. `skills doctor` focuses on broken or blocked skills by default and includes remediation hints for missing env vars, binaries, config keys, invalid contracts, and `skills.allowBundled` policy blocks. Both `skills doctor` and `skills managed` now accept `--query` for case-insensitive triage by name, skill key, description, requirement, or hint text.
+`skills managed` includes the managed folder `slug`, resolved runtime `status`, and a hint when the skill is blocked or missing requirements, plus global `status_counts` for the full managed inventory. `skills update` resolves either the slug or the discovered skill name before invoking ClawHub, and successful `install`/`update`/`sync` calls now echo the resolved local marketplace state. `skills search` also includes `local_matches` so an operator can see whether a remote query already exists locally without leaving the CLI. `skills doctor` focuses on broken or blocked skills by default and includes remediation hints for missing env vars, binaries, config keys, invalid contracts, and `skills.allowBundled` policy blocks. `skills config` gives a direct write path for `skills.entries.<skillKey>` in the active base/profile config, so operators can set `apiKey`, merge `env` overrides, or toggle `enabled` without editing raw JSON/YAML. Both `skills doctor` and `skills managed` now accept `--query` for case-insensitive triage by name, skill key, description, requirement, or hint text.
 
 ## Tools Commands
 

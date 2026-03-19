@@ -99,6 +99,7 @@ def test_dashboard_channel_helpers_shape_operational_rows() -> None:
 def test_dashboard_cron_and_self_evolution_summaries() -> None:
     cron_payload = dashboard_cron_summary(cron=_FakeCron(), limit=1)
     assert cron_payload["status"] == {"running": True}
+    assert cron_payload["count"] == 2
     assert cron_payload["jobs"] == [{"job_id": "cron-1"}]
 
     evolution = SimpleNamespace(enabled=True, status=lambda: {"last_outcome": "ok"})

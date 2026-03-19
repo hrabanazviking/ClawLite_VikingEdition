@@ -82,15 +82,29 @@ class ToolRegistry:
         *,
         safety: ToolSafetyPolicyConfig | None = None,
         default_timeout_s: float = 20.0,
+        tool_timeouts: dict[str, float] | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._safety = safety or ToolSafetyPolicyConfig()
         self._default_timeout_s = max(0.1, float(default_timeout_s))
+        self._tool_timeouts = {
+            str(key or "").strip().lower(): max(0.1, float(value))
+            for key, value in dict(tool_timeouts or {}).items()
+            if str(key or "").strip()
+        }
         self._cache = ToolResultCache()
         self._approval_ttl_s = max(1.0, float(getattr(self._safety, "approval_grant_ttl_s", 900.0) or 900.0))
         self._approval_grants: dict[str, float] = {}
         self._approval_requests: dict[str, dict[str, Any]] = {}
         self._approval_request_order: list[str] = []
+
+    @staticmethod
+    def _tool_exception_retryable(exc: Exception) -> bool:
+        if isinstance(exc, ToolTimeoutError):
+            return False
+        if isinstance(exc, ToolError):
+            return bool(exc.recoverable)
+        return isinstance(exc, (RuntimeError, OSError, ConnectionError))
 
     @staticmethod
     def _apply_layer(
@@ -1137,10 +1151,14 @@ class ToolRegistry:
                     return v
             except (TypeError, ValueError):
                 pass
-        # 2. tool class default
+        # 2. config override for the named tool
+        configured = self._tool_timeouts.get(str(tool.name or "").strip().lower())
+        if configured is not None and configured > 0:
+            return configured
+        # 3. tool class default
         if tool.default_timeout_s is not None and tool.default_timeout_s > 0:
             return tool.default_timeout_s
-        # 3. global default
+        # 4. global default
         return self._default_timeout_s
 
     async def execute(self, name: str, arguments: dict[str, Any], *, session_id: str, channel: str = "", user_id: str = "") -> str:
@@ -1197,11 +1215,19 @@ class ToolRegistry:
                         "tool.timeout_s": timeout_s,
                     },
                 )
-                try:
-                    result = await asyncio.wait_for(tool.run(validated_arguments, ctx), timeout=timeout_s)
-                except Exception as exc:
-                    span.record_exception(exc)
-                    raise
+                retry_attempts = 2
+                result = None
+                for attempt in range(1, retry_attempts + 1):
+                    try:
+                        result = await asyncio.wait_for(tool.run(validated_arguments, ctx), timeout=timeout_s)
+                        break
+                    except Exception as exc:
+                        span.record_exception(exc)
+                        if attempt >= retry_attempts or not self._tool_exception_retryable(exc):
+                            raise
+                        await asyncio.sleep(min(0.2 * attempt, 0.5))
+                if result is None:
+                    raise RuntimeError(f"tool_execution_failed:{name}")
                 set_span_attributes(
                     span,
                     {

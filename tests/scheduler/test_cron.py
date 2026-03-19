@@ -263,6 +263,37 @@ def test_cron_start_restarts_when_previous_task_crashed(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_cron_status_reports_lock_backend(tmp_path: Path) -> None:
+    service = CronService(tmp_path / "cron.json")
+    assert service.status()["lock_backend"] in {"fcntl", "portalocker", "threading"}
+
+
+def test_cron_store_lock_uses_portalocker_when_fcntl_unavailable(tmp_path: Path, monkeypatch) -> None:
+    import clawlite.scheduler.cron as cron_module
+
+    calls: list[str] = []
+
+    class _FakePortalocker:
+        LOCK_EX = "lock_ex"
+
+        @staticmethod
+        def lock(_file, _mode):
+            calls.append("lock")
+
+        @staticmethod
+        def unlock(_file):
+            calls.append("unlock")
+
+    monkeypatch.setattr(cron_module, "fcntl", None)
+    monkeypatch.setattr(cron_module, "portalocker", _FakePortalocker)
+
+    service = CronService(tmp_path / "cron.json")
+    with service._store_lock():
+        assert calls[-1:] == ["lock"]
+    assert calls[-2:] == ["lock", "unlock"]
+    assert service.status()["lock_backend"] == "portalocker"
+
+
 def test_cron_loop_times_out_slow_callback_and_keeps_processing(tmp_path: Path) -> None:
     async def _scenario() -> None:
         service = CronService(tmp_path / "cron.json", callback_timeout_seconds=0.05)
