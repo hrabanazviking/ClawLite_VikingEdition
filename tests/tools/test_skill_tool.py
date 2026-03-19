@@ -1408,3 +1408,109 @@ def test_run_skill_linear_blocks_without_auth(monkeypatch, tmp_path: Path) -> No
         assert out == "skill_blocked:linear:linear_auth_missing"
 
     asyncio.run(_scenario())
+
+
+def test_run_skill_trello_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "trello", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "boards_list" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_trello_boards_list_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_trello_request(self, *, method, base_url, api_key, token, path, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "base_url": base_url,
+                "api_key": api_key,
+                "token": token,
+                "path": path,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "boards": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("TRELLO_API_KEY", "trello-key")
+        monkeypatch.setenv("TRELLO_TOKEN", "trello-token")
+        monkeypatch.setattr(SkillTool, "_trello_request", _fake_trello_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "trello",
+                "tool_arguments": {
+                    "action": "boards_list",
+                    "fields": "id,name",
+                },
+            },
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "GET",
+                "base_url": "https://api.trello.com/1",
+                "api_key": "trello-key",
+                "token": "trello-token",
+                "path": "/members/me/boards",
+                "payload": {"fields": "id,name"},
+                "spec_name": "trello",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_trello_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("TRELLO_API_KEY", raising=False)
+        monkeypatch.delenv("TRELLO_TOKEN", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "trello",
+                "tool_arguments": {
+                    "action": "boards_list",
+                },
+            },
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:trello:trello_auth_missing"
+
+    asyncio.run(_scenario())

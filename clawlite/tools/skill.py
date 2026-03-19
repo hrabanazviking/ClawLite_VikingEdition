@@ -1595,8 +1595,11 @@ class SkillTool(Tool):
 
         if action == "request":
             query = str(payload.get("query", arguments.get("query", "")) or "").strip()
-            variables = payload.get("variables")
-            if not isinstance(variables, dict):
+            raw_variables = payload.get("variables")
+            variables: dict[str, Any]
+            if isinstance(raw_variables, dict):
+                variables = dict(raw_variables)
+            else:
                 variables = {}
             return await self._linear_request(
                 endpoint=endpoint,
@@ -1608,6 +1611,283 @@ class SkillTool(Tool):
             )
 
         raise ValueError("action must be one of: guide, issues_list, issue_create, issue_update, request")
+
+    @staticmethod
+    def _trello_auth(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> tuple[str, str, str]:
+        payload = SkillTool._skill_payload(arguments)
+
+        def _pick(*keys: str) -> str:
+            for key in keys:
+                value = str(payload.get(key, arguments.get(key, "")) or "").strip()
+                if value:
+                    return value
+            if env_overrides:
+                for key in keys:
+                    value = str(env_overrides.get(key.upper(), "") or "").strip()
+                    if value:
+                        return value
+            for key in keys:
+                value = str(os.getenv(key.upper(), "") or "").strip()
+                if value:
+                    return value
+            return ""
+
+        api_key = _pick("trello_api_key", "api_key", "key")
+        token = _pick("trello_token", "token")
+        base_url = _pick("trello_base_url", "base_url") or "https://api.trello.com/1"
+        if not api_key or not token:
+            raise RuntimeError("trello_auth_missing")
+        return base_url.rstrip("/"), api_key, token
+
+    async def _trello_request(
+        self,
+        *,
+        method: str,
+        base_url: str,
+        api_key: str,
+        token: str,
+        path: str,
+        payload: dict[str, Any],
+        timeout: float,
+        spec_name: str,
+    ) -> str:
+        clean_method = str(method or "").strip().upper()
+        if clean_method not in {"GET", "POST", "PUT", "DELETE"}:
+            raise ValueError("trello_invalid_method")
+        clean_path = str(path or "").strip()
+        if not clean_path:
+            raise ValueError("trello_path_required")
+        if not clean_path.startswith("/"):
+            clean_path = f"/{clean_path}"
+
+        url = f"{base_url}{clean_path}"
+        query_params = {"key": api_key, "token": token}
+        if clean_method == "GET":
+            query_params.update(payload)
+
+        try:
+            async with httpx.AsyncClient(timeout=max(5.0, min(timeout, 60.0))) as client:
+                if clean_method == "GET":
+                    response = await client.get(url, params=query_params)
+                else:
+                    response = await client.request(clean_method, url, params=query_params, json=payload or None)
+        except httpx.HTTPError as exc:
+            return f"skill_blocked:{spec_name}:trello_request_failed:{exc.__class__.__name__.lower()}"
+
+        try:
+            decoded = response.json()
+        except ValueError:
+            decoded = {
+                "status_code": int(response.status_code),
+                "text": str(response.text or "").strip(),
+            }
+
+        if int(response.status_code) >= 400:
+            detail = "trello_http_error"
+            if isinstance(decoded, dict):
+                detail = str(decoded.get("message", decoded.get("error", detail)) or detail)
+            return f"skill_blocked:{spec_name}:trello_http_error:{response.status_code}:{detail}"
+        return json.dumps(decoded, ensure_ascii=False)
+
+    async def _run_trello(
+        self,
+        arguments: dict[str, Any],
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "trello_rest_v1",
+                    "available_actions": [
+                        "boards_list",
+                        "board_lists",
+                        "board_cards",
+                        "list_cards",
+                        "list_create",
+                        "card_create",
+                        "card_move",
+                        "card_comment",
+                        "card_archive",
+                        "request",
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            base_url, api_key, token = self._trello_auth(arguments, env_overrides=env_overrides)
+        except RuntimeError as exc:
+            return f"skill_blocked:{spec_name}:{str(exc)}"
+
+        board_id = str(payload.get("board_id", payload.get("boardId", arguments.get("board_id", ""))) or "").strip()
+        list_id = str(payload.get("list_id", payload.get("listId", arguments.get("list_id", ""))) or "").strip()
+        card_id = str(payload.get("card_id", payload.get("cardId", arguments.get("card_id", ""))) or "").strip()
+
+        if action == "boards_list":
+            return await self._trello_request(
+                method="GET",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path="/members/me/boards",
+                payload={"fields": str(payload.get("fields", arguments.get("fields", "id,name,url")) or "id,name,url")},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "board_lists":
+            if not board_id:
+                raise ValueError("board_id is required for trello board_lists")
+            return await self._trello_request(
+                method="GET",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/boards/{board_id}/lists",
+                payload={},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "board_cards":
+            if not board_id:
+                raise ValueError("board_id is required for trello board_cards")
+            return await self._trello_request(
+                method="GET",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/boards/{board_id}/cards",
+                payload={},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "list_cards":
+            if not list_id:
+                raise ValueError("list_id is required for trello list_cards")
+            return await self._trello_request(
+                method="GET",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/lists/{list_id}/cards",
+                payload={},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "list_create":
+            if not board_id:
+                raise ValueError("board_id is required for trello list_create")
+            name = str(payload.get("name", arguments.get("name", "")) or "").strip()
+            if not name:
+                raise ValueError("name is required for trello list_create")
+            pos = str(payload.get("pos", arguments.get("pos", "bottom")) or "bottom").strip()
+            return await self._trello_request(
+                method="POST",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path="/lists",
+                payload={"name": name, "idBoard": board_id, "pos": pos},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "card_create":
+            if not list_id:
+                raise ValueError("list_id is required for trello card_create")
+            name = str(payload.get("name", arguments.get("name", "")) or "").strip()
+            if not name:
+                raise ValueError("name is required for trello card_create")
+            card_payload: dict[str, Any] = {"idList": list_id, "name": name}
+            desc = str(payload.get("desc", arguments.get("desc", "")) or "").strip()
+            if desc:
+                card_payload["desc"] = desc
+            return await self._trello_request(
+                method="POST",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path="/cards",
+                payload=card_payload,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "card_move":
+            if not card_id or not list_id:
+                raise ValueError("card_id and list_id are required for trello card_move")
+            return await self._trello_request(
+                method="PUT",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/cards/{card_id}",
+                payload={"idList": list_id},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "card_comment":
+            if not card_id:
+                raise ValueError("card_id is required for trello card_comment")
+            text = str(payload.get("text", arguments.get("text", "")) or "").strip()
+            if not text:
+                raise ValueError("text is required for trello card_comment")
+            return await self._trello_request(
+                method="POST",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/cards/{card_id}/actions/comments",
+                payload={"text": text},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "card_archive":
+            if not card_id:
+                raise ValueError("card_id is required for trello card_archive")
+            return await self._trello_request(
+                method="PUT",
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=f"/cards/{card_id}",
+                payload={"closed": True},
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        if action == "request":
+            method = str(payload.get("method", arguments.get("method", "GET")) or "GET").strip().upper()
+            path = str(payload.get("path", arguments.get("path", "")) or "").strip()
+            body = payload.get("data")
+            if not isinstance(body, dict):
+                body = {}
+            return await self._trello_request(
+                method=method,
+                base_url=base_url,
+                api_key=api_key,
+                token=token,
+                path=path,
+                payload=body,
+                timeout=timeout,
+                spec_name=spec_name,
+            )
+
+        raise ValueError("action must be one of: guide, boards_list, board_lists, board_cards, list_cards, list_create, card_create, card_move, card_comment, card_archive, request")
 
     async def _dispatch_script(
         self,
@@ -1654,6 +1934,13 @@ class SkillTool(Tool):
             )
         if script_name == "linear":
             return await self._run_linear(
+                arguments,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides,
+            )
+        if script_name == "trello":
+            return await self._run_trello(
                 arguments,
                 spec_name=spec_name,
                 timeout=self._timeout_value(arguments),
