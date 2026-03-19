@@ -1288,6 +1288,8 @@ class SkillsLoader:
             return ["env:OBSIDIAN_VAULT"]
         if script_name == "skald":
             return ["provider"]
+        if script_name == "skill_creator":
+            return ["tool:write|write_file(optional)"]
         if script_name == "notion":
             return ["env:NOTION_API_KEY"]
         if script_name == "jira":

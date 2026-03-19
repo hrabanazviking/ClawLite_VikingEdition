@@ -902,6 +902,88 @@ class SkillTool(Tool):
             return f"skill_blocked:{spec_name}:provider_empty_response"
         return text
 
+    async def _run_skill_creator(self, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "template",
+                    "usage": "Use action=scaffold to generate SKILL.md frontmatter and section template.",
+                    "available_actions": ["scaffold"],
+                    "examples": [
+                        {
+                            "action": "scaffold",
+                            "tool_arguments": {
+                                "action": "scaffold",
+                                "name": "example-skill",
+                                "description": "Do one focused task",
+                                "script": "example_tool",
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        if action != "scaffold":
+            raise ValueError("action must be one of: guide, scaffold")
+
+        name = str(payload.get("name", arguments.get("name", "")) or "").strip()
+        description = str(payload.get("description", arguments.get("description", "")) or "").strip()
+        if not name or not description:
+            raise ValueError("name and description are required for skill_creator scaffold")
+
+        script = str(payload.get("script", arguments.get("script", "")) or "").strip()
+        command = str(payload.get("command", arguments.get("command", "")) or "").strip()
+        if script and command:
+            raise ValueError("provide either script or command, not both")
+
+        header_lines = [
+            "---",
+            f"name: {name}",
+            f"description: {description}",
+            "always: false",
+            'metadata: {"clawlite":{"emoji":"🛠️"}}',
+        ]
+        if script:
+            header_lines.append(f"script: {script}")
+        if command:
+            header_lines.append(f"command: {command}")
+        header_lines.append("---")
+
+        title = str(payload.get("title", arguments.get("title", name.replace("-", " ").title())) or name).strip()
+        body = (
+            f"# {title}\n\n"
+            "Use this skill when the user asks for this workflow.\n\n"
+            "## What it does\n\n"
+            "- Explain the primary trigger\n"
+            "- Describe expected inputs\n"
+            "- Describe expected outputs\n"
+        )
+        content = "\n".join(header_lines) + "\n\n" + body
+
+        target_path = str(payload.get("path", arguments.get("path", "")) or "").strip()
+        if not target_path:
+            return json.dumps({"status": "ok", "mode": "preview", "content": content}, ensure_ascii=False)
+
+        write_tool = "write" if self.registry.get("write") is not None else "write_file"
+        if self.registry.get(write_tool) is None:
+            return f"skill_blocked:{spec_name}:write_tool_not_registered"
+
+        await self.registry.execute(
+            write_tool,
+            {"path": target_path, "content": content},
+            session_id=ctx.session_id,
+            channel=ctx.channel,
+            user_id=ctx.user_id,
+        )
+        return json.dumps({"status": "ok", "mode": "written", "path": target_path}, ensure_ascii=False)
+
     @staticmethod
     def _gh_value(payload: dict[str, Any], arguments: dict[str, Any], *keys: str) -> str:
         for key in keys:
@@ -3169,6 +3251,8 @@ class SkillTool(Tool):
             return await self._run_memory(arguments, ctx, spec_name=spec_name)
         if script_name == "skald":
             return await self._run_skald(arguments, spec_name=spec_name)
+        if script_name == "skill_creator":
+            return await self._run_skill_creator(arguments, ctx, spec_name=spec_name)
         if script_name == "gh_issues":
             return await self._run_gh_issues(
                 arguments,

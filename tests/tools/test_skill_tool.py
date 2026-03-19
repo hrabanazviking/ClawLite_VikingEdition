@@ -1358,6 +1358,104 @@ def test_run_skill_skald_blocks_without_provider(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_run_skill_creator_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "skill-creator", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "scaffold" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_creator_scaffold_preview_returns_content(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skill-creator",
+                "tool_arguments": {
+                    "action": "scaffold",
+                    "name": "demo-skill",
+                    "description": "demo description",
+                    "script": "demo_tool",
+                },
+            },
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["mode"] == "preview"
+        assert "name: demo-skill" in payload["content"]
+        assert "script: demo_tool" in payload["content"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_creator_scaffold_writes_with_write_tool(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    class FakeWriteTool(Tool):
+        name = "write"
+        description = "fake write"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def args_schema(self) -> dict:
+            return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
+
+        async def run(self, arguments: dict, ctx: ToolContext) -> str:
+            del ctx
+            self.calls.append(dict(arguments))
+            return "ok"
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        writer = FakeWriteTool()
+        reg.register(writer)
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skill-creator",
+                "tool_arguments": {
+                    "action": "scaffold",
+                    "name": "demo-skill",
+                    "description": "demo description",
+                    "path": "clawlite/skills/demo-skill/SKILL.md",
+                },
+            },
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["mode"] == "written"
+        assert payload["path"] == "clawlite/skills/demo-skill/SKILL.md"
+        assert writer.calls and writer.calls[0]["path"] == "clawlite/skills/demo-skill/SKILL.md"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
