@@ -27,6 +27,8 @@
 
 ---
 
+![https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/514fdf8c-0e74-4605-9807-709c223a4c5c.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/514fdf8c-0e74-4605-9807-709c223a4c5c.jpg)
+
 ## ⚡ Why ClawLite Viking Edition?
 
 - **Truly local-first** — runs entirely on your machine; no vendor lock-in, no cloud accounts required
