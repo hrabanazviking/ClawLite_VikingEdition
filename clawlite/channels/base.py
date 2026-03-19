@@ -41,6 +41,9 @@ class _TokenBucketRateLimiter:
         self._buckets.pop(key, None)
 
 
+_CHANNEL_RATE_LIMITER = _TokenBucketRateLimiter(rate=10.0, per_s=60.0)
+
+
 @dataclass(slots=True)
 class ChannelHealth:
     running: bool
@@ -70,7 +73,7 @@ class BaseChannel(ABC):
         self._capabilities = capabilities or ChannelCapabilities()
         self._running = False
         self._last_error = ""
-        self._rate_limiter = _TokenBucketRateLimiter(rate=10.0, per_s=60.0)
+        self._rate_limiter = _TokenBucketRateLimiter(rate=_CHANNEL_RATE_LIMITER._rate, per_s=_CHANNEL_RATE_LIMITER._per_s)
 
     @property
     def running(self) -> bool:

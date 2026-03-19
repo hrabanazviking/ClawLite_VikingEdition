@@ -126,7 +126,7 @@ def sidebar_text_lines(record: dict[str, Any], *, enable_color: bool = False) ->
         if color:
             rune = f"{color}{rune}{_ANSI_RESET}"
             bar = f"{color}{bar}{_ANSI_RESET}"
-        return f"[{timestamp}] {rune} {bar} [{module}]: {content}"
+        return f"[{timestamp}] {bar} [{module}] {rune}: {content}"
 
     lines = [_line(part) for part in message_lines]
     for detail in _extract_exception_lines(record.get("exception")):
@@ -151,11 +151,11 @@ class SidebarLogger:
         line = Text()
         line.append(f"[{timestamp}]", style="dim")
         line.append(" ")
-        line.append(rune, style=style)
-        line.append(" ")
         line.append("┃", style=style)
         line.append(" ")
         line.append(f"[{module}]", style=f"bold {style}" if style != "dim" else "dim")
+        line.append(" ")
+        line.append(rune, style=style)
         line.append(": ", style="dim")
         line.append(message, style="white" if action != "BACKGROUND" else "dim")
         return line

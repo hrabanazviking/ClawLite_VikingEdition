@@ -176,6 +176,10 @@ def _skills_managed_root(loader: SkillsLoader) -> Path:
     return loader.roots[2].parent
 
 
+def _path_text(path: Path) -> str:
+    return path.as_posix()
+
+
 def _run_clawhub_command(loader: SkillsLoader, *action_args: str) -> tuple[int, dict[str, Any]]:
     managed_root = _skills_managed_root(loader)
     skills_root = managed_root / "skills"
@@ -184,8 +188,8 @@ def _run_clawhub_command(loader: SkillsLoader, *action_args: str) -> tuple[int, 
         return 1, {
             "ok": False,
             "error": "skills_manager_requires_npx",
-            "managed_root": str(managed_root),
-            "skills_root": str(skills_root),
+            "managed_root": _path_text(managed_root),
+            "skills_root": _path_text(skills_root),
         }
 
     managed_root.mkdir(parents=True, exist_ok=True)
@@ -194,8 +198,8 @@ def _run_clawhub_command(loader: SkillsLoader, *action_args: str) -> tuple[int, 
     payload = {
         "ok": completed.returncode == 0,
         "command": command,
-        "managed_root": str(managed_root),
-        "skills_root": str(skills_root),
+        "managed_root": _path_text(managed_root),
+        "skills_root": _path_text(skills_root),
         "stdout": str(completed.stdout or "").strip(),
         "stderr": str(completed.stderr or "").strip(),
     }
@@ -2046,8 +2050,8 @@ def cmd_skills_managed(args: argparse.Namespace) -> int:
         {
             "ok": True,
             "action": "managed",
-            "managed_root": str(managed_root),
-            "skills_root": str(managed_root / "skills"),
+            "managed_root": _path_text(managed_root),
+            "skills_root": _path_text(managed_root / "skills"),
             "count": len(rows),
             "total_count": len(all_rows),
             "status_filter": wanted_status,
@@ -2068,7 +2072,7 @@ def cmd_skills_remove(args: argparse.Namespace) -> int:
             {
                 "ok": False,
                 "error": f"managed_skill_not_found:{args.name}",
-                "managed_root": str(managed_root),
+                "managed_root": _path_text(managed_root),
             }
         )
         return 1
@@ -2084,8 +2088,8 @@ def cmd_skills_remove(args: argparse.Namespace) -> int:
             "skill_key": row.skill_key or row.name,
             "slug": slug,
             "removed": removed_payload,
-            "removed_path": str(target),
-            "managed_root": str(managed_root),
+            "removed_path": _path_text(target),
+            "managed_root": _path_text(managed_root),
             "managed_count": len(remaining_rows),
             "status_counts": _managed_skill_status_counts(remaining_rows),
         }

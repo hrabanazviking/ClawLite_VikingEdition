@@ -215,7 +215,15 @@ class AutonomyWakeCoordinator:
                 handle.flush()
                 os.fsync(handle.fileno())
                 tmp_path = Path(handle.name)
-            os.replace(str(tmp_path), str(self.journal_path))
+            attempts = 3
+            for index in range(attempts):
+                try:
+                    os.replace(str(tmp_path), str(self.journal_path))
+                    break
+                except PermissionError:
+                    if index >= attempts - 1:
+                        raise
+                    time.sleep(0.02)
         finally:
             if tmp_path is not None and tmp_path.exists():
                 try:
