@@ -9,7 +9,7 @@ elif [[ -f "${0}" ]]; then
 fi
 VENV_DIR="${HOME}/.clawlite/venv"
 BIN_DIR="${HOME}/.local/bin"
-REPO_URL="https://github.com/eobarretooo/ClawLite.git"
+REPO_URL="https://github.com/hrabanazviking/ClawLite_VikingEdition.git"
 
 IS_UBUNTU=0
 if [[ -r /etc/os-release ]] && grep -qi '^ID=ubuntu' /etc/os-release; then
@@ -27,7 +27,7 @@ if [[ "${IS_TERMUX_HOST}" == "1" && "${IS_UBUNTU}" != "1" ]]; then
 
 For Android/Termux, run the proot-distro Ubuntu bootstrap instead:
 
-  curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/Development/scripts/install_termux_proot.sh | bash
 
 That wrapper installs Ubuntu with proot-distro, prepares apt packages there, and then runs this installer inside Ubuntu.
 EOF

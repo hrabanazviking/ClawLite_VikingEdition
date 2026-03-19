@@ -2,9 +2,9 @@
 set -euo pipefail
 
 DISTRO_NAME="${DISTRO_NAME:-ubuntu}"
-REPO_URL="${REPO_URL:-https://github.com/eobarretooo/ClawLite.git}"
+REPO_URL="${REPO_URL:-https://github.com/hrabanazviking/ClawLite_VikingEdition.git}"
 INSTALL_DIR="${INSTALL_DIR:-/root/ClawLite}"
-SYNC_HELPER_URL="${SYNC_HELPER_URL:-https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/update_checkout.sh}"
+SYNC_HELPER_URL="${SYNC_HELPER_URL:-https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/Development/scripts/update_checkout.sh}"
 
 if [[ -z "${TERMUX_VERSION:-}" && "${PREFIX:-}" != *"/data/data/com.termux/"* ]]; then
   echo "✗ This wrapper is meant to run from Termux on Android."
@@ -41,7 +41,7 @@ apt-get install -y \
   python3-venv
 
 echo "[4/5] Syncing ClawLite repository..."
-bash <(curl -fsSL "${SYNC_HELPER_URL}") "${REPO_URL}" "${INSTALL_DIR}" main
+bash <(curl -fsSL "${SYNC_HELPER_URL}") "${REPO_URL}" "${INSTALL_DIR}" Development
 
 echo "[5/5] Running ClawLite installer inside Ubuntu..."
 bash "${INSTALL_DIR}/scripts/install.sh"
