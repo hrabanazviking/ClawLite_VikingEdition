@@ -1172,6 +1172,91 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    async def _run_onepassword(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["op", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        vault = str(payload.get("vault", arguments.get("vault", "")) or "").strip()
+        item = str(payload.get("item", arguments.get("item", "")) or "").strip()
+        field = str(payload.get("field", arguments.get("field", "")) or "").strip()
+        reference = str(payload.get("reference", arguments.get("reference", "")) or "").strip()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "op",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "auth": {"required_env": ["OP_SERVICE_ACCOUNT_TOKEN"]},
+                    "available_actions": ["whoami", "vault_list", "item_list", "item_get", "read", "request"],
+                    "examples": [
+                        {"action": "whoami", "tool_arguments": {"action": "whoami"}},
+                        {"action": "item_get", "tool_arguments": {"action": "item_get", "item": "GitHub Token", "field": "password"}},
+                        {"action": "read", "tool_arguments": {"action": "read", "reference": "op://Private/GitHub Token/password"}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        argv: list[str] = ["op"]
+        if action == "whoami":
+            argv.append("whoami")
+        elif action == "vault_list":
+            argv.extend(["vault", "list"])
+        elif action == "item_list":
+            argv.extend(["item", "list"])
+            if vault:
+                argv.extend(["--vault", vault])
+        elif action == "item_get":
+            if not item:
+                raise ValueError("item is required for onepassword item_get")
+            argv.extend(["item", "get", item])
+            if vault:
+                argv.extend(["--vault", vault])
+            if field:
+                argv.extend(["--fields", f"label={field}"])
+        elif action == "read":
+            if not reference:
+                raise ValueError("reference is required for onepassword read")
+            argv.extend(["read", reference])
+        elif action == "request":
+            command = str(payload.get("command", arguments.get("command", "")) or "").strip()
+            if not command:
+                raise ValueError("command is required for onepassword request")
+            argv.extend(shlex.split(command))
+        else:
+            raise ValueError("action must be one of: guide, whoami, vault_list, item_list, item_get, read, request")
+
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=argv,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
     @staticmethod
     def _notion_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
         payload = SkillTool._skill_payload(arguments)
@@ -2529,6 +2614,14 @@ class SkillTool(Tool):
             )
         if script_name == "clawhub":
             return await self._run_clawhub(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "onepassword":
+            return await self._run_onepassword(
                 arguments,
                 ctx,
                 spec_name=spec_name,

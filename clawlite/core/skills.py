@@ -1272,6 +1272,8 @@ class SkillsLoader:
             return ["tool:exec"]
         if script_name == "clawhub":
             return ["tool:exec"]
+        if script_name == "onepassword":
+            return ["tool:exec", "env:OP_SERVICE_ACCOUNT_TOKEN"]
         if script_name == "notion":
             return ["env:NOTION_API_KEY"]
         if script_name == "jira":

@@ -849,6 +849,63 @@ def test_run_skill_hub_alias_uses_clawhub_script(tmp_path: Path) -> None:
     asyncio.run(_scenario())
 
 
+def test_run_skill_onepassword_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "1password",
+        "name: 1password\ndescription: onepassword helper\nscript: onepassword",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "1password", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:op", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "op"
+        assert "item_get" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_onepassword_item_get_dispatches_op_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "1password",
+        "name: 1password\ndescription: onepassword helper\nscript: onepassword",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "op item get 'GitHub Token' --vault Private --fields label=password": "exit=0\nstdout=secret\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "1password",
+                "tool_arguments": {
+                    "action": "item_get",
+                    "item": "GitHub Token",
+                    "vault": "Private",
+                    "field": "password",
+                },
+            },
+            ToolContext(session_id="cli:op", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=secret\nstderr="
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
