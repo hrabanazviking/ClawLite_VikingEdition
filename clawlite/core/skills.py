@@ -1286,6 +1286,8 @@ class SkillsLoader:
             return ["tool:exec", "platform:darwin"]
         if script_name == "obsidian":
             return ["env:OBSIDIAN_VAULT"]
+        if script_name == "skald":
+            return ["provider"]
         if script_name == "notion":
             return ["env:NOTION_API_KEY"]
         if script_name == "jira":

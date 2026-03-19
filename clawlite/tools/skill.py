@@ -844,6 +844,64 @@ class SkillTool(Tool):
                 return f"skill_requires_approval:{spec_name}:{exc}"
             raise
 
+    async def _run_skald(self, arguments: dict[str, Any], *, spec_name: str) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "provider",
+                    "usage": "Provide source text with tool_arguments.input/text and optional style/tone.",
+                    "available_actions": ["story", "summary", "retell"],
+                    "examples": [
+                        {"action": "story", "tool_arguments": {"action": "story", "input": "Deployment failed after schema migration.", "style": "concise"}},
+                        {"action": "summary", "tool_arguments": {"action": "summary", "input": "Long project history..."}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        if self.provider is None:
+            return f"skill_blocked:{spec_name}:provider_unavailable"
+
+        source = str(payload.get("input", payload.get("text", arguments.get("input", arguments.get("text", "")))) or "").strip()
+        if not source:
+            raise ValueError("input is required for skald")
+
+        style = str(payload.get("style", arguments.get("style", "concise")) or "concise").strip()
+        tone = str(payload.get("tone", arguments.get("tone", "direct")) or "direct").strip()
+        mode = "narrative_story" if action in {"story", "retell"} else "structured_summary"
+
+        response = await self.provider.complete(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Skald, a precise narrative synthesizer. Preserve hard facts and produce clear, "
+                        "human-readable storytelling with technical accuracy."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Mode: {mode}\nStyle: {style}\nTone: {tone}\n\n"
+                        f"Turn this into a clean narrative with setup, journey, current state, and key takeaways.\n\n{source[:12000]}"
+                    ),
+                },
+            ],
+            tools=[],
+            max_tokens=800,
+            temperature=0.4,
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            return f"skill_blocked:{spec_name}:provider_empty_response"
+        return text
+
     @staticmethod
     def _gh_value(payload: dict[str, Any], arguments: dict[str, Any], *keys: str) -> str:
         for key in keys:
@@ -3109,6 +3167,8 @@ class SkillTool(Tool):
             return await self._run_coding_agent(arguments, ctx)
         if script_name == "memory":
             return await self._run_memory(arguments, ctx, spec_name=spec_name)
+        if script_name == "skald":
+            return await self._run_skald(arguments, spec_name=spec_name)
         if script_name == "gh_issues":
             return await self._run_gh_issues(
                 arguments,

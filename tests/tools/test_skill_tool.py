@@ -1285,6 +1285,79 @@ def test_run_skill_memory_blocks_when_target_tool_missing(tmp_path: Path) -> Non
     asyncio.run(_scenario())
 
 
+def test_run_skill_skald_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "skald", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "story" in payload["available_actions"]
+        assert "summary" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_skald_story_uses_provider(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+        out = await tool.run(
+            {
+                "name": "skald",
+                "tool_arguments": {
+                    "action": "story",
+                    "input": "deployment failed after migration",
+                    "style": "concise",
+                },
+            },
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        assert out.startswith("summary::Style: concise")
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_skald_blocks_without_provider(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skald",
+                "tool_arguments": {
+                    "action": "story",
+                    "input": "deployment failed after migration",
+                },
+            },
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:skald:provider_unavailable"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
