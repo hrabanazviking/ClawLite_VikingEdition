@@ -22,6 +22,8 @@ from clawlite.config.loader import load_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.engine import AgentEngine
 from clawlite.core.huginn_muninn import wrap_with_ravens
+from clawlite.core.runestone import RunestoneLog, set_runestone
+from clawlite.runtime.volva import VolvaOracle
 from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.providers import detect_provider_name
 from clawlite.providers.catalog import default_provider_model, provider_profile
@@ -2633,6 +2635,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             stop_self_evolution=_stop_self_evolution,
         )
 
+    # ── Runestone audit log ────────────────────────────────────────────────────
+    import pathlib as _pathlib
+    _runestone_path = _pathlib.Path.home() / ".clawlite" / "runestone.jsonl"
+    _runestone_log = RunestoneLog(_runestone_path)
+    set_runestone(_runestone_log)
+    bind_event("runestone").info("ᚱ Runestone audit log opened: {}", _runestone_path)
+
+    # ── Völva oracle ───────────────────────────────────────────────────────────
+    _volva = VolvaOracle(
+        interval_s=float(getattr(getattr(cfg, "gateway", None) and cfg.gateway, "autonomy", None) and
+                         getattr(cfg.gateway.autonomy, "interval_s", 1800) or 1800),
+    )
+    _volva_task: asyncio.Task | None = None
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         lifecycle.phase = "starting"
@@ -2641,6 +2657,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         bus_connect = getattr(runtime.bus, "connect", None)
         if callable(bus_connect):
             await bus_connect()
+        # Start Völva memory oracle
+        nonlocal _volva_task
+        _memory = getattr(runtime.engine, "memory", None)
+        _consolidator = getattr(runtime.engine, "consolidator", None)
+        if _memory is not None:
+            _volva_task = _volva.start(_memory, _consolidator, runestone=_runestone_log)
         await _start_subsystems()
         lifecycle.phase = "running"
         lifecycle.ready = True
@@ -2651,6 +2673,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             lifecycle.phase = "stopping"
             lifecycle.ready = False
             bind_event("gateway.lifecycle").info("gateway shutdown begin")
+            if _volva_task is not None and not _volva_task.done():
+                await _volva.stop()
             await _stop_subsystems()
             bus_close = getattr(runtime.bus, "close", None)
             if callable(bus_close):

@@ -49,6 +49,14 @@ from typing import Any
 
 from clawlite.utils.logging import bind_event
 
+# Late import to avoid circular deps — runestone registers itself at startup
+def _audit(*, kind: str, source: str, details: dict) -> None:
+    try:
+        from clawlite.core.runestone import audit as _rs_audit
+        _rs_audit(kind=kind, source=source, details=details)
+    except Exception:
+        pass
+
 # ── Threat level ──────────────────────────────────────────────────────────────
 
 class ThreatLevel(str, Enum):
@@ -273,6 +281,12 @@ def scan_inbound(text: str, *, source: str = "unknown") -> ScanResult:
             normalized[:120],
         )
 
+    if highest != ThreatLevel.CLEAN:
+        _audit(
+            kind=f"injection_{highest.value}",
+            source=source,
+            details={"threats": threats[:8], "preview": normalized[:200]},
+        )
     return ScanResult(
         level=highest,
         threats=threats,
