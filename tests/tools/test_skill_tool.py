@@ -163,6 +163,46 @@ class FakeProvider:
         return LLMResult(model="fake/summary", text=f"summary::{messages[-1]['content'].splitlines()[1]}")
 
 
+class FakeCronTool(Tool):
+    name = "cron"
+    description = "fake cron"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"action": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return json.dumps({"ok": True, "action": str(arguments.get("action", ""))})
+
+
+class FakeMemoryRecallTool(Tool):
+    name = "memory_recall"
+    description = "fake memory recall"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return json.dumps({"ok": True, "query": str(arguments.get("query", ""))})
+
+
+class FakeWriteTool(Tool):
+    name = "write"
+    description = "fake write"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        self.calls.append(dict(arguments))
+        return "ok"
+
+
 class FakeMemory:
     def __init__(self, verdict):
         self.verdict = verdict
@@ -1094,17 +1134,6 @@ def test_run_skill_cron_dispatches_to_cron_tool(tmp_path: Path) -> None:
         "name: cron\ndescription: cron helper\nscript: cron",
     )
 
-    class FakeCronTool(Tool):
-        name = "cron"
-        description = "fake cron"
-
-        def args_schema(self) -> dict:
-            return {"type": "object", "properties": {"action": {"type": "string"}}}
-
-        async def run(self, arguments: dict, ctx: ToolContext) -> str:
-            del ctx
-            return json.dumps({"ok": True, "action": str(arguments.get("action", ""))})
-
     async def _scenario() -> None:
         reg = ToolRegistry()
         reg.register(FakeCronTool())
@@ -1227,17 +1256,6 @@ def test_run_skill_memory_recall_dispatches_memory_recall(tmp_path: Path) -> Non
         "memory",
         "name: memory\ndescription: memory helper\nscript: memory",
     )
-
-    class FakeMemoryRecallTool(Tool):
-        name = "memory_recall"
-        description = "fake memory recall"
-
-        def args_schema(self) -> dict:
-            return {"type": "object", "properties": {"query": {"type": "string"}}}
-
-        async def run(self, arguments: dict, ctx: ToolContext) -> str:
-            del ctx
-            return json.dumps({"ok": True, "query": str(arguments.get("query", ""))})
 
     async def _scenario() -> None:
         reg = ToolRegistry()
@@ -1415,21 +1433,6 @@ def test_run_skill_creator_scaffold_writes_with_write_tool(tmp_path: Path) -> No
         "skill-creator",
         "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
     )
-
-    class FakeWriteTool(Tool):
-        name = "write"
-        description = "fake write"
-
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        def args_schema(self) -> dict:
-            return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
-
-        async def run(self, arguments: dict, ctx: ToolContext) -> str:
-            del ctx
-            self.calls.append(dict(arguments))
-            return "ok"
 
     async def _scenario() -> None:
         reg = ToolRegistry()
@@ -2455,5 +2458,67 @@ def test_run_skill_spotify_blocks_without_auth(monkeypatch, tmp_path: Path) -> N
             ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
         )
         assert out == "skill_blocked:spotify:spotify_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_dispatcher_supports_all_builtin_script_names(tmp_path: Path, monkeypatch) -> None:
+    script_names = [
+        "onepassword",
+        "apple_notes",
+        "clawhub",
+        "coding_agent",
+        "cron",
+        "docker",
+        "gh_issues",
+        "github",
+        "healthcheck",
+        "jira",
+        "linear",
+        "memory",
+        "model_usage",
+        "notion",
+        "obsidian",
+        "session_logs",
+        "skald",
+        "skill_creator",
+        "spotify",
+        "summarize",
+        "tmux",
+        "trello",
+        "weather",
+        "web_search",
+    ]
+
+    for script_name in script_names:
+        skill_name = f"skill-{script_name}"
+        _write_skill(
+            tmp_path,
+            skill_name,
+            f"name: {skill_name}\ndescription: test dispatcher\nscript: {script_name}",
+        )
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("OBSIDIAN_VAULT", str(tmp_path))
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        reg.register(FakeWebSearchTool())
+        reg.register(FakeWebFetchPayloadTool())
+        reg.register(FakeSessionsSpawnTool())
+        reg.register(FakeCronTool())
+        reg.register(FakeMemoryRecallTool())
+        reg.register(FakeWriteTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+
+        for script_name in script_names:
+            skill_name = f"skill-{script_name}"
+            try:
+                out = await tool.run(
+                    {"name": skill_name},
+                    ToolContext(session_id="cli:dispatch", channel="cli", user_id="11"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                out = str(exc)
+            assert f"unsupported_script:{script_name}" not in out
 
     asyncio.run(_scenario())
