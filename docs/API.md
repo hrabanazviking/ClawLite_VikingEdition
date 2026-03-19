@@ -48,10 +48,14 @@ Example response:
   },
   "channels": {
     "count": 1,
+    "readiness_counts": {
+      "stable": 1
+    },
     "items": [
       {
         "name": "telegram",
         "enabled": true,
+        "readiness": "stable",
         "state": "running",
         "summary": "enabled | running"
       }
@@ -108,7 +112,7 @@ Example response:
 
 Alias compatível: `GET /api/dashboard/state` (mesmo payload e mesma política de autenticação).
 
-This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload.
+This aggregated dashboard payload now also includes queue/dead-letter stats plus `channels_dispatcher`, `channels_delivery`, `channels_inbound`, `channels_recovery`, and `supervisor` blocks so the packaged control plane can render operator recovery cards without scraping the full diagnostics payload. Channel summaries are additive and now include per-item `readiness` plus aggregate `readiness_counts` to show rollout maturity (`stable`, `beta`, `experimental`).
 
 ## `POST /v1/control/memory/suggest/refresh`
 
@@ -659,7 +663,7 @@ Scheduler diagnostics/status payloads are additive and include reliability telem
 
 If `gateway.diagnostics.enabled=false`, returns `404` with `{"error":"diagnostics_disabled","status":404}`.
 
-`channels` entries are additive and may include channel-specific `signals` maps for operational counters/state.
+`channels` entries are additive and may include channel-specific `signals` maps for operational counters/state, plus `readiness` and `enabled` snapshots for control-plane readiness dashboards.
 
 For Telegram, `signals` may also include safe-offset reliability fields such as `offset_next`, `offset_watermark_update_id`, `offset_highest_completed_update_id`, `offset_pending_count`, and `offset_min_pending_update_id`, plus additive counters like `offset_safe_advance_count`, `polling_stale_update_skip_count`, `webhook_stale_update_skip_count`, `media_download_count`, `media_download_error_count`, `media_transcription_count`, and `media_transcription_error_count`.
 

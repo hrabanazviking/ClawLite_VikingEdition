@@ -770,7 +770,7 @@ function renderAutomation() {
       title.textContent = channel.name || "channel";
       const meta = document.createElement("div");
       meta.className = "summary-card__meta";
-      meta.textContent = `${channel.enabled ? "enabled" : "disabled"} | ${channel.state || "unknown"}`;
+      meta.textContent = `${channel.enabled ? "enabled" : "disabled"} | ${channel.state || "unknown"} | ${channel.readiness || "experimental"}`;
       const summary = document.createElement("div");
       summary.className = "summary-card__meta";
       summary.textContent = channel.summary || "";
@@ -821,7 +821,11 @@ function renderAutomation() {
   const cronStatus = cronPayload.status || {};
   setText("metric-cron-jobs", String(numeric(cronStatus.jobs, cronJobs.length)));
   setBadge("cron-status", cronJobs.length ? `${cronJobs.length} jobs` : "idle", cronJobs.length ? "ok" : "warn");
-  setBadge("channels-status", channels.length ? `${channels.length} channels` : "empty", channels.length ? "ok" : "warn");
+  const readinessCounts = channelsPayload.readiness_counts && typeof channelsPayload.readiness_counts === "object" ? channelsPayload.readiness_counts : {};
+  const stableCount = numeric(readinessCounts.stable, 0);
+  const channelsTone = channels.length && stableCount === channels.length ? "ok" : channels.length ? "warn" : "warn";
+  const channelsLabel = channels.length ? `${channels.length} channels | stable ${stableCount}` : "empty";
+  setBadge("channels-status", channelsLabel, channelsTone);
 }
 
 function renderTelegramBoard() {

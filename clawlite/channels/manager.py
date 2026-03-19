@@ -25,6 +25,7 @@ from clawlite.channels.irc import IRCChannel
 from clawlite.channels.matrix import MatrixChannel
 from clawlite.channels.mochat import MochatChannel
 from clawlite.channels.qq import QQChannel
+from clawlite.channels.readiness import channel_readiness
 from clawlite.channels.signal import SignalChannel
 from clawlite.channels.slack import SlackChannel
 from clawlite.channels.telegram import TelegramChannel
@@ -2410,7 +2411,9 @@ class ChannelManager:
             recovery_row = dict(self._ensure_recovery_channel(name))
             recovery_row.pop("_last_attempt_monotonic", None)
             row: dict[str, Any] = {
+                "enabled": True,
                 "running": ch.running,
+                "readiness": channel_readiness(name),
                 "last_error": ch.health().last_error,
                 "task_state": task_state,
                 "task_error": task_error,

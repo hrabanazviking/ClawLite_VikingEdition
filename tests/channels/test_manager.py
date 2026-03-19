@@ -951,6 +951,8 @@ def test_channel_manager_status_includes_channel_specific_signals() -> None:
         await mgr.start({"channels": {"fake": {"enabled": True}}})
 
         status = mgr.status()
+        assert status["fake"]["enabled"] is True
+        assert status["fake"]["readiness"] == "experimental"
         assert status["fake"]["running"] is True
         assert status["fake"]["signals"] == {"foo": 1, "bar": 2}
 
