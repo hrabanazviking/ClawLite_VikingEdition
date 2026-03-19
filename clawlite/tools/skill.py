@@ -771,6 +771,79 @@ class SkillTool(Tool):
             user_id=ctx.user_id,
         )
 
+    async def _run_memory(self, arguments: dict[str, Any], ctx: ToolContext, *, spec_name: str) -> str:
+        payload = self._skill_payload(arguments)
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "memory_tools",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "available_actions": ["recall", "search", "get", "learn", "forget", "analyze", "request"],
+                    "examples": [
+                        {"action": "recall", "tool_arguments": {"action": "recall", "query": "timezone preference", "limit": 5}},
+                        {"action": "learn", "tool_arguments": {"action": "learn", "text": "User prefers concise updates."}},
+                        {"action": "forget", "tool_arguments": {"action": "forget", "query": "deprecated preference", "dry_run": True}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        action_map = {
+            "recall": "memory_recall",
+            "search": "memory_search",
+            "get": "memory_get",
+            "learn": "memory_learn",
+            "forget": "memory_forget",
+            "analyze": "memory_analyze",
+        }
+
+        if action == "request":
+            requested_tool = str(payload.get("tool", arguments.get("tool", "")) or "").strip()
+            if not requested_tool:
+                raise ValueError("tool is required for memory request")
+            if requested_tool not in {
+                "memory_recall",
+                "memory_search",
+                "memory_get",
+                "memory_learn",
+                "memory_forget",
+                "memory_analyze",
+            }:
+                raise ValueError("tool must be one of: memory_recall, memory_search, memory_get, memory_learn, memory_forget, memory_analyze")
+            target_tool = requested_tool
+        else:
+            target_tool = action_map.get(action)
+            if not target_tool:
+                raise ValueError("action must be one of: guide, recall, search, get, learn, forget, analyze, request")
+
+        if self.registry.get(target_tool) is None:
+            return f"skill_blocked:{spec_name}:{target_tool}_not_registered"
+
+        tool_args = dict(payload)
+        tool_args.pop("action", None)
+        tool_args.pop("tool", None)
+
+        try:
+            return await self.registry.execute(
+                target_tool,
+                tool_args,
+                session_id=ctx.session_id,
+                channel=ctx.channel,
+                user_id=ctx.user_id,
+            )
+        except RuntimeError as exc:
+            text = str(exc)
+            if text.startswith(f"tool_blocked_by_safety_policy:{target_tool}:"):
+                return f"skill_blocked:{spec_name}:{exc}"
+            if text.startswith(f"tool_requires_approval:{target_tool}:"):
+                return f"skill_requires_approval:{spec_name}:{exc}"
+            raise
+
     @staticmethod
     def _gh_value(payload: dict[str, Any], arguments: dict[str, Any], *keys: str) -> str:
         for key in keys:
@@ -3034,6 +3107,8 @@ class SkillTool(Tool):
             return await self._run_session_logs(arguments)
         if script_name == "coding_agent":
             return await self._run_coding_agent(arguments, ctx)
+        if script_name == "memory":
+            return await self._run_memory(arguments, ctx, spec_name=spec_name)
         if script_name == "gh_issues":
             return await self._run_gh_issues(
                 arguments,

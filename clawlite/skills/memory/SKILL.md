@@ -2,6 +2,7 @@
 name: memory
 description: Maintain stable user and project facts across sessions using workspace memory files and runtime memory state.
 always: true
+script: memory
 metadata: {"clawlite":{"emoji":"🧠"}}
 ---
 

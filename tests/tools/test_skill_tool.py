@@ -1199,6 +1199,92 @@ def test_run_skill_obsidian_write_read_and_search(tmp_path: Path, monkeypatch) -
     asyncio.run(_scenario())
 
 
+def test_run_skill_memory_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "memory", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "recall" in payload["available_actions"]
+        assert "learn" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_memory_recall_dispatches_memory_recall(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    class FakeMemoryRecallTool(Tool):
+        name = "memory_recall"
+        description = "fake memory recall"
+
+        def args_schema(self) -> dict:
+            return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+        async def run(self, arguments: dict, ctx: ToolContext) -> str:
+            del ctx
+            return json.dumps({"ok": True, "query": str(arguments.get("query", ""))})
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeMemoryRecallTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "memory",
+                "tool_arguments": {
+                    "action": "recall",
+                    "query": "timezone",
+                },
+            },
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["query"] == "timezone"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_memory_blocks_when_target_tool_missing(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "memory",
+                "tool_arguments": {
+                    "action": "learn",
+                    "text": "User likes concise summaries.",
+                },
+            },
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:memory:memory_learn_not_registered"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

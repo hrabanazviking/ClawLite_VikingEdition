@@ -1274,6 +1274,8 @@ class SkillsLoader:
             return ["tool:exec"]
         if script_name == "onepassword":
             return ["tool:exec", "env:OP_SERVICE_ACCOUNT_TOKEN"]
+        if script_name == "memory":
+            return ["tool:memory_recall|memory_search|memory_get|memory_learn|memory_forget|memory_analyze"]
         if script_name == "cron":
             return ["tool:cron"]
         if script_name == "docker":
