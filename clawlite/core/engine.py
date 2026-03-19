@@ -3388,18 +3388,45 @@ class AgentEngine:
                         )
                         tool_result = f"tool_error:{name}:{tool_argument_error}"
                     else:
+                        # ── Ægishjálmr: scan tool arguments before execution ──
                         try:
-                            tool_result = await self.tools.execute(
-                                name,
-                                arguments,
-                                session_id=session_id,
-                                channel=runtime_channel,
-                                user_id=runtime_chat_id,
-                            )
-                        except Exception as exc:
-                            bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).error("execution failed call_id={} error={}", call_id, exc)
-                            tool_result = f"tool_error:{name}:{exc}"
-                        tool_calls_executed += 1
+                            import json as _json
+                            from clawlite.core.injection_guard import scan_output as _scan_tool_args
+                            _args_str = _json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else str(arguments or "")
+                            _guard = _scan_tool_args(_args_str, context=f"tool_args:{name}")
+                            if _guard.blocked:
+                                bind_event("injection_guard", session=session_id, tool=name).warning(
+                                    "tool arguments BLOCKED call_id={} threats={}", call_id, ",".join(_guard.threats[:8])
+                                )
+                                tool_result = f"tool_error:{name}:arguments_blocked_by_injection_guard"
+                                tool_calls_executed += 1
+                            else:
+                                try:
+                                    tool_result = await self.tools.execute(
+                                        name,
+                                        arguments,
+                                        session_id=session_id,
+                                        channel=runtime_channel,
+                                        user_id=runtime_chat_id,
+                                    )
+                                except Exception as exc:
+                                    bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).error("execution failed call_id={} error={}", call_id, exc)
+                                    tool_result = f"tool_error:{name}:{exc}"
+                                tool_calls_executed += 1
+                        except Exception as _guard_exc:
+                            # Guard failure must never block the tool
+                            try:
+                                tool_result = await self.tools.execute(
+                                    name,
+                                    arguments,
+                                    session_id=session_id,
+                                    channel=runtime_channel,
+                                    user_id=runtime_chat_id,
+                                )
+                            except Exception as exc:
+                                bind_event("tool.exec", session=session_id, channel=runtime_channel or "-", tool=name).error("execution failed call_id={} error={}", call_id, exc)
+                                tool_result = f"tool_error:{name}:{exc}"
+                            tool_calls_executed += 1
 
                     failure_fingerprint = self._failure_fingerprint(tool_signature=signature, tool_result=tool_result)
 

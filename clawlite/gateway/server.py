@@ -24,6 +24,8 @@ from clawlite.core.engine import AgentEngine
 from clawlite.core.huginn_muninn import wrap_with_ravens
 from clawlite.core.runestone import RunestoneLog, set_runestone
 from clawlite.runtime.volva import VolvaOracle
+from clawlite.runtime.valkyrie import ValkyrieReaper
+from clawlite.runtime.gjallarhorn import GjallarhornWatch
 from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.providers import detect_provider_name
 from clawlite.providers.catalog import default_provider_model, provider_profile
@@ -1278,11 +1280,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 huginn_d.get("suggested_action", "")[:80],
                 muninn_d.get("suggested_action", "")[:80],
             )
-        snapshot_text = json.dumps(snapshot or {}, ensure_ascii=False, sort_keys=True)
+        # Feed ravens counsel to Gjallarhorn for threshold alerting
+        if isinstance(ravens, dict):
+            _gjallarhorn.observe_ravens(ravens)
+        # Feed autonomy error count to Gjallarhorn
+        auto_status = runtime.autonomy.status() if runtime.autonomy is not None else {}
+        _gjallarhorn.observe_autonomy(
+            int(auto_status.get("consecutive_error_count", 0) or 0),
+            str(auto_status.get("last_error", "") or ""),
+        )
+        # Norns three-phase structured snapshot for better LLM reasoning
+        from clawlite.core.norns import norns_autonomy_prompt as _norns_prompt
+        snapshot_text = _norns_prompt(snapshot or {})
         result = await _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=str(cfg.gateway.autonomy.session_id or "autonomy:system"),
-            user_text=f"{prompt_text}\n\nRuntime snapshot:\n{snapshot_text}",
+            user_text=f"{prompt_text}\n\nRuntime snapshot (Norns three-phase):\n{snapshot_text}",
             timeout_s=float(cfg.gateway.autonomy.timeout_s or 45.0),
         )
         model_name = str(getattr(result, "model", "") or "").strip()
@@ -2649,6 +2662,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     _volva_task: asyncio.Task | None = None
 
+    # ── Valkyrie session reaper ────────────────────────────────────────────────
+    _valkyrie = ValkyrieReaper(idle_days=7.0, dead_days=30.0)
+    _valkyrie_task: asyncio.Task | None = None
+
+    # ── Gjallarhorn alert watch ────────────────────────────────────────────────
+    _gjallarhorn = GjallarhornWatch(
+        channel_target=str(getattr(getattr(cfg, "gateway", None) and cfg.gateway, "alert_target", None) or ""),
+        block_threshold=5,
+        cooldown_s=600.0,
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         lifecycle.phase = "starting"
@@ -2658,11 +2682,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         if callable(bus_connect):
             await bus_connect()
         # Start Völva memory oracle
-        nonlocal _volva_task
+        nonlocal _volva_task, _valkyrie_task
         _memory = getattr(runtime.engine, "memory", None)
         _consolidator = getattr(runtime.engine, "consolidator", None)
         if _memory is not None:
             _volva_task = _volva.start(_memory, _consolidator, runestone=_runestone_log)
+        # Start Valkyrie session reaper
+        _session_store = getattr(runtime, "sessions", None) or getattr(runtime.engine, "sessions", None)
+        if _session_store is not None:
+            _valkyrie_task = _valkyrie.start(_session_store, runestone=_runestone_log)
+        # Start Gjallarhorn alert watcher
+        async def _gjallarhorn_send(target: str, message: str) -> None:
+            try:
+                await runtime.channels.send(target=target, text=message)
+            except Exception:
+                pass
+        _gjallarhorn.start(_gjallarhorn_send)
         await _start_subsystems()
         lifecycle.phase = "running"
         lifecycle.ready = True
@@ -2675,6 +2710,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             bind_event("gateway.lifecycle").info("gateway shutdown begin")
             if _volva_task is not None and not _volva_task.done():
                 await _volva.stop()
+            if _valkyrie_task is not None and not _valkyrie_task.done():
+                await _valkyrie.stop()
+            await _gjallarhorn.stop()
             await _stop_subsystems()
             bus_close = getattr(runtime.bus, "close", None)
             if callable(bus_close):
@@ -2923,6 +2961,39 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/metrics/providers")
     async def metrics_providers(request: Request) -> dict[str, Any]:
         return await status_handlers.metrics_providers(request)
+
+    @app.get("/health/norse")
+    async def health_norse(request: Request) -> dict[str, Any]:
+        """Status of all Norse subsystems: Ravens, Völva, Valkyrie, Gjallarhorn, Runestone."""
+        from clawlite.core.runestone import _runestone
+        chain_intact, chain_broken_at = (True, -1)
+        runestone_tail: list = []
+        if _runestone is not None:
+            try:
+                chain_intact, chain_broken_at = _runestone.verify_chain()
+                runestone_tail = _runestone.tail(5)
+            except Exception:
+                pass
+        return {
+            "volva": _volva.status(),
+            "valkyrie": _valkyrie.status(),
+            "gjallarhorn": _gjallarhorn.status(),
+            "runestone": {
+                "chain_intact": chain_intact,
+                "chain_broken_at": chain_broken_at,
+                "recent_events": runestone_tail,
+            },
+        }
+
+    @app.get("/runestone/tail")
+    async def runestone_tail_endpoint(request: Request, n: int = 20) -> dict[str, Any]:
+        """Return the last N entries from the Runestone audit log."""
+        from clawlite.core.runestone import _runestone
+        if _runestone is None:
+            return {"records": [], "error": "runestone_not_configured"}
+        records = _runestone.tail(max(1, min(200, n)))
+        intact, broken_at = _runestone.verify_chain()
+        return {"records": records, "chain_intact": intact, "chain_broken_at": broken_at}
 
     def _dashboard_state_payload() -> dict[str, Any]:
         generated_at = _utc_now_iso()
