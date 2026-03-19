@@ -1,6 +1,6 @@
 <div align="center">
 
-![ClawLite - Viking Edition](https://github.com/hrabanazviking/ClawLite_VikingEdition/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg)
+![https://github.com/hrabanazviking/ClawLite_VikingEdition/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg](https://raw.githubusercontent.com/hrabanazviking/ClawLite_VikingEdition/refs/heads/Development/assets/894ec475-29cd-4187-b4a7-9595de611e8e.jpg))
 
 # ClawLite - Viking Edition
 
