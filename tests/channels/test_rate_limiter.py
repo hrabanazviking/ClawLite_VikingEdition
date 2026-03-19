@@ -1,10 +1,22 @@
 """Tests for the token bucket rate limiter in BaseChannel."""
 from __future__ import annotations
 
+import asyncio
 import time
-import pytest
 
-from clawlite.channels.base import _TokenBucketRateLimiter
+from clawlite.channels.base import BaseChannel, _TokenBucketRateLimiter
+
+
+class _DummyChannel(BaseChannel):
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def send(self, *, target: str, text: str, metadata: dict | None = None) -> str:
+        del target, text, metadata
+        return "ok"
 
 
 def test_first_message_allowed():
@@ -62,3 +74,28 @@ def test_high_rate_allows_burst():
     results = [rl.allow("burst") for _ in range(100)]
     assert all(results)
     assert rl.allow("burst") is False  # 101st blocked
+
+
+def test_channel_rate_limiter_is_isolated_per_channel_instance():
+    async def _scenario() -> None:
+        first_events: list[str] = []
+        second_events: list[str] = []
+
+        async def _first_handler(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            del user_id, text, metadata
+            first_events.append(session_id)
+
+        async def _second_handler(session_id: str, user_id: str, text: str, metadata: dict) -> None:
+            del user_id, text, metadata
+            second_events.append(session_id)
+
+        first = _DummyChannel(name="dummy", config={}, on_message=_first_handler)
+        for _ in range(11):
+            await first.emit(session_id="shared", user_id="user", text="hello")
+        assert len(first_events) == 10
+
+        second = _DummyChannel(name="dummy", config={}, on_message=_second_handler)
+        await second.emit(session_id="shared", user_id="user", text="hello")
+        assert len(second_events) == 1
+
+    asyncio.run(_scenario())

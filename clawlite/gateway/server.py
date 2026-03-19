@@ -21,11 +21,6 @@ from clawlite.bus.queue import MessageQueue
 from clawlite.config.loader import load_config
 from clawlite.config.schema import AppConfig
 from clawlite.core.engine import AgentEngine
-from clawlite.core.huginn_muninn import wrap_with_ravens
-from clawlite.core.runestone import RunestoneLog, set_runestone
-from clawlite.runtime.volva import VolvaOracle
-from clawlite.runtime.valkyrie import ValkyrieReaper
-from clawlite.runtime.gjallarhorn import GjallarhornWatch
 from clawlite.core.memory_monitor import MemoryMonitor, MemorySuggestion
 from clawlite.providers import detect_provider_name
 from clawlite.providers.catalog import default_provider_model, provider_profile
@@ -112,6 +107,12 @@ from clawlite.gateway.dashboard_state import (
 from clawlite.gateway.dashboard_runtime import (
     dashboard_state_payload as _dashboard_state_payload_runtime,
 )
+from clawlite.gateway.dashboard_sessions import (
+    DEFAULT_DASHBOARD_SESSION_HEADER_NAME,
+    DEFAULT_DASHBOARD_SESSION_QUERY_PARAM,
+    DashboardSessionRegistry,
+    dashboard_session_expiry_iso,
+)
 from clawlite.gateway.diagnostics_payload import (
     diagnostics_payload as _diagnostics_payload_builder,
 )
@@ -193,6 +194,9 @@ def _normalize_webhook_path(value: str, *, default: str = "/api/webhooks/telegra
 class ChatRequest(BaseModel):
     session_id: str
     text: str
+    channel: str = ""
+    chat_id: str | None = None
+    runtime_metadata: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -507,10 +511,23 @@ async def _run_engine_with_timeout(
     session_id: str,
     user_text: str,
     timeout_s: float,
+    channel: str | None = None,
+    chat_id: str | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
 ) -> Any:
+    run_kwargs: dict[str, Any] = {
+        "session_id": session_id,
+        "user_text": user_text,
+    }
+    if str(channel or "").strip():
+        run_kwargs["channel"] = str(channel).strip()
+    if str(chat_id or "").strip():
+        run_kwargs["chat_id"] = str(chat_id).strip()
+    if isinstance(runtime_metadata, dict) and runtime_metadata:
+        run_kwargs["runtime_metadata"] = dict(runtime_metadata)
     try:
         return await asyncio.wait_for(
-            engine.run(session_id=session_id, user_text=user_text),
+            engine.run(**run_kwargs),
             timeout=max(0.001, float(timeout_s)),
         )
     except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -523,8 +540,21 @@ async def _stream_engine_with_timeout(
     session_id: str,
     user_text: str,
     timeout_s: float,
+    channel: str | None = None,
+    chat_id: str | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
 ):
-    stream = engine.stream_run(session_id=session_id, user_text=user_text)
+    stream_kwargs: dict[str, Any] = {
+        "session_id": session_id,
+        "user_text": user_text,
+    }
+    if str(channel or "").strip():
+        stream_kwargs["channel"] = str(channel).strip()
+    if str(chat_id or "").strip():
+        stream_kwargs["chat_id"] = str(chat_id).strip()
+    if isinstance(runtime_metadata, dict) and runtime_metadata:
+        stream_kwargs["runtime_metadata"] = dict(runtime_metadata)
+    stream = engine.stream_run(**stream_kwargs)
     deadline = time.monotonic() + max(0.001, float(timeout_s))
     try:
         while True:
@@ -612,6 +642,9 @@ class GatewayAuthGuard:
     header_name: str
     query_param: str
     protect_health: bool
+    dashboard_session_header_name: str
+    dashboard_session_query_param: str
+    dashboard_sessions: DashboardSessionRegistry | None = None
 
     @classmethod
     def from_config(cls, config: AppConfig) -> GatewayAuthGuard:
@@ -637,6 +670,9 @@ class GatewayAuthGuard:
             header_name=str(auth_cfg.header_name or "Authorization").strip() or "Authorization",
             query_param=str(auth_cfg.query_param or "token").strip() or "token",
             protect_health=bool(auth_cfg.protect_health),
+            dashboard_session_header_name=DEFAULT_DASHBOARD_SESSION_HEADER_NAME,
+            dashboard_session_query_param=DEFAULT_DASHBOARD_SESSION_QUERY_PARAM,
+            dashboard_sessions=DashboardSessionRegistry() if token else None,
         )
 
     def posture(self) -> str:
@@ -681,27 +717,106 @@ class GatewayAuthGuard:
     def _token_matches(self, supplied_token: str) -> bool:
         return bool(self.token) and hmac.compare_digest(supplied_token, self.token)
 
-    def check_http(self, *, request: Request, scope: str, diagnostics_auth: bool) -> None:
+    @staticmethod
+    def _extract_dashboard_session(*, header_value: str, query_value: str) -> str:
+        if query_value:
+            return query_value.strip()
+        return header_value.strip()
+
+    def _dashboard_session_matches(self, supplied_token: str) -> bool:
+        return bool(self.dashboard_sessions) and self.dashboard_sessions.verify(supplied_token)
+
+    def check_http_gateway_token(self, *, request: Request) -> None:
+        if not self.token:
+            raise HTTPException(status_code=404, detail="dashboard_session_disabled")
+        header_value = str(request.headers.get(self.header_name, "") or "")
+        supplied_token = self._extract_token(header_value=header_value, query_value="")
+        if not supplied_token:
+            raise HTTPException(status_code=401, detail="gateway_auth_required")
+        if not self._token_matches(supplied_token):
+            raise HTTPException(status_code=401, detail="gateway_auth_invalid")
+
+    def check_http(
+        self,
+        *,
+        request: Request,
+        scope: str,
+        diagnostics_auth: bool,
+        require_token_if_configured: bool = False,
+        allow_dashboard_session: bool = False,
+    ) -> None:
         client_host = request.client.host if request.client is not None else None
-        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         header_value = str(request.headers.get(self.header_name, "") or "")
         query_value = str(request.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
-        if should_require and not self._token_matches(supplied_token):
+        dashboard_header = str(request.headers.get(self.dashboard_session_header_name, "") or "")
+        dashboard_query = str(request.query_params.get(self.dashboard_session_query_param, "") or "")
+        dashboard_session = (
+            self._extract_dashboard_session(header_value=dashboard_header, query_value=dashboard_query)
+            if allow_dashboard_session and scope == "control" and self.token
+            else ""
+        )
+        raw_valid = self._token_matches(supplied_token)
+        dashboard_valid = self._dashboard_session_matches(dashboard_session) if dashboard_session else False
+        if require_token_if_configured and self.token:
+            if raw_valid or dashboard_valid:
+                return
+            if supplied_token or dashboard_session:
+                raise HTTPException(status_code=401, detail="gateway_auth_invalid")
+            if not supplied_token and not dashboard_session:
+                raise HTTPException(status_code=401, detail="gateway_auth_required")
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
+        if should_require and not (raw_valid or dashboard_valid):
+            if supplied_token or dashboard_session:
+                raise HTTPException(status_code=401, detail="gateway_auth_invalid")
             raise HTTPException(status_code=401, detail="gateway_auth_required")
-        if self.mode == "optional" and supplied_token and self.token and not self._token_matches(supplied_token):
+        if self.mode == "optional" and supplied_token and self.token and not raw_valid:
+            raise HTTPException(status_code=401, detail="gateway_auth_invalid")
+        if self.mode == "optional" and dashboard_session and self.token and not dashboard_valid:
             raise HTTPException(status_code=401, detail="gateway_auth_invalid")
 
-    async def check_ws(self, *, socket: WebSocket, scope: str, diagnostics_auth: bool) -> bool:
+    async def check_ws(
+        self,
+        *,
+        socket: WebSocket,
+        scope: str,
+        diagnostics_auth: bool,
+        allow_dashboard_session: bool = False,
+    ) -> bool:
         client_host = socket.client.host if socket.client is not None else None
-        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
         header_value = str(socket.headers.get(self.header_name, "") or "")
         query_value = str(socket.query_params.get(self.query_param, "") or "")
         supplied_token = self._extract_token(header_value=header_value, query_value=query_value)
-        if should_require and not self._token_matches(supplied_token):
+        dashboard_header = str(socket.headers.get(self.dashboard_session_header_name, "") or "")
+        dashboard_query = str(socket.query_params.get(self.dashboard_session_query_param, "") or "")
+        dashboard_session = (
+            self._extract_dashboard_session(header_value=dashboard_header, query_value=dashboard_query)
+            if allow_dashboard_session and scope == "control" and self.token
+            else ""
+        )
+        raw_valid = self._token_matches(supplied_token)
+        dashboard_valid = self._dashboard_session_matches(dashboard_session) if dashboard_session else False
+        should_require = self._require_for_scope(scope=scope, host=client_host, diagnostics_auth=diagnostics_auth)
+        require_token_if_configured = scope == "control" and bool(self.token)
+        if require_token_if_configured:
+            if raw_valid or dashboard_valid:
+                return True
+            if supplied_token or dashboard_session:
+                await socket.close(code=4401, reason="gateway_auth_invalid")
+                return False
+            if not supplied_token and not dashboard_session:
+                await socket.close(code=4401, reason="gateway_auth_required")
+                return False
+        if should_require and not (raw_valid or dashboard_valid):
+            if supplied_token or dashboard_session:
+                await socket.close(code=4401, reason="gateway_auth_invalid")
+                return False
             await socket.close(code=4401, reason="gateway_auth_required")
             return False
-        if self.mode == "optional" and supplied_token and self.token and not self._token_matches(supplied_token):
+        if self.mode == "optional" and supplied_token and self.token and not raw_valid:
+            await socket.close(code=4401, reason="gateway_auth_invalid")
+            return False
+        if self.mode == "optional" and dashboard_session and self.token and not dashboard_valid:
             await socket.close(code=4401, reason="gateway_auth_invalid")
             return False
         return True
@@ -709,12 +824,19 @@ class GatewayAuthGuard:
 
 async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch start job_id={}", job.id)
+    resolved_channel = str(getattr(job.payload, "channel", "") or "").strip() or job.session_id.split(":", 1)[0]
+    resolved_target = str(getattr(job.payload, "target", "") or "").strip() or job.session_id.split(":", 1)[-1]
+    raw_runtime_metadata = getattr(job.payload, "runtime_metadata", None)
+    runtime_metadata = dict(raw_runtime_metadata) if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata else None
     try:
         result = await _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=job.session_id,
             user_text=job.payload.prompt,
             timeout_s=GATEWAY_CRON_ENGINE_TIMEOUT_S,
+            channel=resolved_channel or None,
+            chat_id=resolved_target or None,
+            runtime_metadata=runtime_metadata,
         )
     except RuntimeError as exc:
         if str(exc) == "engine_run_timeout":
@@ -725,13 +847,11 @@ async def _route_cron_job(runtime: RuntimeContainer, job) -> str | None:
             )
             return "engine_run_timeout"
         raise
-    channel = job.payload.channel.strip() or job.session_id.split(":", 1)[0]
-    target = job.payload.target.strip() or job.session_id.split(":", 1)[-1]
-    if channel and target:
+    if resolved_channel and resolved_target:
         try:
-            await runtime.channels.send(channel=channel, target=target, text=result.text)
+            await runtime.channels.send(channel=resolved_channel, target=resolved_target, text=result.text)
         except Exception:
-            bind_event("channel.send", session=job.session_id, channel=channel).error("cron dispatch send failed job_id={} target={}", job.id, target)
+            bind_event("channel.send", session=job.session_id, channel=resolved_channel).error("cron dispatch send failed job_id={} target={}", job.id, resolved_target)
             return "cron_send_skipped"
     bind_event("cron.dispatch", session=job.session_id).info("cron dispatch finished job_id={}", job.id)
     return result.text
@@ -1246,10 +1366,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "channels": channels_snapshot if isinstance(channels_snapshot, dict) else {},
             "supervisor": supervisor_snapshot if isinstance(supervisor_snapshot, dict) else {},
             "provider": provider_snapshot,
-            # Norse subsystem health for Norns/Huginn to reason over
-            "volva": _volva.status(),
-            "valkyrie": _valkyrie.status(),
-            "gjallarhorn": _gjallarhorn.status(),
         }
 
     async def _run_autonomy_tick(snapshot: dict[str, Any]) -> str:
@@ -1273,35 +1389,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "If nothing needs operator attention right now, reply AUTONOMY_IDLE. "
             "If the operator needs a concise autonomous update, reply with only that notice text."
         )
-        # Log ravens' counsel if they surface high-priority findings
-        ravens = (snapshot or {}).get("ravens_counsel") or {}
-        if isinstance(ravens, dict) and ravens.get("combined_priority") in ("high", "medium"):
-            huginn_d = ravens.get("huginn") or {}
-            muninn_d = ravens.get("muninn") or {}
-            bind_event("ravens").warning(
-                "ᚺ Huginn [{}] {} | ᛗ Muninn {}",
-                huginn_d.get("priority", "?"),
-                huginn_d.get("suggested_action", "")[:80],
-                muninn_d.get("suggested_action", "")[:80],
-            )
-        # Feed ravens counsel to Gjallarhorn for threshold alerting
-        if isinstance(ravens, dict):
-            _gjallarhorn.observe_ravens(ravens)
-        # Feed autonomy error count to Gjallarhorn
-        auto_status = runtime.autonomy.status() if runtime.autonomy is not None else {}
-        _gjallarhorn.observe_autonomy(
-            int(auto_status.get("consecutive_error_count", 0) or 0),
-            str(auto_status.get("last_error", "") or ""),
-        )
-        # Feed Völva status to Gjallarhorn for memory-maintenance failure alerts
-        _gjallarhorn.observe_volva(_volva.status())
-        # Norns three-phase structured snapshot for better LLM reasoning
-        from clawlite.core.norns import norns_autonomy_prompt as _norns_prompt
-        snapshot_text = _norns_prompt(snapshot or {})
+        snapshot_text = json.dumps(snapshot or {}, ensure_ascii=False, sort_keys=True)
         result = await _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=str(cfg.gateway.autonomy.session_id or "autonomy:system"),
-            user_text=f"{prompt_text}\n\nRuntime snapshot (Norns three-phase):\n{snapshot_text}",
+            user_text=f"{prompt_text}\n\nRuntime snapshot:\n{snapshot_text}",
             timeout_s=float(cfg.gateway.autonomy.timeout_s or 45.0),
         )
         model_name = str(getattr(result, "model", "") or "").strip()
@@ -2365,6 +2457,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         kind = str(getattr(job, "kind", "") or "").strip()
         payload = dict(getattr(job, "payload", {}) or {})
         session_id = str(getattr(job, "session_id", "") or "").strip() or "jobs:system"
+        payload_channel = str(payload.get("channel", "") or "").strip() or None
+        raw_chat_id = payload.get("chat_id")
+        if raw_chat_id is None:
+            raw_chat_id = payload.get("target")
+        payload_chat_id = None
+        if isinstance(raw_chat_id, (str, int)) and not isinstance(raw_chat_id, bool):
+            payload_chat_id = str(raw_chat_id).strip() or None
+        raw_runtime_metadata = payload.get("runtime_metadata")
+        payload_runtime_metadata = dict(raw_runtime_metadata) if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata else None
         if kind == "agent_run":
             task_text = str(payload.get("task", "") or "").strip()
             if not task_text:
@@ -2375,6 +2476,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 session_id=session_id,
                 user_text=task_text,
                 timeout_s=timeout_s,
+                channel=payload_channel,
+                chat_id=payload_chat_id,
+                runtime_metadata=payload_runtime_metadata,
             )
             return str(getattr(result, "text", "") or "").strip() or "ok"
         if kind == "skill_exec":
@@ -2392,6 +2496,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 session_id=session_id,
                 user_text=combined_text,
                 timeout_s=timeout_s,
+                channel=payload_channel,
+                chat_id=payload_chat_id,
+                runtime_metadata=payload_runtime_metadata,
             )
             return str(getattr(result, "text", "") or "").strip() or "ok"
         raise ValueError(f"unsupported job kind: {kind!r} — use agent_run, skill_exec, or custom")
@@ -2429,7 +2536,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         max_queue_backlog=int(cfg.gateway.autonomy.max_queue_backlog or 200),
         session_id=str(cfg.gateway.autonomy.session_id or "autonomy:system"),
         snapshot_callback=_autonomy_snapshot_payload,
-        run_callback=wrap_with_ravens(_run_autonomy_tick),
+        run_callback=_run_autonomy_tick,
     )
 
     async def _supervisor_incident_checks() -> list[SupervisorIncident]:
@@ -2654,49 +2761,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             stop_self_evolution=_stop_self_evolution,
         )
 
-    # ── Runestone audit log ────────────────────────────────────────────────────
-    import pathlib as _pathlib
-    _vk = cfg.gateway.viking
-    _runestone_path = _pathlib.Path(
-        _vk.runestone_path or str(_pathlib.Path.home() / ".clawlite" / "runestone.jsonl")
-    ).expanduser()
-    _runestone_log = RunestoneLog(_runestone_path, max_file_bytes=_vk.runestone_max_file_bytes)
-    set_runestone(_runestone_log)
-    bind_event("runestone").info("ᚱ Runestone audit log opened: {}", _runestone_path)
-    # Wire Gjallarhorn as a Runestone post-append observer
-    def _runestone_to_gjallarhorn(record: Any) -> None:
-        _gjallarhorn.observe_runestone(record)
-    _runestone_log.set_on_append(_runestone_to_gjallarhorn)
-    # Configure channel rate limiter from VikingConfig
-    from clawlite.channels.base import _CHANNEL_RATE_LIMITER
-    _CHANNEL_RATE_LIMITER._rate = float(_vk.channel_rate_limit_messages)
-    _CHANNEL_RATE_LIMITER._per_s = float(_vk.channel_rate_limit_window_s)
-
-    # ── Völva oracle ───────────────────────────────────────────────────────────
-    _volva = VolvaOracle(
-        interval_s=float(_vk.volva_interval_s),
-        stale_hours=float(_vk.volva_stale_hours),
-        consolidation_threshold=int(_vk.volva_consolidation_threshold),
-    )
-    _volva_task: asyncio.Task | None = None
-
-    # ── Valkyrie session reaper ────────────────────────────────────────────────
-    _valkyrie = ValkyrieReaper(
-        idle_days=float(_vk.valkyrie_idle_days),
-        dead_days=float(_vk.valkyrie_dead_days),
-        interval_s=float(_vk.valkyrie_interval_s),
-    )
-    _valkyrie_task: asyncio.Task | None = None
-
-    # ── Gjallarhorn alert watch ────────────────────────────────────────────────
-    _gjallarhorn = GjallarhornWatch(
-        channel_target=str(_vk.gjallarhorn_alert_target or ""),
-        block_threshold=int(_vk.gjallarhorn_block_threshold),
-        block_window_s=float(_vk.gjallarhorn_block_window_s),
-        high_tick_threshold=int(_vk.gjallarhorn_high_tick_threshold),
-        cooldown_s=float(_vk.gjallarhorn_cooldown_s),
-    )
-
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         lifecycle.phase = "starting"
@@ -2705,23 +2769,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         bus_connect = getattr(runtime.bus, "connect", None)
         if callable(bus_connect):
             await bus_connect()
-        # Start Völva memory oracle
-        nonlocal _volva_task, _valkyrie_task
-        _memory = getattr(runtime.engine, "memory", None)
-        _consolidator = getattr(runtime.engine, "consolidator", None)
-        if _memory is not None:
-            _volva_task = _volva.start(_memory, _consolidator, runestone=_runestone_log)
-        # Start Valkyrie session reaper
-        _session_store = getattr(runtime, "sessions", None) or getattr(runtime.engine, "sessions", None)
-        if _session_store is not None:
-            _valkyrie_task = _valkyrie.start(_session_store, runestone=_runestone_log)
-        # Start Gjallarhorn alert watcher
-        async def _gjallarhorn_send(target: str, message: str) -> None:
-            try:
-                await runtime.channels.send(target=target, text=message)
-            except Exception:
-                pass
-        _gjallarhorn.start(_gjallarhorn_send)
         await _start_subsystems()
         lifecycle.phase = "running"
         lifecycle.ready = True
@@ -2732,11 +2779,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             lifecycle.phase = "stopping"
             lifecycle.ready = False
             bind_event("gateway.lifecycle").info("gateway shutdown begin")
-            if _volva_task is not None and not _volva_task.done():
-                await _volva.stop()
-            if _valkyrie_task is not None and not _valkyrie_task.done():
-                await _valkyrie.stop()
-            await _gjallarhorn.stop()
+            drain_turn_persistence = getattr(runtime.engine, "drain_turn_persistence", None)
+            if callable(drain_turn_persistence):
+                await drain_turn_persistence()
             await _stop_subsystems()
             bus_close = getattr(runtime.bus, "close", None)
             if callable(bus_close):
@@ -2986,39 +3031,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def metrics_providers(request: Request) -> dict[str, Any]:
         return await status_handlers.metrics_providers(request)
 
-    @app.get("/health/norse")
-    async def health_norse(request: Request) -> dict[str, Any]:
-        """Status of all Norse subsystems: Ravens, Völva, Valkyrie, Gjallarhorn, Runestone."""
-        from clawlite.core.runestone import _runestone
-        chain_intact, chain_broken_at = (True, -1)
-        runestone_tail: list = []
-        if _runestone is not None:
-            try:
-                chain_intact, chain_broken_at = _runestone.verify_chain()
-                runestone_tail = _runestone.tail(5)
-            except Exception:
-                pass
-        return {
-            "volva": _volva.status(),
-            "valkyrie": _valkyrie.status(),
-            "gjallarhorn": _gjallarhorn.status(),
-            "runestone": {
-                "chain_intact": chain_intact,
-                "chain_broken_at": chain_broken_at,
-                "recent_events": runestone_tail,
-            },
-        }
-
-    @app.get("/runestone/tail")
-    async def runestone_tail_endpoint(request: Request, n: int = 20) -> dict[str, Any]:
-        """Return the last N entries from the Runestone audit log."""
-        from clawlite.core.runestone import _runestone
-        if _runestone is None:
-            return {"records": [], "error": "runestone_not_configured"}
-        records = _runestone.tail(max(1, min(200, n)))
-        intact, broken_at = _runestone.verify_chain()
-        return {"records": records, "chain_intact": intact, "chain_broken_at": broken_at}
-
     def _dashboard_state_payload() -> dict[str, Any]:
         generated_at = _utc_now_iso()
         control_plane = _control_plane_payload(server_time=generated_at)
@@ -3087,7 +3099,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "mode": auth_guard.mode,
             "header_name": auth_guard.header_name,
             "query_param": auth_guard.query_param,
+            "dashboard_session_enabled": bool(auth_guard.dashboard_sessions) and bool(auth_guard.token),
+            "dashboard_session_header_name": auth_guard.dashboard_session_header_name,
+            "dashboard_session_query_param": auth_guard.dashboard_session_query_param,
         },
+        dashboard_session_payload_fn=lambda: (
+            (
+                lambda record: {
+                    "ok": True,
+                    "token_type": "dashboard_session",
+                    "session_token": record.token,
+                    "expires_at": dashboard_session_expiry_iso(record),
+                    "expires_in_s": auth_guard.dashboard_sessions.ttl_seconds if auth_guard.dashboard_sessions is not None else 0,
+                    "header_name": auth_guard.dashboard_session_header_name,
+                    "query_param": auth_guard.dashboard_session_query_param,
+                }
+            )(auth_guard.dashboard_sessions.issue())
+            if auth_guard.dashboard_sessions is not None and auth_guard.token
+            else {"ok": False, "error": "dashboard_session_disabled"}
+        ),
     )
     websocket_handlers = GatewayWebSocketHandlers(
         auth_guard=auth_guard,
@@ -3096,17 +3126,19 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         lifecycle=lifecycle,
         ws_telemetry=ws_telemetry,
         contract_version=GATEWAY_CONTRACT_VERSION,
-        run_engine_with_timeout_fn=lambda session_id, user_text: _run_engine_with_timeout(
+        run_engine_with_timeout_fn=lambda session_id, user_text, **context: _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=session_id,
             user_text=user_text,
             timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+            **context,
         ),
-        stream_engine_with_timeout_fn=lambda session_id, user_text: _stream_engine_with_timeout(
+        stream_engine_with_timeout_fn=lambda session_id, user_text, **context: _stream_engine_with_timeout(
             engine=runtime.engine,
             session_id=session_id,
             user_text=user_text,
             timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+            **context,
         ),
         provider_error_payload_fn=_provider_error_payload,
         finalize_bootstrap_for_user_turn_fn=_finalize_bootstrap_for_user_turn,
@@ -3115,6 +3147,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         build_tools_catalog_payload_fn=build_tools_catalog_payload,
         parse_include_schema_flag_fn=parse_include_schema_flag,
         utc_now_iso_fn=_utc_now_iso,
+        coalesce_enabled=cfg.gateway.websocket.coalesce_enabled,
+        coalesce_min_chars=cfg.gateway.websocket.coalesce_min_chars,
+        coalesce_max_chars=cfg.gateway.websocket.coalesce_max_chars,
+        coalesce_profile=cfg.gateway.websocket.coalesce_profile,
     )
     request_handlers = GatewayRequestHandlers(
         auth_guard=auth_guard,
@@ -3122,11 +3158,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         runtime=runtime,
         dashboard_asset_root=_DASHBOARD_ASSET_ROOT,
         dashboard_bootstrap_token=_DASHBOARD_BOOTSTRAP_TOKEN,
-        run_engine_with_timeout_fn=lambda session_id, user_text: _run_engine_with_timeout(
+        run_engine_with_timeout_fn=lambda session_id, user_text, **context: _run_engine_with_timeout(
             engine=runtime.engine,
             session_id=session_id,
             user_text=user_text,
             timeout_s=GATEWAY_CHAT_WS_ENGINE_TIMEOUT_S,
+            **context,
         ),
         provider_error_payload_fn=_provider_error_payload,
         finalize_bootstrap_for_user_turn_fn=_finalize_bootstrap_for_user_turn,
@@ -3143,7 +3180,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/status", response_model=ControlPlaneResponse)
     async def api_status(request: Request) -> ControlPlaneResponse:
-        return await status_handlers.status(request)
+        return await status_handlers.status(request, allow_dashboard_session=True)
 
     @app.get("/v1/dashboard/state")
     async def dashboard_state(request: Request) -> dict[str, Any]:
@@ -3151,7 +3188,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/dashboard/state")
     async def api_dashboard_state(request: Request) -> dict[str, Any]:
-        return await status_handlers.dashboard_state(request)
+        return await status_handlers.dashboard_state(request, allow_dashboard_session=True)
 
     @app.get("/v1/diagnostics", response_model=DiagnosticsResponse)
     async def diagnostics(request: Request) -> DiagnosticsResponse:
@@ -3159,7 +3196,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/diagnostics", response_model=DiagnosticsResponse)
     async def api_diagnostics(request: Request) -> DiagnosticsResponse:
-        return await status_handlers.diagnostics(request)
+        return await status_handlers.diagnostics(request, allow_dashboard_session=True)
+
+    @app.post("/api/dashboard/session")
+    async def api_dashboard_session(request: Request) -> dict[str, Any]:
+        return await status_handlers.dashboard_session(request)
 
     @app.post("/v1/control/channels/replay")
     async def channels_replay(request: Request, payload: ChannelReplayRequest | None = None) -> dict[str, Any]:
@@ -3359,7 +3400,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.post("/api/message", response_model=ChatResponse)
     async def api_message(req: ChatRequest, request: Request) -> ChatResponse:
-        return ChatResponse(**(await request_handlers.chat(req, request)))
+        return ChatResponse(**(await request_handlers.chat(req, request, allow_dashboard_session=True)))
 
     @app.get("/v1/tools/catalog")
     async def tools_catalog(request: Request) -> dict[str, Any]:
@@ -3367,7 +3408,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/tools/catalog")
     async def api_tools_catalog(request: Request) -> dict[str, Any]:
-        return await request_handlers.tools_catalog(request)
+        return await request_handlers.tools_catalog(request, allow_dashboard_session=True)
 
     @app.get("/v1/tools/approvals")
     async def tools_approvals(
@@ -3497,7 +3538,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/token")
     async def api_token(request: Request) -> dict[str, Any]:
-        return await status_handlers.api_token(request)
+        return await status_handlers.api_token(request, allow_dashboard_session=True)
 
     app.add_api_route(telegram_webhook_path, webhook_handlers.telegram, methods=["POST"])
     app.add_api_route(whatsapp_webhook_path, webhook_handlers.whatsapp, methods=["POST"])
@@ -3548,7 +3589,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_chat_alias(socket: WebSocket) -> None:
-        await websocket_handlers.handle(socket, path_label="/ws")
+        await websocket_handlers.handle(socket, path_label="/ws", allow_dashboard_session=True)
 
     @app.get(f"{_DASHBOARD_ASSET_ROOT}/dashboard.css")
     async def dashboard_css() -> Response:

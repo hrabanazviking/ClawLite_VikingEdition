@@ -2,6 +2,7 @@
 name: docker
 description: Manage Docker containers, images, volumes, and docker-compose stacks via the docker CLI.
 always: false
+script: docker
 metadata: {"clawlite":{"emoji":"🐳","requires":{"bins":["docker"]}}}
 ---
 

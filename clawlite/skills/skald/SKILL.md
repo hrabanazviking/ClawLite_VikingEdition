@@ -2,6 +2,7 @@
 name: skald
 description: Narrative summarization, storytelling, and long-form synthesis in Sigrid's voice — named after the Viking court poets who kept memory alive through story.
 always: false
+script: skald
 metadata: {"clawlite":{"emoji":"📜"}}
 ---
 

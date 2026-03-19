@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, ClassVar
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
@@ -12,14 +12,18 @@ from clawlite.utils.logging import bind_event
 
 @dataclass
 class GatewayWebSocketHandlers:
+    _STREAM_COALESCE_DEFAULT_MIN_CHARS: ClassVar[int] = 24
+    _STREAM_COALESCE_DEFAULT_MAX_CHARS: ClassVar[int] = 120
+    _STREAM_SENTENCE_TRAILERS: ClassVar[str] = "\"')]}»”’"
+
     auth_guard: Any
     diagnostics_require_auth: bool
     runtime: Any
     lifecycle: Any
     ws_telemetry: Any
     contract_version: str
-    run_engine_with_timeout_fn: Callable[[str, str], Awaitable[Any]]
-    stream_engine_with_timeout_fn: Callable[[str, str], Any] | None
+    run_engine_with_timeout_fn: Callable[..., Awaitable[Any]]
+    stream_engine_with_timeout_fn: Callable[..., Any] | None
     provider_error_payload_fn: Callable[[RuntimeError], tuple[int, str]]
     finalize_bootstrap_for_user_turn_fn: Callable[[str], None]
     control_plane_payload_fn: Callable[[], Any]
@@ -27,6 +31,10 @@ class GatewayWebSocketHandlers:
     build_tools_catalog_payload_fn: Callable[..., dict[str, Any]]
     parse_include_schema_flag_fn: Callable[[Any], bool]
     utc_now_iso_fn: Callable[[], str]
+    coalesce_enabled: bool = True
+    coalesce_min_chars: int = _STREAM_COALESCE_DEFAULT_MIN_CHARS
+    coalesce_max_chars: int = _STREAM_COALESCE_DEFAULT_MAX_CHARS
+    coalesce_profile: str = "compact"
 
     @staticmethod
     def _envelope_error(*, error: str, status_code: int, request_id: str | None = None) -> dict[str, Any]:
@@ -86,6 +94,69 @@ class GatewayWebSocketHandlers:
             return raw.strip().lower() in {"1", "true", "yes", "on"}
         return False
 
+    @staticmethod
+    def _coerce_chat_context(payload: dict[str, Any]) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        channel = str(payload.get("channel", "") or "").strip() or None
+        raw_chat_id = payload.get("chat_id")
+        if raw_chat_id is None:
+            raw_chat_id = payload.get("chatId")
+        chat_id: str | None = None
+        if isinstance(raw_chat_id, (str, int)) and not isinstance(raw_chat_id, bool):
+            chat_id = str(raw_chat_id).strip() or None
+        raw_runtime_metadata = payload.get("runtime_metadata")
+        if raw_runtime_metadata is None:
+            raw_runtime_metadata = payload.get("runtimeMetadata")
+        runtime_metadata = None
+        if isinstance(raw_runtime_metadata, dict) and raw_runtime_metadata:
+            runtime_metadata = dict(raw_runtime_metadata)
+        return channel, chat_id, runtime_metadata
+
+    def _should_flush_stream_buffer(self, text: str, *, done: bool) -> bool:
+        content = str(text or "")
+        if not content:
+            return bool(done)
+        profile = str(self.coalesce_profile or "compact").strip().lower()
+        if not self.coalesce_enabled or profile == "raw":
+            return True
+        if done or len(content) >= self.coalesce_max_chars:
+            return True
+        if len(content) < self.coalesce_min_chars:
+            return False
+        if profile == "paragraph":
+            return content.endswith("\n\n")
+        if profile == "newline":
+            return content.endswith("\n")
+        if content.endswith("\n\n") or content.endswith("\n"):
+            return True
+        stripped = content.rstrip()
+        while stripped and stripped[-1] in self._STREAM_SENTENCE_TRAILERS:
+            stripped = stripped[:-1].rstrip()
+        return bool(stripped) and stripped[-1] in ".!?"
+
+    @staticmethod
+    def _stream_event_payload(
+        *,
+        session_id: str,
+        text: str,
+        accumulated: str,
+        done: bool,
+        degraded: bool,
+        model: str,
+        error: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "text": text,
+            "accumulated": accumulated,
+            "done": done,
+            "degraded": degraded,
+        }
+        if error:
+            payload["error"] = error
+        if model:
+            payload["model"] = model
+        return payload
+
     async def _run_chat_request(self, *, request_id: str | int | None, params: dict[str, Any]) -> dict[str, Any]:
         session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
         text = str(params.get("text") or "").strip()
@@ -96,8 +167,15 @@ class GatewayWebSocketHandlers:
                 message="session_id/sessionId and text are required",
                 status_code=400,
             )
+        channel, chat_id, runtime_metadata = self._coerce_chat_context(params)
         try:
-            out = await self.run_engine_with_timeout_fn(session_id, text)
+            out = await self.run_engine_with_timeout_fn(
+                session_id,
+                text,
+                channel=channel,
+                chat_id=chat_id,
+                runtime_metadata=runtime_metadata,
+            )
         except RuntimeError as exc:
             status_code, detail = self.provider_error_payload_fn(exc)
             bind_event("gateway.ws", session=session_id, channel="ws").error(
@@ -158,22 +236,41 @@ class GatewayWebSocketHandlers:
 
         last_accumulated = ""
         last_model = ""
+        channel, chat_id, runtime_metadata = self._coerce_chat_context(params)
         try:
-            async for chunk in self.stream_engine_with_timeout_fn(session_id, text):
+            buffered_text = ""
+            buffered_accumulated = ""
+            buffered_done = False
+            buffered_degraded = False
+            buffered_error = ""
+
+            async for chunk in self.stream_engine_with_timeout_fn(
+                session_id,
+                text,
+                channel=channel,
+                chat_id=chat_id,
+                runtime_metadata=runtime_metadata,
+            ):
                 last_accumulated = str(getattr(chunk, "accumulated", "") or last_accumulated)
                 last_model = str(getattr(chunk, "model", "") or last_model)
-                event_payload = {
-                    "session_id": session_id,
-                    "text": str(getattr(chunk, "text", "") or ""),
-                    "accumulated": last_accumulated,
-                    "done": bool(getattr(chunk, "done", False)),
-                    "degraded": bool(getattr(chunk, "degraded", False)),
-                }
                 error_text = str(getattr(chunk, "error", "") or "").strip()
+                buffered_text += str(getattr(chunk, "text", "") or "")
+                buffered_accumulated = last_accumulated or buffered_accumulated
+                buffered_done = bool(getattr(chunk, "done", False))
+                buffered_degraded = buffered_degraded or bool(getattr(chunk, "degraded", False))
                 if error_text:
-                    event_payload["error"] = error_text
-                if last_model:
-                    event_payload["model"] = last_model
+                    buffered_error = error_text
+                if not self._should_flush_stream_buffer(buffered_text, done=buffered_done):
+                    continue
+                event_payload = self._stream_event_payload(
+                    session_id=session_id,
+                    text=buffered_text,
+                    accumulated=buffered_accumulated or buffered_text,
+                    done=buffered_done,
+                    degraded=buffered_degraded,
+                    model=last_model,
+                    error=buffered_error,
+                )
                 if legacy_envelope:
                     outbound = {
                         "type": "message_chunk",
@@ -189,6 +286,40 @@ class GatewayWebSocketHandlers:
                         "params": event_payload,
                     }
                 await send_ws_fn(outbound)
+                buffered_text = ""
+                buffered_accumulated = ""
+                buffered_done = False
+                buffered_degraded = False
+                buffered_error = ""
+
+            if buffered_text:
+                final_accumulated = buffered_accumulated or last_accumulated or buffered_text
+                event_payload = self._stream_event_payload(
+                    session_id=session_id,
+                    text=buffered_text,
+                    accumulated=final_accumulated,
+                    done=True,
+                    degraded=buffered_degraded,
+                    model=last_model,
+                    error=buffered_error,
+                )
+                if legacy_envelope:
+                    outbound = {
+                        "type": "message_chunk",
+                        **event_payload,
+                    }
+                    if request_id is not None:
+                        outbound["request_id"] = request_id
+                else:
+                    outbound = {
+                        "type": "event",
+                        "event": "chat.chunk",
+                        "id": request_id,
+                        "params": event_payload,
+                    }
+                await send_ws_fn(outbound)
+                if not last_accumulated:
+                    last_accumulated = final_accumulated
         except RuntimeError as exc:
             status_code, detail = self.provider_error_payload_fn(exc)
             bind_event("gateway.ws", session=session_id, channel="ws").error(
@@ -239,11 +370,12 @@ class GatewayWebSocketHandlers:
         )
         return True
 
-    async def handle(self, socket: WebSocket, *, path_label: str) -> None:
+    async def handle(self, socket: WebSocket, *, path_label: str, allow_dashboard_session: bool = False) -> None:
         if not await self.auth_guard.check_ws(
             socket=socket,
             scope="control",
             diagnostics_auth=self.diagnostics_require_auth,
+            allow_dashboard_session=allow_dashboard_session,
         ):
             return
         await socket.accept()
@@ -434,8 +566,15 @@ class GatewayWebSocketHandlers:
                         if handled:
                             continue
 
+                    channel, chat_id, runtime_metadata = self._coerce_chat_context(payload)
                     try:
-                        out = await self.run_engine_with_timeout_fn(session_id, text)
+                        out = await self.run_engine_with_timeout_fn(
+                            session_id,
+                            text,
+                            channel=channel,
+                            chat_id=chat_id,
+                            runtime_metadata=runtime_metadata,
+                        )
                     except RuntimeError as exc:
                         status_code, detail = self.provider_error_payload_fn(exc)
                         bind_event("gateway.ws", session=session_id, channel="ws").error(
@@ -469,8 +608,15 @@ class GatewayWebSocketHandlers:
                 if not session_id or not text:
                     await _send_ws({"error": "session_id and text are required"})
                     continue
+                channel, chat_id, runtime_metadata = self._coerce_chat_context(payload)
                 try:
-                    out = await self.run_engine_with_timeout_fn(session_id, text)
+                    out = await self.run_engine_with_timeout_fn(
+                        session_id,
+                        text,
+                        channel=channel,
+                        chat_id=chat_id,
+                        runtime_metadata=runtime_metadata,
+                    )
                 except RuntimeError as exc:
                     status_code, detail = self.provider_error_payload_fn(exc)
                     bind_event("gateway.ws", session=session_id, channel="ws").error(

@@ -574,19 +574,37 @@ class Validator:
         self.python_executable = str(python_executable or self._detect_python_executable())
 
     def _detect_python_executable(self) -> str:
-        candidates = [
-            self.root / ".venv" / "bin" / "python",
-            self.root / ".venv" / "Scripts" / "python.exe",
-        ]
+        if os.name == "nt":
+            candidates = [
+                self.root / ".venv" / "Scripts" / "python.exe",
+                self.root / ".venv" / "bin" / "python",
+            ]
+        else:
+            candidates = [
+                self.root / ".venv" / "bin" / "python",
+                self.root / ".venv" / "Scripts" / "python.exe",
+            ]
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
         return sys.executable or "python"
 
+    def _python_command(self, *args: str) -> list[str]:
+        executable = str(self.python_executable or "").strip()
+        if not executable:
+            return [sys.executable or "python", *args]
+        candidate = Path(executable)
+        if candidate.exists():
+            lowered = candidate.name.lower()
+            if candidate.suffix.lower() == ".exe" or lowered.startswith("python"):
+                return [executable, *args]
+            return [sys.executable or "python", executable, *args]
+        return [executable, *args]
+
     def run_ruff(self) -> tuple[bool, str]:
         try:
             result = subprocess.run(
-                [self.python_executable, "-m", "ruff", "check", "--select=E,F,W", str(self.root)],
+                self._python_command("-m", "ruff", "check", "--select=E,F,W", str(self.root)),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_s,
@@ -605,7 +623,7 @@ class Validator:
     def run_pytest(self) -> tuple[bool, str]:
         try:
             result = subprocess.run(
-                [self.python_executable, "-m", "pytest", "-q", "--tb=short", "--no-header"],
+                self._python_command("-m", "pytest", "-q", "--tb=short", "--no-header"),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_s,

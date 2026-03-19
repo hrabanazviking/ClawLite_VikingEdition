@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -136,7 +137,7 @@ class GjallarhornWatch:
                 pass
 
     def status(self) -> dict[str, Any]:
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         return {
             "running": self._running,
             "target": self.channel_target,
@@ -160,7 +161,7 @@ class GjallarhornWatch:
         kind = str(getattr(record, "kind", "") or record.get("kind", "") if isinstance(record, dict) else "")
         if "block" not in kind.lower():
             return
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         self._block_times.append(now)
         count = self._count_recent_blocks(now)
         if count >= self.block_threshold:
@@ -238,7 +239,7 @@ class GjallarhornWatch:
 
     async def _maybe_ring(self, reason: str, message: str) -> None:
         """Sound the horn only if not in cooldown for this reason."""
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         last = self._last_ring.get(reason, 0.0)
         if now - last < self.cooldown_s:
             return

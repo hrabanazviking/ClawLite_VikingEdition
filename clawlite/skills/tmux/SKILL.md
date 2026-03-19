@@ -3,7 +3,7 @@ name: tmux
 description: Remote-control tmux sessions for interactive CLIs by sending keystrokes and capturing pane output.
 always: false
 metadata: {"clawlite":{"emoji":"🧵","requires":{"bins":["tmux"]},"os":["linux","darwin"]}}
-command: tmux
+script: tmux
 ---
 
 # tmux

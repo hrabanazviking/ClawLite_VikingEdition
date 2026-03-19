@@ -2,6 +2,7 @@
 name: 1password
 description: Retrieve secrets and vault items from 1Password using the op CLI with a service account token.
 always: false
+script: onepassword
 metadata: {"clawlite":{"emoji":"🔑","requires":{"bins":["op"]},"auth":{"requiredEnv":["OP_SERVICE_ACCOUNT_TOKEN"]}}}
 ---
 

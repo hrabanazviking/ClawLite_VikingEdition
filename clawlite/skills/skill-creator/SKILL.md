@@ -2,6 +2,7 @@
 name: skill-creator
 description: Create or update SKILL.md packages with deterministic frontmatter, clear trigger descriptions, and valid command/script execution mappings.
 always: false
+script: skill_creator
 metadata: {"clawlite":{"emoji":"🛠️"}}
 ---
 

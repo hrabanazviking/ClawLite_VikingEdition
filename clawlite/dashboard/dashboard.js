@@ -2,14 +2,94 @@ const bootstrap = window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ || {};
 const auth = bootstrap.auth || {};
 const paths = bootstrap.paths || {};
 const tokenStorageKey = "clawlite.dashboard.token";
+const dashboardSessionStorageKey = "clawlite.dashboard.sessionToken";
+const operatorStorageKey = "clawlite.dashboard.operatorId";
+const chatSessionStorageKey = "clawlite.dashboard.chatSessionId";
 const refreshStorageKey = "clawlite.dashboard.refreshMs";
 const defaultRefreshMs = 15000;
 const maxFeedEntries = 18;
 const HATCH_MESSAGE = "Wake up, my friend!";
 
+function storageGet(storage, key) {
+  try {
+    return String(storage && typeof storage.getItem === "function" ? storage.getItem(key) || "" : "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function storageSet(storage, key, value) {
+  try {
+    if (storage && typeof storage.setItem === "function") {
+      storage.setItem(key, String(value || ""));
+    }
+  } catch (_error) {
+    // Ignore browser storage failures and keep the dashboard usable.
+  }
+}
+
+function storageRemove(storage, key) {
+  try {
+    if (storage && typeof storage.removeItem === "function") {
+      storage.removeItem(key);
+    }
+  } catch (_error) {
+    // Ignore browser storage failures and keep the dashboard usable.
+  }
+}
+
+function storedDashboardToken() {
+  const current = storageGet(window.sessionStorage, tokenStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const legacy = storageGet(window.localStorage, tokenStorageKey).trim();
+  if (!legacy) {
+    return "";
+  }
+  storageSet(window.sessionStorage, tokenStorageKey, legacy);
+  storageRemove(window.localStorage, tokenStorageKey);
+  return legacy;
+}
+
+function storedDashboardSessionToken() {
+  return storageGet(window.sessionStorage, dashboardSessionStorageKey).trim();
+}
+
+function createDashboardOperatorId() {
+  const randomId =
+    window.crypto && typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `dashboard:operator:${randomId}`;
+}
+
+function ensureDashboardOperatorId() {
+  const current = storageGet(window.sessionStorage, operatorStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const generated = createDashboardOperatorId();
+  storageSet(window.sessionStorage, operatorStorageKey, generated);
+  return generated;
+}
+
+function ensureChatSessionId(defaultSessionId) {
+  const current = storageGet(window.sessionStorage, chatSessionStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const fallback = String(defaultSessionId || "").trim();
+  if (fallback) {
+    storageSet(window.sessionStorage, chatSessionStorageKey, fallback);
+  }
+  return fallback;
+}
+
 const state = {
   activeTab: "overview",
-  token: window.localStorage.getItem(tokenStorageKey) || "",
+  token: storedDashboardToken(),
+  dashboardSessionToken: storedDashboardSessionToken(),
   autoRefreshMs: Number(window.localStorage.getItem(refreshStorageKey) || defaultRefreshMs),
   ws: null,
   wsState: "offline",
@@ -25,8 +105,28 @@ const state = {
   lastSyncAt: null,
   eventFeed: [],
   wsPreview: "Waiting for live websocket frames...",
-  sessionId: "dashboard:operator",
+  operatorId: ensureDashboardOperatorId(),
+  sessionId: "",
 };
+state.sessionId = ensureChatSessionId(state.operatorId) || state.operatorId;
+
+function dashboardSessionHeaderName() {
+  return String(auth.dashboard_session_header_name || "X-ClawLite-Dashboard-Session").trim() || "X-ClawLite-Dashboard-Session";
+}
+
+function dashboardSessionQueryParam() {
+  return String(auth.dashboard_session_query_param || "dashboard_session").trim() || "dashboard_session";
+}
+
+function rawAuthHeaders(tokenValue) {
+  const token = String(tokenValue || "").trim();
+  if (!token) {
+    return {};
+  }
+  const headerName = auth.header_name || "Authorization";
+  const value = headerName.toLowerCase() === "authorization" ? `Bearer ${token}` : token;
+  return { [headerName]: value };
+}
 
 function byId(id) {
   return document.getElementById(id);
@@ -37,12 +137,13 @@ function safeJson(value) {
 }
 
 function authHeaders() {
+  if (state.dashboardSessionToken) {
+    return { [dashboardSessionHeaderName()]: state.dashboardSessionToken };
+  }
   if (!state.token) {
     return {};
   }
-  const headerName = auth.header_name || "Authorization";
-  const value = headerName.toLowerCase() === "authorization" ? `Bearer ${state.token}` : state.token;
-  return { [headerName]: value };
+  return rawAuthHeaders(state.token);
 }
 
 function tokenFromLocationHash() {
@@ -57,10 +158,41 @@ function tokenFromLocationHash() {
 function buildWsUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(`${protocol}//${window.location.host}${paths.ws || "/ws"}`);
-  if (state.token) {
+  if (state.dashboardSessionToken) {
+    url.searchParams.set(dashboardSessionQueryParam(), state.dashboardSessionToken);
+  } else if (state.token) {
     url.searchParams.set(auth.query_param || "token", state.token);
   }
   return url.toString();
+}
+
+function persistChatSession(nextSessionId) {
+  const sessionId = String(nextSessionId || "").trim() || state.operatorId;
+  state.sessionId = sessionId;
+  storageSet(window.sessionStorage, chatSessionStorageKey, sessionId);
+  return sessionId;
+}
+
+function persistDashboardSession(nextToken) {
+  state.dashboardSessionToken = String(nextToken || "").trim();
+  if (state.dashboardSessionToken) {
+    storageSet(window.sessionStorage, dashboardSessionStorageKey, state.dashboardSessionToken);
+  } else {
+    storageRemove(window.sessionStorage, dashboardSessionStorageKey);
+  }
+}
+
+function currentChatSessionId(fallback = state.sessionId) {
+  const input = byId("session-input");
+  const typed = input && typeof input.value === "string" ? input.value.trim() : "";
+  return persistChatSession(typed || fallback || state.operatorId);
+}
+
+function buildDashboardChatPayload(sessionId, text) {
+  return {
+    session_id: sessionId,
+    text,
+  };
 }
 
 function setText(id, value) {
@@ -650,14 +782,14 @@ function renderHandoffGuidance() {
 }
 
 function useSession(sessionId) {
-  state.sessionId = sessionId;
+  const resolved = persistChatSession(sessionId);
   const input = byId("session-input");
   if (input) {
-    input.value = sessionId;
+    input.value = resolved;
   }
-  setText("metric-session-route", `chat -> ${sessionId}`);
+  setText("metric-session-route", `chat -> ${resolved}`);
   setActiveTab("chat");
-  recordEvent("ok", "Session selected", sessionId, "dashboard");
+  recordEvent("ok", "Session selected", resolved, "dashboard");
 }
 
 function renderSessions() {
@@ -694,7 +826,7 @@ function renderSessions() {
       useButton.className = "ghost-button";
       useButton.type = "button";
       useButton.textContent = "Use in chat";
-      useButton.addEventListener("click", () => useSession(String(item.session_id || "dashboard:operator")));
+      useButton.addEventListener("click", () => useSession(String(item.session_id || state.operatorId)));
       actions.appendChild(useButton);
 
       card.append(title, meta, subMeta, actions);
@@ -1163,7 +1295,7 @@ function renderOverview() {
   setText("auth-badge", String((status.auth || {}).posture || auth.posture || "open"));
   setText(
     "auth-summary",
-    `Header ${auth.header_name || "Authorization"} or query ${auth.query_param || "token"}. Token configured: ${Boolean((status.auth || {}).token_configured)}. Loopback bypass: ${Boolean((status.auth || {}).allow_loopback_without_auth)}.`,
+    `Gateway auth uses ${auth.header_name || "Authorization"} or query ${auth.query_param || "token"}, while the packaged dashboard prefers ${dashboardSessionHeaderName()} and query ${dashboardSessionQueryParam()} after the one-time exchange. Token configured: ${Boolean((status.auth || {}).token_configured)}. Loopback bypass: ${Boolean((status.auth || {}).allow_loopback_without_auth)}.`,
   );
 
   setText("nav-refresh-state", state.autoRefreshMs > 0 ? formatDuration(state.autoRefreshMs / 1000) : "manual");
@@ -1191,7 +1323,7 @@ function renderRuntime() {
   setCode("status-json", state.status || { note: "status unavailable" });
   setCode("diagnostics-json", state.diagnostics || { note: "diagnostics unavailable" });
   setCode("tools-json", state.tools || { note: "tools catalog unavailable" });
-  setCode("token-preview", state.tokenInfo || { token_saved: Boolean(state.token), auth_mode: auth.mode || "off" });
+  setCode("token-preview", state.tokenInfo || { token_saved: Boolean(state.token || state.dashboardSessionToken), auth_mode: auth.mode || "off" });
 
   const components = (state.status || {}).components || {};
   setCode("components-preview", components);
@@ -1244,6 +1376,9 @@ async function fetchJson(path, options = {}) {
   }
   if (!response.ok) {
     const detail = payload.detail || payload.error || response.statusText;
+    if (response.status === 401 && state.dashboardSessionToken && !state.token) {
+      persistDashboardSession("");
+    }
     throw new Error(`${response.status} ${detail}`);
   }
   return payload;
@@ -1269,7 +1404,7 @@ async function refreshTokenInfo() {
   try {
     state.tokenInfo = await fetchJson(paths.token || "/api/token");
   } catch (error) {
-    state.tokenInfo = { error: error.message, token_saved: Boolean(state.token) };
+    state.tokenInfo = { error: error.message, token_saved: Boolean(state.token || state.dashboardSessionToken) };
   }
 }
 
@@ -1353,7 +1488,15 @@ function connectWs() {
     setCode("ws-event-preview", state.wsPreview);
   });
 
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
+    if (event && event.code === 4401) {
+      if (state.dashboardSessionToken && !state.token) {
+        persistDashboardSession("");
+      }
+      updateWsStatus("auth-required");
+      recordEvent("warn", "WebSocket auth required", "Paste the gateway token again to reconnect this tab.", "auth");
+      return;
+    }
     updateWsStatus("offline");
     recordEvent("warn", "WebSocket closed", "Attempting reconnect in 1.4s", "transport");
     window.clearTimeout(state.reconnectTimer);
@@ -1369,32 +1512,95 @@ function connectWs() {
 function persistToken(nextToken) {
   state.token = nextToken.trim();
   if (state.token) {
-    window.localStorage.setItem(tokenStorageKey, state.token);
+    storageSet(window.sessionStorage, tokenStorageKey, state.token);
+    storageRemove(window.localStorage, tokenStorageKey);
   } else {
-    window.localStorage.removeItem(tokenStorageKey);
+    storageRemove(window.sessionStorage, tokenStorageKey);
+    storageRemove(window.localStorage, tokenStorageKey);
   }
 }
 
-function bootstrapTokenFromUrl() {
+async function exchangeDashboardSession(rawToken, { source = "auth" } = {}) {
+  const token = String(rawToken || "").trim();
+  if (!token) {
+    persistToken("");
+    persistDashboardSession("");
+    return false;
+  }
+  const response = await fetch(paths.dashboard_session || "/api/dashboard/session", {
+    method: "POST",
+    headers: {
+      ...rawAuthHeaders(token),
+    },
+  });
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (_error) {
+    payload = { raw: text };
+  }
+  if (!response.ok) {
+    const detail = payload.detail || payload.error || response.statusText;
+    throw new Error(`${response.status} ${detail}`);
+  }
+  const sessionToken = String(payload.session_token || "").trim();
+  if (!sessionToken) {
+    throw new Error("dashboard_session_missing");
+  }
+  persistDashboardSession(sessionToken);
+  persistToken("");
+  const tokenInput = byId("token-input");
+  if (tokenInput) {
+    tokenInput.value = "";
+  }
+  recordEvent(
+    "ok",
+    "Dashboard session established",
+    payload.expires_at
+      ? `Scoped dashboard session active until ${payload.expires_at}.`
+      : "Scoped dashboard session stored for the current browser tab.",
+    source,
+  );
+  return true;
+}
+
+async function bootstrapTokenFromUrl() {
   const hashToken = tokenFromLocationHash();
   if (!hashToken) {
-    return;
+    return false;
   }
-  persistToken(hashToken);
   if (window.history && typeof window.history.replaceState === "function") {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   } else {
     window.location.hash = "";
   }
-  const tokenInput = byId("token-input");
-  if (tokenInput) {
-    tokenInput.value = state.token;
+  await exchangeDashboardSession(hashToken, { source: "auth" });
+  recordEvent(
+    "ok",
+    "Gateway token bootstrapped",
+    "Loaded token from the dashboard URL fragment, exchanged it for a scoped dashboard session, and removed it from the address bar.",
+    "auth",
+  );
+  return true;
+}
+
+async function migrateLegacyDashboardToken() {
+  if (state.dashboardSessionToken || !state.token) {
+    return false;
   }
-  recordEvent("ok", "Gateway token bootstrapped", "Loaded token from dashboard URL fragment and removed it from the address bar.", "auth");
+  await exchangeDashboardSession(state.token, { source: "auth" });
+  recordEvent(
+    "ok",
+    "Dashboard token migrated",
+    "Replaced the legacy raw gateway token stored in this tab with a scoped dashboard session.",
+    "auth",
+  );
+  return true;
 }
 
 async function sendHttpMessage() {
-  const sessionId = byId("session-input").value.trim() || state.sessionId;
+  const sessionId = currentChatSessionId();
   const text = byId("chat-input").value.trim();
   if (!text) {
     return;
@@ -1404,7 +1610,7 @@ async function sendHttpMessage() {
 }
 
 async function sendHttpMessageText(text, options = {}) {
-  const sessionId = String(options.sessionId || byId("session-input").value.trim() || state.sessionId || "dashboard:operator");
+  const sessionId = persistChatSession(String(options.sessionId || currentChatSessionId()));
   const source = String(options.source || "http");
   const cleanText = String(text || "").trim();
   if (!cleanText) {
@@ -1418,7 +1624,7 @@ async function sendHttpMessageText(text, options = {}) {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ session_id: sessionId, text: cleanText }),
+      body: JSON.stringify(buildDashboardChatPayload(sessionId, cleanText)),
     });
     appendChatEntry("assistant", String(payload.text || ""), String(payload.model || "http"));
     recordEvent("ok", "HTTP chat request completed", cleanText.slice(0, 80), `${source} | ${payload.model || "http"}`);
@@ -1429,7 +1635,7 @@ async function sendHttpMessageText(text, options = {}) {
 }
 
 function sendWsMessage() {
-  const sessionId = byId("session-input").value.trim() || state.sessionId;
+  const sessionId = currentChatSessionId();
   const text = byId("chat-input").value.trim();
   if (!text) {
     return;
@@ -1441,7 +1647,7 @@ function sendWsMessage() {
     recordEvent("warn", "WebSocket send blocked", "No live connection available.", sessionId);
     return;
   }
-  state.ws.send(JSON.stringify({ session_id: sessionId, text }));
+  state.ws.send(JSON.stringify(buildDashboardChatPayload(sessionId, text)));
   recordEvent("ok", "WebSocket chat request sent", sessionId, "queued");
 }
 
@@ -2087,8 +2293,15 @@ function bindEvents() {
     node.addEventListener("click", () => setActiveTab(node.dataset.tabTarget || "overview"));
   });
 
-  byId("token-input").value = state.token;
-  byId("session-input").value = state.sessionId;
+  byId("token-input").value = "";
+  const sessionInput = byId("session-input");
+  sessionInput.value = state.sessionId;
+  setText("metric-session-route", `chat -> ${state.sessionId}`);
+  sessionInput.addEventListener("change", () => {
+    const sessionId = persistChatSession(sessionInput.value);
+    sessionInput.value = sessionId;
+    setText("metric-session-route", `chat -> ${sessionId}`);
+  });
 
   const refreshSelect = byId("refresh-interval");
   refreshSelect.value = String(state.autoRefreshMs);
@@ -2101,16 +2314,21 @@ function bindEvents() {
   });
 
   byId("save-token").addEventListener("click", async () => {
-    persistToken(byId("token-input").value);
-    recordEvent("ok", "Gateway token saved", state.token ? "Operator token stored in local browser storage." : "Token cleared.", "auth");
-    connectWs();
-    await refreshAll("token-save");
+    try {
+      await exchangeDashboardSession(byId("token-input").value, { source: "auth" });
+      connectWs();
+      await refreshAll("token-save");
+    } catch (error) {
+      recordEvent("danger", "Dashboard session exchange failed", error.message, "auth");
+      renderAll();
+    }
   });
 
   byId("clear-token").addEventListener("click", async () => {
     persistToken("");
+    persistDashboardSession("");
     byId("token-input").value = "";
-    recordEvent("warn", "Gateway token cleared", "Dashboard returned to anonymous mode.", "auth");
+    recordEvent("warn", "Dashboard token cleared", "Dashboard returned to anonymous mode.", "auth");
     connectWs();
     await refreshAll("token-clear");
   });
@@ -2191,11 +2409,20 @@ function bindEvents() {
   });
 }
 
-bindEvents();
-bootstrapTokenFromUrl();
-setActiveTab(state.activeTab);
-renderAll();
-recordEvent("ok", "Dashboard booted", "Packaged shell loaded with gateway bootstrap metadata.", "ui");
-void refreshAll("initial");
-scheduleAutoRefresh();
-connectWs();
+async function initializeDashboard() {
+  bindEvents();
+  setActiveTab(state.activeTab);
+  renderAll();
+  recordEvent("ok", "Dashboard booted", "Packaged shell loaded with gateway bootstrap metadata.", "ui");
+  try {
+    await bootstrapTokenFromUrl();
+    await migrateLegacyDashboardToken();
+  } catch (error) {
+    recordEvent("danger", "Dashboard auth bootstrap failed", error.message, "auth");
+  }
+  await refreshAll("initial");
+  scheduleAutoRefresh();
+  connectWs();
+}
+
+void initializeDashboard();

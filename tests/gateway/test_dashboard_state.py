@@ -88,8 +88,11 @@ def test_dashboard_channel_helpers_shape_operational_rows() -> None:
         }
     )
     assert channels["count"] == 2
+    assert channels["readiness_counts"] == {"beta": 1, "stable": 1}
     assert channels["items"][0]["name"] == "slack"
+    assert channels["items"][0]["readiness"] == "beta"
     assert channels["items"][1]["state"] == "ok"
+    assert channels["items"][1]["readiness"] == "stable"
 
     channel = SimpleNamespace(operator_status=lambda: {"offset_next": 42})
     assert operator_channel_summary(channel) == {"available": True, "offset_next": 42}

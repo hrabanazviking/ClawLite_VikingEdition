@@ -2,6 +2,7 @@
 name: cron
 description: Schedule reminders and recurring tasks with the `cron` tool (add/list/remove/enable/disable/run).
 always: true
+script: cron
 metadata: {"clawlite":{"emoji":"⏱️"}}
 ---
 

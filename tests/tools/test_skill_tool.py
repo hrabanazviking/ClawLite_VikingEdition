@@ -163,6 +163,46 @@ class FakeProvider:
         return LLMResult(model="fake/summary", text=f"summary::{messages[-1]['content'].splitlines()[1]}")
 
 
+class FakeCronTool(Tool):
+    name = "cron"
+    description = "fake cron"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"action": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return json.dumps({"ok": True, "action": str(arguments.get("action", ""))})
+
+
+class FakeMemoryRecallTool(Tool):
+    name = "memory_recall"
+    description = "fake memory recall"
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        return json.dumps({"ok": True, "query": str(arguments.get("query", ""))})
+
+
+class FakeWriteTool(Tool):
+    name = "write"
+    description = "fake write"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def args_schema(self) -> dict:
+        return {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}
+
+    async def run(self, arguments: dict, ctx: ToolContext) -> str:
+        del ctx
+        self.calls.append(dict(arguments))
+        return "ok"
+
+
 class FakeMemory:
     def __init__(self, verdict):
         self.verdict = verdict
@@ -199,9 +239,9 @@ def test_run_skill_executes_command_binding(tmp_path: Path) -> None:
         reg.register(tool)
         out = await tool.run(
             {"name": "echo-skill", "input": "hello world"},
-            ToolContext(session_id="s1"),
+            ToolContext(session_id="cli:s1", channel="cli"),
         )
-        assert out == "exec:echo hello world::"
+        assert out == "exec:echo hello world:cli:"
 
     asyncio.run(_scenario())
 
@@ -636,6 +676,789 @@ def test_run_skill_gh_issues_uses_skill_entry_api_key_for_auth(tmp_path: Path, m
     asyncio.run(_scenario())
 
 
+def test_run_skill_github_issues_alias_uses_gh_issues_script(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "github-issues",
+        "name: github-issues\ndescription: gh issue helper alias\nscript: gh_issues",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "github-issues", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:github-issues", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "gh issue"
+        assert "list" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "github"},
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert payload["backend"] == "gh"
+        assert "list_prs" in payload["available_actions"]
+        assert "api" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_list_prs_dispatches_gh_pr_list(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=0\nstdout=ok\nstderr=",
+                    "gh pr list --repo openclaw/openclaw --state open --author bot --label bug,high --limit 25": "exit=0\nstdout=prs ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "github",
+                "tool_arguments": {
+                    "action": "list_prs",
+                    "repo": "openclaw/openclaw",
+                    "state": "open",
+                    "author": "bot",
+                    "labels": ["bug", "high"],
+                    "limit": 25,
+                },
+            },
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=prs ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_github_api_dispatches_gh_api(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "github",
+        "name: github\ndescription: github helper\nscript: github",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "gh auth status": "exit=0\nstdout=ok\nstderr=",
+                    "gh api repos/openclaw/openclaw/pulls --method GET --repo openclaw/openclaw": "exit=0\nstdout=api ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "github",
+                "tool_arguments": {
+                    "action": "api",
+                    "repo": "openclaw/openclaw",
+                    "path": "repos/openclaw/openclaw/pulls",
+                    "method": "GET",
+                },
+            },
+            ToolContext(session_id="cli:github", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=api ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_clawhub_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "clawhub",
+        "name: clawhub\ndescription: clawhub helper\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "clawhub", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:clawhub", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "search" in payload["available_actions"]
+        assert "install" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_clawhub_install_dispatches_npx_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "clawhub",
+        "name: clawhub\ndescription: clawhub helper\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "npx --yes clawhub@latest install weather --workdir /tmp/workspace": "exit=0\nstdout=installed\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "clawhub",
+                "tool_arguments": {
+                    "action": "install",
+                    "slug": "weather",
+                    "workdir": "/tmp/workspace",
+                },
+            },
+            ToolContext(session_id="cli:clawhub", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=installed\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_hub_alias_uses_clawhub_script(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "hub",
+        "name: hub\ndescription: clawhub alias\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "npx --yes clawhub@latest list --workdir /tmp/workspace": "exit=0\nstdout=list ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "hub",
+                "tool_arguments": {
+                    "action": "list",
+                    "workdir": "/tmp/workspace",
+                },
+            },
+            ToolContext(session_id="cli:hub", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=list ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_onepassword_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "1password",
+        "name: 1password\ndescription: onepassword helper\nscript: onepassword",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "1password", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:op", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "op"
+        assert "item_get" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_onepassword_item_get_dispatches_op_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "1password",
+        "name: 1password\ndescription: onepassword helper\nscript: onepassword",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "op item get 'GitHub Token' --vault Private --fields label=password": "exit=0\nstdout=secret\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "1password",
+                "tool_arguments": {
+                    "action": "item_get",
+                    "item": "GitHub Token",
+                    "vault": "Private",
+                    "field": "password",
+                },
+            },
+            ToolContext(session_id="cli:op", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=secret\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_docker_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "docker",
+        "name: docker\ndescription: docker helper\nscript: docker",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "docker", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:docker", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["backend"] == "docker"
+        assert "compose_up" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_docker_logs_dispatches_docker_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "docker",
+        "name: docker\ndescription: docker helper\nscript: docker",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "docker logs api --tail 200": "exit=0\nstdout=logs\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "docker",
+                "tool_arguments": {
+                    "action": "logs",
+                    "target": "api",
+                    "tail": 200,
+                },
+            },
+            ToolContext(session_id="cli:docker", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=logs\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_apple_notes_guide_mode_returns_structured_help(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "apple-notes",
+        "name: apple-notes\ndescription: apple notes helper\nscript: apple_notes",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "darwin")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "apple-notes", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:notes", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["platform"] == "darwin"
+        assert "read" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_apple_notes_blocks_on_non_macos(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "apple-notes",
+        "name: apple-notes\ndescription: apple notes helper\nscript: apple_notes",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "win32")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "apple-notes", "tool_arguments": {"action": "list"}},
+            ToolContext(session_id="cli:notes", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:apple-notes:platform_not_supported"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_tmux_guide_mode_returns_structured_help(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "linux")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "tmux", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["platform"] == "linux|darwin"
+        assert "capture" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_tmux_capture_dispatches_tmux_command(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "linux")
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "tmux -S /tmp/clawlite.sock capture-pane -p -J -t clawlite-shell:0.0 -S -250": "exit=0\nstdout=pane\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "tmux",
+                "tool_arguments": {
+                    "action": "capture",
+                    "socket": "/tmp/clawlite.sock",
+                    "target": "clawlite-shell:0.0",
+                    "lines": 250,
+                },
+            },
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=pane\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_tmux_blocks_on_non_unix_platform(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "tmux",
+        "name: tmux\ndescription: tmux helper\nscript: tmux",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.setattr("clawlite.tools.skill.sys.platform", "win32")
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "tmux", "tool_arguments": {"action": "list_sessions"}},
+            ToolContext(session_id="cli:tmux", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:tmux:platform_not_supported"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_cron_dispatches_to_cron_tool(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "cron",
+        "name: cron\ndescription: cron helper\nscript: cron",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeCronTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "cron", "tool_arguments": {"action": "list"}},
+            ToolContext(session_id="cli:cron", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["action"] == "list"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_obsidian_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "obsidian",
+        "name: obsidian\ndescription: obsidian helper\nscript: obsidian",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "obsidian", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "list" in payload["available_actions"]
+        assert "search" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_obsidian_write_read_and_search(tmp_path: Path, monkeypatch) -> None:
+    _write_skill(
+        tmp_path,
+        "obsidian",
+        "name: obsidian\ndescription: obsidian helper\nscript: obsidian",
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("OBSIDIAN_VAULT", str(vault))
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+
+        write_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "write",
+                    "path": "notes/today.md",
+                    "content": "# Today\nhello world",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        assert json.loads(write_out)["status"] == "ok"
+
+        read_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "read",
+                    "path": "notes/today.md",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        read_payload = json.loads(read_out)
+        assert "hello world" in read_payload["content"]
+
+        search_out = await tool.run(
+            {
+                "name": "obsidian",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "hello",
+                },
+            },
+            ToolContext(session_id="cli:obsidian", channel="cli", user_id="11"),
+        )
+        search_payload = json.loads(search_out)
+        assert search_payload["count"] == 1
+        assert search_payload["matches"][0]["path"] == "notes/today.md"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_memory_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "memory", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "recall" in payload["available_actions"]
+        assert "learn" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_memory_recall_dispatches_memory_recall(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeMemoryRecallTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "memory",
+                "tool_arguments": {
+                    "action": "recall",
+                    "query": "timezone",
+                },
+            },
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["query"] == "timezone"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_memory_blocks_when_target_tool_missing(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "memory",
+        "name: memory\ndescription: memory helper\nscript: memory",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "memory",
+                "tool_arguments": {
+                    "action": "learn",
+                    "text": "User likes concise summaries.",
+                },
+            },
+            ToolContext(session_id="cli:memory", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:memory:memory_learn_not_registered"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_skald_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "skald", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "story" in payload["available_actions"]
+        assert "summary" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_skald_story_uses_provider(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+        out = await tool.run(
+            {
+                "name": "skald",
+                "tool_arguments": {
+                    "action": "story",
+                    "input": "deployment failed after migration",
+                    "style": "concise",
+                },
+            },
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        assert out.startswith("summary::Style: concise")
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_skald_blocks_without_provider(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skald",
+        "name: skald\ndescription: skald helper\nscript: skald",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skald",
+                "tool_arguments": {
+                    "action": "story",
+                    "input": "deployment failed after migration",
+                },
+            },
+            ToolContext(session_id="cli:skald", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:skald:provider_unavailable"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_creator_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "skill-creator", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert "scaffold" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_creator_scaffold_preview_returns_content(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skill-creator",
+                "tool_arguments": {
+                    "action": "scaffold",
+                    "name": "demo-skill",
+                    "description": "demo description",
+                    "script": "demo_tool",
+                },
+            },
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["mode"] == "preview"
+        assert "name: demo-skill" in payload["content"]
+        assert "script: demo_tool" in payload["content"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_creator_scaffold_writes_with_write_tool(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "skill-creator",
+        "name: skill-creator\ndescription: skill creator helper\nscript: skill_creator",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        writer = FakeWriteTool()
+        reg.register(writer)
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "skill-creator",
+                "tool_arguments": {
+                    "action": "scaffold",
+                    "name": "demo-skill",
+                    "description": "demo description",
+                    "path": "clawlite/skills/demo-skill/SKILL.md",
+                },
+            },
+            ToolContext(session_id="cli:skill-creator", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["mode"] == "written"
+        assert payload["path"] == "clawlite/skills/demo-skill/SKILL.md"
+        assert writer.calls and writer.calls[0]["path"] == "clawlite/skills/demo-skill/SKILL.md"
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,
@@ -650,10 +1473,10 @@ def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) ->
         tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, memory=memory)
         out = await tool.run(
             {"name": "echo-skill", "input": "hello"},
-            ToolContext(session_id="s8"),
+            ToolContext(session_id="cli:s8", channel="cli"),
         )
-        assert out == "exec:echo hello::"
-        assert memory.calls == [("skill", "s8")]
+        assert out == "exec:echo hello:cli:"
+        assert memory.calls == [("skill", "cli:s8")]
 
     asyncio.run(_scenario())
 
@@ -1092,5 +1915,610 @@ def test_run_skill_session_logs_reads_jsonl_without_jq_or_rg(tmp_path: Path) -> 
         assert payload["session_id"] == "cli:history"
         assert payload["count"] == 1
         assert payload["messages"][0]["content"] == "deployment healthy"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_notion_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "notion", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert payload["auth"]["required_env"] == ["NOTION_API_KEY"]
+        assert len(payload["examples"]) >= 2
+        assert "search" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_notion_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_notion_request(self, *, method, path, payload, timeout, token, notion_version, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "path": path,
+                "payload": payload,
+                "token": token,
+                "notion_version": notion_version,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "results": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("NOTION_API_KEY", "notion-secret")
+        monkeypatch.setattr(SkillTool, "_notion_request", _fake_notion_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "notion",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "roadmap",
+                },
+            },
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "POST",
+                "path": "/search",
+                "payload": {"query": "roadmap"},
+                "token": "notion-secret",
+                "notion_version": "2022-06-28",
+                "spec_name": "notion",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_notion_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "notion",
+        "name: notion\ndescription: notion helper\nscript: notion",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("NOTION_API_KEY", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "notion",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "roadmap",
+                },
+            },
+            ToolContext(session_id="cli:notion", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:notion:notion_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_jira_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "jira", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "JIRA_BASE_URL" in payload["auth"]["required_env"]
+        assert len(payload["examples"]) >= 2
+        assert "issue_get" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_jira_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_jira_request(self, *, method, base_url, email, token, path, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "base_url": base_url,
+                "email": email,
+                "token": token,
+                "path": path,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "issues": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("JIRA_BASE_URL", "https://acme.atlassian.net")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira-secret")
+        monkeypatch.setattr(SkillTool, "_jira_request", _fake_jira_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "jira",
+                "tool_arguments": {
+                    "action": "search",
+                    "jql": "project = CORE",
+                    "max_results": 15,
+                },
+            },
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "GET",
+                "base_url": "https://acme.atlassian.net",
+                "email": "bot@example.com",
+                "token": "jira-secret",
+                "path": "/search",
+                "payload": {"jql": "project = CORE", "maxResults": 15},
+                "spec_name": "jira",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_jira_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "jira",
+        "name: jira\ndescription: jira helper\nscript: jira",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+        monkeypatch.delenv("JIRA_EMAIL", raising=False)
+        monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "jira",
+                "tool_arguments": {
+                    "action": "search",
+                    "jql": "project = CORE",
+                },
+            },
+            ToolContext(session_id="cli:jira", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:jira:jira_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "linear", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert payload["auth"]["required_env"] == ["LINEAR_API_KEY"]
+        assert len(payload["examples"]) >= 2
+        assert "issues_list" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_request_dispatches_graphql(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_linear_request(self, *, endpoint, token, query, variables, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "endpoint": endpoint,
+                "token": token,
+                "query": query,
+                "variables": variables,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"data": {"viewer": {"id": "u1"}}})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("LINEAR_API_KEY", "linear-secret")
+        monkeypatch.setattr(SkillTool, "_linear_request", _fake_linear_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "linear",
+                "tool_arguments": {
+                    "action": "request",
+                    "query": "query { viewer { id } }",
+                    "variables": {"team": "core"},
+                },
+            },
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["data"]["viewer"]["id"] == "u1"
+        assert calls == [
+            {
+                "endpoint": "https://api.linear.app/graphql",
+                "token": "linear-secret",
+                "query": "query { viewer { id } }",
+                "variables": {"team": "core"},
+                "spec_name": "linear",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_linear_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "linear",
+        "name: linear\ndescription: linear helper\nscript: linear",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "linear",
+                "tool_arguments": {
+                    "action": "issues_list",
+                },
+            },
+            ToolContext(session_id="cli:linear", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:linear:linear_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_trello_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "trello", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "TRELLO_API_KEY" in payload["auth"]["required_env"]
+        assert len(payload["examples"]) >= 2
+        assert "boards_list" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_trello_boards_list_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_trello_request(self, *, method, base_url, api_key, token, path, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "base_url": base_url,
+                "api_key": api_key,
+                "token": token,
+                "path": path,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"ok": True, "boards": []})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("TRELLO_API_KEY", "trello-key")
+        monkeypatch.setenv("TRELLO_TOKEN", "trello-token")
+        monkeypatch.setattr(SkillTool, "_trello_request", _fake_trello_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "trello",
+                "tool_arguments": {
+                    "action": "boards_list",
+                    "fields": "id,name",
+                },
+            },
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert calls == [
+            {
+                "method": "GET",
+                "base_url": "https://api.trello.com/1",
+                "api_key": "trello-key",
+                "token": "trello-token",
+                "path": "/members/me/boards",
+                "payload": {"fields": "id,name"},
+                "spec_name": "trello",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_trello_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "trello",
+        "name: trello\ndescription: trello helper\nscript: trello",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("TRELLO_API_KEY", raising=False)
+        monkeypatch.delenv("TRELLO_TOKEN", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "trello",
+                "tool_arguments": {
+                    "action": "boards_list",
+                },
+            },
+            ToolContext(session_id="cli:trello", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:trello:trello_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "spotify", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "usage" in payload
+        assert "SPOTIFY_CLIENT_ID" in payload["auth"]["required_env"]
+        assert "SPOTIFY_ACCESS_TOKEN" in payload["auth"]["optional_env"]
+        assert len(payload["examples"]) >= 2
+        assert "search" in payload["available_actions"]
+        assert "request" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_search_dispatches_request(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_spotify_request(self, *, method, token, path, params, payload, timeout, spec_name):
+        del self, timeout
+        calls.append(
+            {
+                "method": method,
+                "token": token,
+                "path": path,
+                "params": params,
+                "payload": payload,
+                "spec_name": spec_name,
+            }
+        )
+        return json.dumps({"tracks": {"items": []}})
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("SPOTIFY_ACCESS_TOKEN", "spotify-access")
+        monkeypatch.setattr(SkillTool, "_spotify_request", _fake_spotify_request)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "spotify",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "radiohead",
+                    "type": "track",
+                    "limit": 5,
+                },
+            },
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert "tracks" in payload
+        assert calls == [
+            {
+                "method": "GET",
+                "token": "spotify-access",
+                "path": "/search",
+                "params": {"q": "radiohead", "type": "track", "limit": 5},
+                "payload": {},
+                "spec_name": "spotify",
+            }
+        ]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_spotify_blocks_without_auth(monkeypatch, tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "spotify",
+        "name: spotify\ndescription: spotify helper\nscript: spotify",
+    )
+
+    async def _scenario() -> None:
+        monkeypatch.delenv("SPOTIFY_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+        monkeypatch.delenv("SPOTIFY_CLIENT_SECRET", raising=False)
+        reg = ToolRegistry()
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "spotify",
+                "tool_arguments": {
+                    "action": "search",
+                    "query": "radiohead",
+                },
+            },
+            ToolContext(session_id="cli:spotify", channel="cli", user_id="11"),
+        )
+        assert out == "skill_blocked:spotify:spotify_auth_missing"
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_dispatcher_supports_all_builtin_script_names(tmp_path: Path, monkeypatch) -> None:
+    script_names = [
+        "onepassword",
+        "apple_notes",
+        "clawhub",
+        "coding_agent",
+        "cron",
+        "docker",
+        "gh_issues",
+        "github",
+        "healthcheck",
+        "jira",
+        "linear",
+        "memory",
+        "model_usage",
+        "notion",
+        "obsidian",
+        "session_logs",
+        "skald",
+        "skill_creator",
+        "spotify",
+        "summarize",
+        "tmux",
+        "trello",
+        "weather",
+        "web_search",
+    ]
+
+    for script_name in script_names:
+        skill_name = f"skill-{script_name}"
+        _write_skill(
+            tmp_path,
+            skill_name,
+            f"name: {skill_name}\ndescription: test dispatcher\nscript: {script_name}",
+        )
+
+    async def _scenario() -> None:
+        monkeypatch.setenv("OBSIDIAN_VAULT", str(tmp_path))
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        reg.register(FakeWebSearchTool())
+        reg.register(FakeWebFetchPayloadTool())
+        reg.register(FakeSessionsSpawnTool())
+        reg.register(FakeCronTool())
+        reg.register(FakeMemoryRecallTool())
+        reg.register(FakeWriteTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg, provider=FakeProvider())
+
+        for script_name in script_names:
+            skill_name = f"skill-{script_name}"
+            try:
+                out = await tool.run(
+                    {"name": skill_name},
+                    ToolContext(session_id="cli:dispatch", channel="cli", user_id="11"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                out = str(exc)
+            assert f"unsupported_script:{script_name}" not in out
 
     asyncio.run(_scenario())

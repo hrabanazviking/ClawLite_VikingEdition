@@ -42,16 +42,32 @@ When two skills have the same `name`, resolution is deterministic:
 
 ## Current built-ins
 
-- `cron`
-- `memory`
-- `github`
-- `summarize`
-- `skill-creator`
-- `web-search`
-- `weather`
-- `tmux`
-- `hub`
+- `1password`
+- `apple-notes`
 - `clawhub`
+- `coding-agent`
+- `cron`
+- `docker`
+- `gh-issues`
+- `github`
+- `github-issues`
+- `healthcheck`
+- `hub`
+- `jira`
+- `linear`
+- `memory`
+- `model-usage`
+- `notion`
+- `obsidian`
+- `session-logs`
+- `skill-creator`
+- `skald`
+- `spotify`
+- `summarize`
+- `tmux`
+- `trello`
+- `weather`
+- `web-search`
 
 ## Inspection CLI
 
@@ -98,6 +114,13 @@ Flow:
 1. resolve skill by name
 2. validate availability (`bins/env/os`)
 3. execute mapped `command` or `script`
+
+The builtin script dispatcher now includes structured handlers for:
+
+- `gh_issues`, `github`
+- `notion`, `jira`, `linear`, `trello`, `spotify`
+- `clawhub`, `onepassword`, `docker`, `tmux`, `apple_notes`
+- `memory`, `obsidian`, `skald`, `skill_creator`
 
 If the underlying tool policy requires approval, command-backed or tool-backed skills return `skill_requires_approval:<skill>:...`. On Telegram and Discord, the runtime now surfaces native approve/reject controls for the blocked tool request; after approval, retry the original skill call in the same session.
 
