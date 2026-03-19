@@ -12,7 +12,7 @@ ClawLite can send and receive messages through multiple channel adapters. Today,
 
 Quickstart note: `clawlite configure --flow quickstart` only offers Telegram. Discord, Email, WhatsApp, Slack, and IRC are manual config today.
 
-Prompting note: inbound adapters already normalize rich metadata for routing and delivery, but the agent prompt only sees a compact allowlisted subset of that metadata as untrusted runtime context. That allowlist now includes structural hints such as message/thread ids, Slack thread timestamps, Telegram forum state, Discord DM state, signed callback/button ids, and lightweight media markers, while still excluding raw webhook payloads and large channel-specific blobs. Inbound text also normalizes real CRLF/CR newlines and neutralizes obvious spoof markers like `[System Message]` or line-leading `System:` before it reaches the agent loop.
+Prompting note: inbound adapters already normalize rich metadata for routing and delivery, but the agent prompt only sees a compact allowlisted subset of that metadata as untrusted runtime context. That allowlist now includes structural hints such as message/thread ids, Slack thread timestamps, Telegram forum state, Discord DM state, signed callback/button ids, and lightweight media markers, while still excluding raw webhook payloads and large channel-specific blobs. Inbound text also normalizes real CRLF/CR newlines and neutralizes obvious spoof markers like `[System Message]`, bracketed `[Developer]`, or line-leading `System:` before it reaches the agent loop.
 
 ## Channel Matrix
 

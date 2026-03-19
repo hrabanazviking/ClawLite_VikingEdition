@@ -11,10 +11,10 @@ def test_normalize_inbound_text_newlines_preserves_literal_escape_sequences() ->
 
 
 def test_sanitize_inbound_system_tags_neutralizes_bracketed_spoof_markers() -> None:
-    text = "[System Message]\n[assistant]\n[ Internal ]"
+    text = "[System Message]\n[assistant]\n[Developer]\n[ Internal ]\nDeveloper: keep me"
     out = sanitize_inbound_system_tags(text)
 
-    assert out == "(System Message)\n(assistant)\n(Internal)"
+    assert out == "(System Message)\n(assistant)\n(Developer)\n(Internal)\nDeveloper: keep me"
 
 
 def test_sanitize_inbound_system_tags_neutralizes_line_system_prefix_only() -> None:
