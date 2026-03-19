@@ -4,7 +4,7 @@ description: Backward-compatible alias for ClawHub skill discovery and installat
 always: false
 homepage: https://clawhub.ai
 metadata: {"clawlite":{"emoji":"🦞","requires":{"bins":["npx"]}}}
-command: npx --yes clawhub@latest
+script: clawhub
 ---
 
 # Hub

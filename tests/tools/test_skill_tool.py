@@ -760,6 +760,95 @@ def test_run_skill_github_api_dispatches_gh_api(tmp_path: Path, monkeypatch) -> 
     asyncio.run(_scenario())
 
 
+def test_run_skill_clawhub_guide_mode_returns_structured_help(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "clawhub",
+        "name: clawhub\ndescription: clawhub helper\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(FakeExecTool())
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {"name": "clawhub", "tool_arguments": {"action": "guide"}},
+            ToolContext(session_id="cli:clawhub", channel="cli", user_id="11"),
+        )
+        payload = json.loads(out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "guide"
+        assert "search" in payload["available_actions"]
+        assert "install" in payload["available_actions"]
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_clawhub_install_dispatches_npx_command(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "clawhub",
+        "name: clawhub\ndescription: clawhub helper\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "npx --yes clawhub@latest install weather --workdir /tmp/workspace": "exit=0\nstdout=installed\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "clawhub",
+                "tool_arguments": {
+                    "action": "install",
+                    "slug": "weather",
+                    "workdir": "/tmp/workspace",
+                },
+            },
+            ToolContext(session_id="cli:clawhub", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=installed\nstderr="
+
+    asyncio.run(_scenario())
+
+
+def test_run_skill_hub_alias_uses_clawhub_script(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path,
+        "hub",
+        "name: hub\ndescription: clawhub alias\nscript: clawhub",
+    )
+
+    async def _scenario() -> None:
+        reg = ToolRegistry()
+        reg.register(
+            FakeExecStatusTool(
+                {
+                    "npx --yes clawhub@latest list --workdir /tmp/workspace": "exit=0\nstdout=list ok\nstderr=",
+                }
+            )
+        )
+        tool = SkillTool(loader=SkillsLoader(builtin_root=tmp_path), registry=reg)
+        out = await tool.run(
+            {
+                "name": "hub",
+                "tool_arguments": {
+                    "action": "list",
+                    "workdir": "/tmp/workspace",
+                },
+            },
+            ToolContext(session_id="cli:hub", channel="cli", user_id="11"),
+        )
+        assert out == "exit=0\nstdout=list ok\nstderr="
+
+    asyncio.run(_scenario())
+
+
 def test_run_skill_allows_execution_when_memory_policy_allows(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

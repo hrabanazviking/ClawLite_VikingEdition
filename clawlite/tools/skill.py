@@ -1092,6 +1092,86 @@ class SkillTool(Tool):
             env_overrides=env_overrides,
         )
 
+    async def _run_clawhub(
+        self,
+        arguments: dict[str, Any],
+        ctx: ToolContext,
+        *,
+        spec_name: str,
+        timeout: float,
+        env_overrides: dict[str, str],
+    ) -> str:
+        if self.registry.get("exec") is None:
+            return f"skill_blocked:{spec_name}:exec_tool_not_registered"
+
+        payload = self._skill_payload(arguments)
+        extra_args = self._extra_args(arguments)
+        if extra_args:
+            return await self._run_command_via_exec_tool(
+                spec_name=spec_name,
+                argv=["npx", "--yes", "clawhub@latest", *extra_args],
+                timeout=timeout,
+                ctx=ctx,
+                env_overrides=env_overrides,
+            )
+
+        action = str(payload.get("action", arguments.get("action", "guide")) or "guide").strip().lower()
+        workdir = str(
+            payload.get("workdir", arguments.get("workdir", os.getenv("CLAWLITE_SKILLS_WORKDIR", str(Path.home() / ".clawlite" / "workspace"))))
+            or ""
+        ).strip()
+        limit_raw = payload.get("limit", arguments.get("limit", 10))
+        limit = max(1, min(100, int(limit_raw or 10)))
+        query = str(payload.get("query", arguments.get("query", "")) or "").strip()
+        slug = str(payload.get("slug", arguments.get("slug", "")) or "").strip()
+
+        if action == "guide":
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "mode": "guide",
+                    "skill": spec_name,
+                    "backend": "npx clawhub@latest",
+                    "usage": "Set tool_arguments.action and provide action-specific fields in tool_arguments.",
+                    "available_actions": ["search", "install", "list", "update"],
+                    "defaults": {"workdir": workdir, "limit": limit},
+                    "examples": [
+                        {"action": "search", "tool_arguments": {"action": "search", "query": "github", "limit": 5}},
+                        {"action": "install", "tool_arguments": {"action": "install", "slug": "weather", "workdir": "~/.clawlite/workspace"}},
+                        {"action": "update", "tool_arguments": {"action": "update", "all": True, "workdir": "~/.clawlite/workspace"}},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        argv: list[str] = ["npx", "--yes", "clawhub@latest"]
+        if action == "search":
+            if not query:
+                raise ValueError("query is required for clawhub search")
+            argv.extend(["search", query, "--limit", str(limit)])
+        elif action == "install":
+            if not slug:
+                raise ValueError("slug is required for clawhub install")
+            argv.extend(["install", slug, "--workdir", workdir])
+        elif action == "list":
+            argv.extend(["list", "--workdir", workdir])
+        elif action == "update":
+            update_all = bool(payload.get("all", arguments.get("all", True)))
+            argv.append("update")
+            if update_all:
+                argv.append("--all")
+            argv.extend(["--workdir", workdir])
+        else:
+            raise ValueError("action must be one of: guide, search, install, list, update")
+
+        return await self._run_command_via_exec_tool(
+            spec_name=spec_name,
+            argv=argv,
+            timeout=timeout,
+            ctx=ctx,
+            env_overrides=env_overrides,
+        )
+
     @staticmethod
     def _notion_token(arguments: dict[str, Any], *, env_overrides: dict[str, str] | None = None) -> str:
         payload = SkillTool._skill_payload(arguments)
@@ -2441,6 +2521,14 @@ class SkillTool(Tool):
             )
         if script_name == "github":
             return await self._run_github(
+                arguments,
+                ctx,
+                spec_name=spec_name,
+                timeout=self._timeout_value(arguments),
+                env_overrides=env_overrides or {},
+            )
+        if script_name == "clawhub":
+            return await self._run_clawhub(
                 arguments,
                 ctx,
                 spec_name=spec_name,
