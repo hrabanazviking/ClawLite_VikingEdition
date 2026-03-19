@@ -2849,6 +2849,7 @@ def test_gateway_root_entrypoint_is_deterministic(tmp_path: Path) -> None:
         assert '"heartbeat_trigger": "/v1/control/heartbeat/trigger"' in body
         assert '"tools": "/api/tools/catalog"' in body
         assert '"ws": "/ws"' in body
+        assert 'value="dashboard:operator"' not in body
 
 
 def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
@@ -2896,6 +2897,12 @@ def test_gateway_dashboard_assets_are_served(tmp_path: Path) -> None:
     assert "triggerAutonomyWake" in js.text
     assert "triggerSupervisorRecovery" in js.text
     assert "hatch:operator" in js.text
+    assert 'const operatorStorageKey = "clawlite.dashboard.operatorId"' in js.text
+    assert 'const chatSessionStorageKey = "clawlite.dashboard.chatSessionId"' in js.text
+    assert "window.sessionStorage" in js.text
+    assert "window.localStorage.setItem(tokenStorageKey" not in js.text
+    assert "storageRemove(window.localStorage, tokenStorageKey);" in js.text
+    assert "dashboard:operator:" in js.text
     assert "scheduleAutoRefresh" in js.text
     assert "window.location.hash" in js.text
     assert "history.replaceState" in js.text

@@ -2,14 +2,88 @@ const bootstrap = window.__CLAWLITE_DASHBOARD_BOOTSTRAP__ || {};
 const auth = bootstrap.auth || {};
 const paths = bootstrap.paths || {};
 const tokenStorageKey = "clawlite.dashboard.token";
+const operatorStorageKey = "clawlite.dashboard.operatorId";
+const chatSessionStorageKey = "clawlite.dashboard.chatSessionId";
 const refreshStorageKey = "clawlite.dashboard.refreshMs";
 const defaultRefreshMs = 15000;
 const maxFeedEntries = 18;
 const HATCH_MESSAGE = "Wake up, my friend!";
 
+function storageGet(storage, key) {
+  try {
+    return String(storage && typeof storage.getItem === "function" ? storage.getItem(key) || "" : "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function storageSet(storage, key, value) {
+  try {
+    if (storage && typeof storage.setItem === "function") {
+      storage.setItem(key, String(value || ""));
+    }
+  } catch (_error) {
+    // Ignore browser storage failures and keep the dashboard usable.
+  }
+}
+
+function storageRemove(storage, key) {
+  try {
+    if (storage && typeof storage.removeItem === "function") {
+      storage.removeItem(key);
+    }
+  } catch (_error) {
+    // Ignore browser storage failures and keep the dashboard usable.
+  }
+}
+
+function storedDashboardToken() {
+  const current = storageGet(window.sessionStorage, tokenStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const legacy = storageGet(window.localStorage, tokenStorageKey).trim();
+  if (!legacy) {
+    return "";
+  }
+  storageSet(window.sessionStorage, tokenStorageKey, legacy);
+  storageRemove(window.localStorage, tokenStorageKey);
+  return legacy;
+}
+
+function createDashboardOperatorId() {
+  const randomId =
+    window.crypto && typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `dashboard:operator:${randomId}`;
+}
+
+function ensureDashboardOperatorId() {
+  const current = storageGet(window.sessionStorage, operatorStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const generated = createDashboardOperatorId();
+  storageSet(window.sessionStorage, operatorStorageKey, generated);
+  return generated;
+}
+
+function ensureChatSessionId(defaultSessionId) {
+  const current = storageGet(window.sessionStorage, chatSessionStorageKey).trim();
+  if (current) {
+    return current;
+  }
+  const fallback = String(defaultSessionId || "").trim();
+  if (fallback) {
+    storageSet(window.sessionStorage, chatSessionStorageKey, fallback);
+  }
+  return fallback;
+}
+
 const state = {
   activeTab: "overview",
-  token: window.localStorage.getItem(tokenStorageKey) || "",
+  token: storedDashboardToken(),
   autoRefreshMs: Number(window.localStorage.getItem(refreshStorageKey) || defaultRefreshMs),
   ws: null,
   wsState: "offline",
@@ -25,8 +99,10 @@ const state = {
   lastSyncAt: null,
   eventFeed: [],
   wsPreview: "Waiting for live websocket frames...",
-  sessionId: "dashboard:operator",
+  operatorId: ensureDashboardOperatorId(),
+  sessionId: "",
 };
+state.sessionId = ensureChatSessionId(state.operatorId) || state.operatorId;
 
 function byId(id) {
   return document.getElementById(id);
@@ -61,6 +137,26 @@ function buildWsUrl() {
     url.searchParams.set(auth.query_param || "token", state.token);
   }
   return url.toString();
+}
+
+function persistChatSession(nextSessionId) {
+  const sessionId = String(nextSessionId || "").trim() || state.operatorId;
+  state.sessionId = sessionId;
+  storageSet(window.sessionStorage, chatSessionStorageKey, sessionId);
+  return sessionId;
+}
+
+function currentChatSessionId(fallback = state.sessionId) {
+  const input = byId("session-input");
+  const typed = input && typeof input.value === "string" ? input.value.trim() : "";
+  return persistChatSession(typed || fallback || state.operatorId);
+}
+
+function buildDashboardChatPayload(sessionId, text) {
+  return {
+    session_id: sessionId,
+    text,
+  };
 }
 
 function setText(id, value) {
@@ -650,14 +746,14 @@ function renderHandoffGuidance() {
 }
 
 function useSession(sessionId) {
-  state.sessionId = sessionId;
+  const resolved = persistChatSession(sessionId);
   const input = byId("session-input");
   if (input) {
-    input.value = sessionId;
+    input.value = resolved;
   }
-  setText("metric-session-route", `chat -> ${sessionId}`);
+  setText("metric-session-route", `chat -> ${resolved}`);
   setActiveTab("chat");
-  recordEvent("ok", "Session selected", sessionId, "dashboard");
+  recordEvent("ok", "Session selected", resolved, "dashboard");
 }
 
 function renderSessions() {
@@ -694,7 +790,7 @@ function renderSessions() {
       useButton.className = "ghost-button";
       useButton.type = "button";
       useButton.textContent = "Use in chat";
-      useButton.addEventListener("click", () => useSession(String(item.session_id || "dashboard:operator")));
+      useButton.addEventListener("click", () => useSession(String(item.session_id || state.operatorId)));
       actions.appendChild(useButton);
 
       card.append(title, meta, subMeta, actions);
@@ -1369,9 +1465,11 @@ function connectWs() {
 function persistToken(nextToken) {
   state.token = nextToken.trim();
   if (state.token) {
-    window.localStorage.setItem(tokenStorageKey, state.token);
+    storageSet(window.sessionStorage, tokenStorageKey, state.token);
+    storageRemove(window.localStorage, tokenStorageKey);
   } else {
-    window.localStorage.removeItem(tokenStorageKey);
+    storageRemove(window.sessionStorage, tokenStorageKey);
+    storageRemove(window.localStorage, tokenStorageKey);
   }
 }
 
@@ -1394,7 +1492,7 @@ function bootstrapTokenFromUrl() {
 }
 
 async function sendHttpMessage() {
-  const sessionId = byId("session-input").value.trim() || state.sessionId;
+  const sessionId = currentChatSessionId();
   const text = byId("chat-input").value.trim();
   if (!text) {
     return;
@@ -1404,7 +1502,7 @@ async function sendHttpMessage() {
 }
 
 async function sendHttpMessageText(text, options = {}) {
-  const sessionId = String(options.sessionId || byId("session-input").value.trim() || state.sessionId || "dashboard:operator");
+  const sessionId = persistChatSession(String(options.sessionId || currentChatSessionId()));
   const source = String(options.source || "http");
   const cleanText = String(text || "").trim();
   if (!cleanText) {
@@ -1418,7 +1516,7 @@ async function sendHttpMessageText(text, options = {}) {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ session_id: sessionId, text: cleanText }),
+      body: JSON.stringify(buildDashboardChatPayload(sessionId, cleanText)),
     });
     appendChatEntry("assistant", String(payload.text || ""), String(payload.model || "http"));
     recordEvent("ok", "HTTP chat request completed", cleanText.slice(0, 80), `${source} | ${payload.model || "http"}`);
@@ -1429,7 +1527,7 @@ async function sendHttpMessageText(text, options = {}) {
 }
 
 function sendWsMessage() {
-  const sessionId = byId("session-input").value.trim() || state.sessionId;
+  const sessionId = currentChatSessionId();
   const text = byId("chat-input").value.trim();
   if (!text) {
     return;
@@ -1441,7 +1539,7 @@ function sendWsMessage() {
     recordEvent("warn", "WebSocket send blocked", "No live connection available.", sessionId);
     return;
   }
-  state.ws.send(JSON.stringify({ session_id: sessionId, text }));
+  state.ws.send(JSON.stringify(buildDashboardChatPayload(sessionId, text)));
   recordEvent("ok", "WebSocket chat request sent", sessionId, "queued");
 }
 
@@ -2088,7 +2186,14 @@ function bindEvents() {
   });
 
   byId("token-input").value = state.token;
-  byId("session-input").value = state.sessionId;
+  const sessionInput = byId("session-input");
+  sessionInput.value = state.sessionId;
+  setText("metric-session-route", `chat -> ${state.sessionId}`);
+  sessionInput.addEventListener("change", () => {
+    const sessionId = persistChatSession(sessionInput.value);
+    sessionInput.value = sessionId;
+    setText("metric-session-route", `chat -> ${sessionId}`);
+  });
 
   const refreshSelect = byId("refresh-interval");
   refreshSelect.value = String(state.autoRefreshMs);
@@ -2102,7 +2207,7 @@ function bindEvents() {
 
   byId("save-token").addEventListener("click", async () => {
     persistToken(byId("token-input").value);
-    recordEvent("ok", "Gateway token saved", state.token ? "Operator token stored in local browser storage." : "Token cleared.", "auth");
+    recordEvent("ok", "Gateway token saved", state.token ? "Operator token stored for the current browser tab." : "Token cleared.", "auth");
     connectWs();
     await refreshAll("token-save");
   });
