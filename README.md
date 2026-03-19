@@ -34,7 +34,7 @@
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/eobarretooo/ClawLite.git
+git clone https://github.com/hrabanazviking/ClawLite_VikingEdition.git
 cd ClawLite
 python3 -m venv .venv
 source .venv/bin/activate
@@ -62,7 +62,7 @@ Config profiles are also supported: `clawlite --config ./config.yaml --profile p
 **Android / Termux path:** use `proot-distro` with Ubuntu instead of trying to run the full stack directly on native Termux. The one-shot wrapper is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eobarretooo/ClawLite/main/scripts/install_termux_proot.sh | bash
+curl -fsSL https://github.com/hrabanazviking/ClawLite_VikingEdition/main/scripts/install_termux_proot.sh | bash
 ```
 
 If an older `/root/ClawLite` checkout inside Ubuntu has diverged from `origin/main`, the wrapper now preserves it as a timestamped backup and reclones cleanly instead of failing on `git pull --ff-only`.
@@ -614,23 +614,10 @@ clawlite supervisor recover --component heartbeat
 
 ClawLite draws ideas from two open-source agent runtimes:
 
-- **[openclaw](https://github.com/eobarretooo/openclaw)** — TypeScript agent runtime with the richest feature set; primary reference for channel adapters, tool interfaces, and operator dashboard design
-- **[nanobot](https://github.com/eobarretooo/nanobot)** — minimal Python agent; reference for clean core architecture and skill packaging
+- **[openclaw] — TypeScript agent runtime with the richest feature set; primary reference for channel adapters, tool interfaces, and operator dashboard design
+- **[nanobot] — minimal Python agent; reference for clean core architecture and skill packaging
 
 ClawLite is a Python-first reimplementation with a focus on local deployment, persistent memory, and production-grade channel support.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! To get started:
-
-1. Fork the repo and create a feature branch
-2. Follow the existing code style (ruff, typed Python 3.10+)
-3. Add tests for new functionality — we use TDD
-4. Open a PR with a clear description of what changed and why
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for full guidelines.
 
 ---
 
