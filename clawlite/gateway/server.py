@@ -1246,6 +1246,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "channels": channels_snapshot if isinstance(channels_snapshot, dict) else {},
             "supervisor": supervisor_snapshot if isinstance(supervisor_snapshot, dict) else {},
             "provider": provider_snapshot,
+            # Norse subsystem health for Norns/Huginn to reason over
+            "volva": _volva.status(),
+            "valkyrie": _valkyrie.status(),
+            "gjallarhorn": _gjallarhorn.status(),
         }
 
     async def _run_autonomy_tick(snapshot: dict[str, Any]) -> str:
@@ -1289,6 +1293,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             int(auto_status.get("consecutive_error_count", 0) or 0),
             str(auto_status.get("last_error", "") or ""),
         )
+        # Feed Völva status to Gjallarhorn for memory-maintenance failure alerts
+        _gjallarhorn.observe_volva(_volva.status())
         # Norns three-phase structured snapshot for better LLM reasoning
         from clawlite.core.norns import norns_autonomy_prompt as _norns_prompt
         snapshot_text = _norns_prompt(snapshot or {})
@@ -2650,27 +2656,45 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     # ── Runestone audit log ────────────────────────────────────────────────────
     import pathlib as _pathlib
-    _runestone_path = _pathlib.Path.home() / ".clawlite" / "runestone.jsonl"
-    _runestone_log = RunestoneLog(_runestone_path)
+    _vk = cfg.gateway.viking
+    _runestone_path = _pathlib.Path(
+        _vk.runestone_path or str(_pathlib.Path.home() / ".clawlite" / "runestone.jsonl")
+    ).expanduser()
+    _runestone_log = RunestoneLog(_runestone_path, max_file_bytes=_vk.runestone_max_file_bytes)
     set_runestone(_runestone_log)
     bind_event("runestone").info("ᚱ Runestone audit log opened: {}", _runestone_path)
+    # Wire Gjallarhorn as a Runestone post-append observer
+    def _runestone_to_gjallarhorn(record: Any) -> None:
+        _gjallarhorn.observe_runestone(record)
+    _runestone_log.set_on_append(_runestone_to_gjallarhorn)
+    # Configure channel rate limiter from VikingConfig
+    from clawlite.channels.base import _CHANNEL_RATE_LIMITER
+    _CHANNEL_RATE_LIMITER._rate = float(_vk.channel_rate_limit_messages)
+    _CHANNEL_RATE_LIMITER._per_s = float(_vk.channel_rate_limit_window_s)
 
     # ── Völva oracle ───────────────────────────────────────────────────────────
     _volva = VolvaOracle(
-        interval_s=float(getattr(getattr(cfg, "gateway", None) and cfg.gateway, "autonomy", None) and
-                         getattr(cfg.gateway.autonomy, "interval_s", 1800) or 1800),
+        interval_s=float(_vk.volva_interval_s),
+        stale_hours=float(_vk.volva_stale_hours),
+        consolidation_threshold=int(_vk.volva_consolidation_threshold),
     )
     _volva_task: asyncio.Task | None = None
 
     # ── Valkyrie session reaper ────────────────────────────────────────────────
-    _valkyrie = ValkyrieReaper(idle_days=7.0, dead_days=30.0)
+    _valkyrie = ValkyrieReaper(
+        idle_days=float(_vk.valkyrie_idle_days),
+        dead_days=float(_vk.valkyrie_dead_days),
+        interval_s=float(_vk.valkyrie_interval_s),
+    )
     _valkyrie_task: asyncio.Task | None = None
 
     # ── Gjallarhorn alert watch ────────────────────────────────────────────────
     _gjallarhorn = GjallarhornWatch(
-        channel_target=str(getattr(getattr(cfg, "gateway", None) and cfg.gateway, "alert_target", None) or ""),
-        block_threshold=5,
-        cooldown_s=600.0,
+        channel_target=str(_vk.gjallarhorn_alert_target or ""),
+        block_threshold=int(_vk.gjallarhorn_block_threshold),
+        block_window_s=float(_vk.gjallarhorn_block_window_s),
+        high_tick_threshold=int(_vk.gjallarhorn_high_tick_threshold),
+        cooldown_s=float(_vk.gjallarhorn_cooldown_s),
     )
 
     @asynccontextmanager

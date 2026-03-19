@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from clawlite.core.injection_guard import scan_inbound
-from clawlite.utils.logger import bind_event
+from clawlite.utils.logging import bind_event
 
 InboundHandler = Callable[[str, str, str, dict[str, Any]], Awaitable[None]]
 

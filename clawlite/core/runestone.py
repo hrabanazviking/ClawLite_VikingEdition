@@ -34,7 +34,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -113,9 +113,15 @@ class RunestoneLog:
         self._lock = threading.Lock()
         self._seq = 0
         self._prev_hash = _GENESIS_PREV
+        # Optional post-append callback (used by Gjallarhorn)
+        self._on_append: Callable[[RunestoneRecord], None] | None = None
 
         # Restore seq and prev_hash from existing file
         self._restore_state()
+
+    def set_on_append(self, cb: Callable[[RunestoneRecord], None]) -> None:
+        """Register a callback invoked after every successful append."""
+        self._on_append = cb
 
     def _restore_state(self) -> None:
         """Read existing file to restore seq counter and prev_hash chain."""
@@ -174,7 +180,13 @@ class RunestoneLog:
             self._write_line(json.dumps(rec_dict, ensure_ascii=False, sort_keys=False))
             self._seq += 1
             self._prev_hash = this_hash
-            return record
+        # Fire callback outside the lock — must not block the writer
+        if self._on_append is not None:
+            try:
+                self._on_append(record)
+            except Exception:
+                pass
+        return record
 
     def _write_line(self, line: str) -> None:
         """Write a single JSONL line, rotating if needed."""
