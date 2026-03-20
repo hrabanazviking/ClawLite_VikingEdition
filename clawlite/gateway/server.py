@@ -3624,6 +3624,8 @@ def run_gateway(
         port=resolved_port,
         access_log=False,
         log_level="warning",
+        ws_ping_interval=20,
+        ws_ping_timeout=60,
     )
 
 
